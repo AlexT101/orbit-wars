@@ -1,0 +1,5 @@
+name: Rust Bot
+description: "Python wrapper that delegates to a native Rust agent. Currently mirrors the nearest-sniper baseline exactly."
+author: Alex Thummalapalli
+license: "Apache 2.0"
+tags: [rust, native, baseline]
