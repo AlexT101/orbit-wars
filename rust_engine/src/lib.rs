@@ -314,6 +314,11 @@ struct EngineState {
     // vec is mutated (new / spawn_comets / remove_comets). NEVER read or
     // written elsewhere — keep mutation centralized so it can't drift.
     planet_index_by_id: HashMap<i64, usize>,
+    // Bumped whenever `initial_planets` changes (comet spawn / remove). Lets
+    // the PyO3 layer reuse a serialized `initial_planets` Python list across
+    // the many steps where it doesn't change, instead of rebuilding it every
+    // observation + snapshot.
+    initial_planets_version: u64,
 }
 
 impl EngineState {
@@ -364,6 +369,7 @@ impl EngineState {
             num_players,
             configuration,
             planet_index_by_id,
+            initial_planets_version: 0,
         }
     }
 
@@ -379,29 +385,54 @@ impl EngineState {
         self.planet_index_by_id.get(&planet_id).copied()
     }
 
-    fn observation_py(&self, py: Python<'_>, player: usize) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        dict.set_item("player", player)?;
-        dict.set_item("step", self.step)?;
-        dict.set_item("angular_velocity", self.angular_velocity)?;
-        dict.set_item(
-            "planets",
-            self.planets.iter().map(Planet::as_tuple).collect::<Vec<_>>(),
-        )?;
-        dict.set_item(
-            "initial_planets",
-            self.initial_planets
-                .iter()
-                .map(Planet::as_tuple)
-                .collect::<Vec<_>>(),
-        )?;
-        dict.set_item(
-            "fleets",
-            self.fleets.iter().map(Fleet::as_tuple).collect::<Vec<_>>(),
-        )?;
-        dict.set_item("comets", py_comets(py, &self.comets)?)?;
-        dict.set_item("comet_planet_ids", self.comet_planet_ids.clone())?;
-        Ok(dict.into_any().unbind())
+    /// Build the `num_players` observation dicts plus the snapshot dict for the
+    /// current state, sharing the heavy entity lists (`planets`, `fleets`,
+    /// `comets`, `comet_planet_ids`) across every dict instead of rebuilding
+    /// them per observation. `initial_obj` is the pre-built `initial_planets`
+    /// list, supplied by the caller so it can be cached across steps.
+    ///
+    /// Observations differ only by the `player` field; the snapshot adds the
+    /// engine-private fields. All values are byte-for-byte identical to what
+    /// the old per-observation `observation_py` / `snapshot_py` produced.
+    fn assemble<'py>(
+        &self,
+        py: Python<'py>,
+        initial_obj: &Bound<'py, PyAny>,
+    ) -> PyResult<(Vec<Py<PyAny>>, Py<PyAny>)> {
+        let planets_obj = PyList::new(py, self.planets.iter().map(Planet::as_tuple))?.into_any();
+        let fleets_obj = PyList::new(py, self.fleets.iter().map(Fleet::as_tuple))?.into_any();
+        let comets_obj = py_comets(py, &self.comets)?;
+        let comet_ids_obj = PyList::new(py, self.comet_planet_ids.iter().copied())?.into_any();
+
+        let mut observations = Vec::with_capacity(self.num_players);
+        for player in 0..self.num_players {
+            let dict = PyDict::new(py);
+            dict.set_item("player", player)?;
+            dict.set_item("step", self.step)?;
+            dict.set_item("angular_velocity", self.angular_velocity)?;
+            dict.set_item("planets", &planets_obj)?;
+            dict.set_item("initial_planets", initial_obj)?;
+            dict.set_item("fleets", &fleets_obj)?;
+            dict.set_item("comets", &comets_obj)?;
+            dict.set_item("comet_planet_ids", &comet_ids_obj)?;
+            observations.push(dict.into_any().unbind());
+        }
+
+        let snapshot = PyDict::new(py);
+        snapshot.set_item("step", self.step)?;
+        snapshot.set_item("angular_velocity", self.angular_velocity)?;
+        snapshot.set_item("planets", &planets_obj)?;
+        snapshot.set_item("initial_planets", initial_obj)?;
+        snapshot.set_item("fleets", &fleets_obj)?;
+        snapshot.set_item("next_fleet_id", self.next_fleet_id)?;
+        snapshot.set_item("comet_planet_ids", &comet_ids_obj)?;
+        snapshot.set_item("comets", &comets_obj)?;
+        snapshot.set_item("done", self.done)?;
+        snapshot.set_item("rewards", self.rewards.clone())?;
+        snapshot.set_item("seed", self.seed)?;
+        snapshot.set_item("configuration", configuration_to_py(py, &self.configuration)?)?;
+
+        Ok((observations, snapshot.into_any().unbind()))
     }
 
     fn snapshot_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -475,11 +506,11 @@ impl EngineState {
         // Orbital movement for non-comet planets. planets[i].id == initial_planets[i].id
         // is an invariant maintained by spawn_comets/remove_comets, so we can
         // index initial_planets by the same `i`.
-        let comet_id_count = self.comet_planet_ids.len();
+        // Membership set built once instead of an O(planets * comet_ids) scan
+        // inside the loop. Comet planets are handled separately below.
+        let comet_id_set: HashSet<i64> = self.comet_planet_ids.iter().copied().collect();
         for (idx, planet) in self.planets.iter().enumerate() {
-            let is_comet = comet_id_count > 0
-                && self.comet_planet_ids.contains(&planet.id);
-            if is_comet {
+            if comet_id_set.contains(&planet.id) {
                 continue;
             }
             let old_pos = (planet.x, planet.y);
@@ -538,7 +569,9 @@ impl EngineState {
         // per-fleet bool flag indexed by current fleet position.
         let fleet_count = self.fleets.len();
         let mut fleets_to_remove = vec![false; fleet_count];
-        let mut combat_lists: Vec<Vec<Fleet>> = vec![Vec::new(); planet_count];
+        // Combat only needs (owner, ships) per attacker, so store just those two
+        // ints rather than cloning the whole Fleet (id/pos/angle are unused here).
+        let mut combat_lists: Vec<Vec<(i64, i64)>> = vec![Vec::new(); planet_count];
         for (fleet_idx, fleet) in self.fleets.iter_mut().enumerate() {
             let old_pos = (fleet.x, fleet.y);
             let speed = fleet_speed(fleet.ships, self.configuration.ship_speed);
@@ -555,7 +588,7 @@ impl EngineState {
                     continue;
                 }
                 if swept_pair_hit(old_pos, new_pos, path.old_pos, path.new_pos, planet.radius) {
-                    combat_lists[planet_idx].push(fleet.clone());
+                    combat_lists[planet_idx].push((fleet.owner, fleet.ships));
                     fleets_to_remove[fleet_idx] = true;
                     hit_planet = true;
                     break;
@@ -595,9 +628,9 @@ impl EngineState {
             // Sum attacker ships per player into a fixed-size array. The
             // game caps num_players at 4, so no Vec/HashMap allocations.
             let mut player_ships = [0i64; MAX_PLAYERS];
-            for fleet in planet_fleets {
-                if fleet.owner >= 0 && (fleet.owner as usize) < MAX_PLAYERS {
-                    player_ships[fleet.owner as usize] += fleet.ships;
+            for &(owner, ships) in planet_fleets {
+                if owner >= 0 && (owner as usize) < MAX_PLAYERS {
+                    player_ships[owner as usize] += ships;
                 }
             }
 
@@ -698,6 +731,9 @@ impl EngineState {
     }
 
     fn expired_comet_ids(&self) -> Vec<i64> {
+        if self.comets.is_empty() {
+            return Vec::new();
+        }
         let mut expired = Vec::new();
         for group in &self.comets {
             let idx = group.path_index;
@@ -722,6 +758,7 @@ impl EngineState {
         }
         self.comets.retain(|group| !group.planet_ids.is_empty());
         self.rebuild_planet_index();
+        self.initial_planets_version = self.initial_planets_version.wrapping_add(1);
     }
 
     fn spawn_comets(&mut self) {
@@ -772,6 +809,7 @@ impl EngineState {
             self.initial_planets.push(planet);
         }
         self.comets.push(group);
+        self.initial_planets_version = self.initial_planets_version.wrapping_add(1);
     }
 
     fn process_moves(&mut self, player_id: i64, action: &[MoveAction]) {
@@ -877,12 +915,12 @@ fn fleet_speed(ships: i64, max_speed: f64) -> f64 {
     speed.min(max_speed)
 }
 
-fn py_comets(py: Python<'_>, comets: &[CometGroup]) -> PyResult<Py<PyAny>> {
+fn py_comets<'py>(py: Python<'py>, comets: &[CometGroup]) -> PyResult<Bound<'py, PyAny>> {
     let items = comets
         .iter()
         .map(|comet| comet.as_py(py))
         .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyList::new(py, items)?.into_any().unbind())
+    Ok(PyList::new(py, items)?.into_any())
 }
 
 fn configuration_to_py(py: Python<'_>, configuration: &Configuration) -> PyResult<Py<PyAny>> {
@@ -1344,13 +1382,58 @@ fn generate_comet_paths(
 #[pyclass]
 struct RustEngineCore {
     state: Option<EngineState>,
+    // Serialized `initial_planets` list cached across steps, tagged with the
+    // `initial_planets_version` it was built from. Reused on every step where
+    // the version is unchanged (i.e. no comet spawn/remove), which is the
+    // common case — only ~5 spawns occur per 500-step episode.
+    initial_planets_cache: Option<(u64, Py<PyAny>)>,
+}
+
+impl RustEngineCore {
+    /// Return the serialized `initial_planets` list, rebuilding it only when the
+    /// engine's `initial_planets_version` has advanced since the cached copy.
+    fn initial_planets_obj<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let version = self
+            .state
+            .as_ref()
+            .expect("state present")
+            .initial_planets_version;
+        let stale = match &self.initial_planets_cache {
+            Some((cached_version, _)) => *cached_version != version,
+            None => true,
+        };
+        if stale {
+            let state = self.state.as_ref().expect("state present");
+            let obj = PyList::new(py, state.initial_planets.iter().map(Planet::as_tuple))?
+                .into_any();
+            self.initial_planets_cache = Some((version, obj.unbind()));
+        }
+        Ok(self
+            .initial_planets_cache
+            .as_ref()
+            .expect("cache populated")
+            .1
+            .bind(py)
+            .clone())
+    }
+
+    /// Build the observation list + snapshot for the current state, reusing the
+    /// cached `initial_planets` list.
+    fn build_payload(&mut self, py: Python<'_>) -> PyResult<(Vec<Py<PyAny>>, Py<PyAny>)> {
+        let initial_obj = self.initial_planets_obj(py)?;
+        let state = self.state.as_ref().expect("state present");
+        state.assemble(py, &initial_obj)
+    }
 }
 
 #[pymethods]
 impl RustEngineCore {
     #[new]
     fn new() -> Self {
-        Self { state: None }
+        Self {
+            state: None,
+            initial_planets_cache: None,
+        }
     }
 
     #[pyo3(signature = (seed, num_players, configuration=None))]
@@ -1368,11 +1451,10 @@ impl RustEngineCore {
         }
         let configuration = configuration_from_py(configuration)?;
         let state = EngineState::new(seed, num_players, configuration);
-        let observations = (0..state.num_players)
-            .map(|player| state.observation_py(py, player))
-            .collect::<PyResult<Vec<_>>>()?;
-        let snapshot = state.snapshot_py(py)?;
         self.state = Some(state);
+        // New game: a stale cache from a prior game could collide on version 0.
+        self.initial_planets_cache = None;
+        let (observations, snapshot) = self.build_payload(py)?;
 
         let dict = PyDict::new(py);
         dict.set_item("observations", observations)?;
@@ -1387,17 +1469,16 @@ impl RustEngineCore {
             .ok_or_else(|| PyRuntimeError::new_err("call reset before step"))?
             .num_players;
         let parsed_actions = parse_py_actions(actions, num_players)?;
-        let state = self
-            .state
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("call reset before step"))?;
-        let done = state
-            .step_with_actions(&parsed_actions)
-            .map_err(PyRuntimeError::new_err)?;
-        let observations = (0..state.num_players)
-            .map(|player| state.observation_py(py, player))
-            .collect::<PyResult<Vec<_>>>()?;
-        let snapshot = state.snapshot_py(py)?;
+        let done = {
+            let state = self
+                .state
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("call reset before step"))?;
+            state
+                .step_with_actions(&parsed_actions)
+                .map_err(PyRuntimeError::new_err)?
+        };
+        let (observations, snapshot) = self.build_payload(py)?;
 
         let dict = PyDict::new(py);
         dict.set_item("observations", observations)?;
