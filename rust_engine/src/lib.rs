@@ -26,6 +26,42 @@ const MT_MATRIX_A: u32 = 0x9908_b0df;
 const MT_UPPER_MASK: u32 = 0x8000_0000;
 const MT_LOWER_MASK: u32 = 0x7fff_ffff;
 
+/// Per-section timing accumulators for `step_with_actions`, compiled in only
+/// under `--features profile`. Lets us see where simulation time actually goes
+/// (orbital math vs collision vs combat vs allocation/finalize) instead of
+/// guessing.
+#[cfg(feature = "profile")]
+pub mod prof {
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    pub const N: usize = 8;
+    pub const LABELS: [&str; N] = [
+        "expired+remove",
+        "spawn_comets",
+        "moves+prod",
+        "orbital",
+        "comet_move",
+        "fleet+collision",
+        "apply+combat",
+        "finalize",
+    ];
+
+    thread_local! {
+        static ACC: RefCell<[Duration; N]> = const { RefCell::new([Duration::ZERO; N]) };
+    }
+
+    pub fn add(idx: usize, d: Duration) {
+        ACC.with(|a| a.borrow_mut()[idx] += d);
+    }
+    pub fn reset() {
+        ACC.with(|a| *a.borrow_mut() = [Duration::ZERO; N]);
+    }
+    pub fn snapshot() -> [Duration; N] {
+        ACC.with(|a| *a.borrow())
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PyRandom {
     mt: [u32; MT_N],
@@ -475,14 +511,23 @@ impl EngineState {
                 actions.len()
             ));
         }
+        #[cfg(feature = "profile")]
+        let _p0 = std::time::Instant::now();
+
         let expired_prelaunch = self.expired_comet_ids();
         if !expired_prelaunch.is_empty() {
             self.remove_comets(&expired_prelaunch);
         }
 
+        #[cfg(feature = "profile")]
+        let _ps0 = std::time::Instant::now();
+
         if COMET_SPAWN_STEPS.contains(&(self.step + 1)) {
             self.spawn_comets();
         }
+
+        #[cfg(feature = "profile")]
+        let _ps1 = std::time::Instant::now();
 
         self.rewards = None;
         for (player_id, action) in actions.iter().enumerate() {
@@ -497,6 +542,9 @@ impl EngineState {
 
         let turn_step = self.step;
         let planet_count = self.planets.len();
+
+        #[cfg(feature = "profile")]
+        let _p1 = std::time::Instant::now();
 
         // Per-planet movement path, indexed by current planet position. We
         // build entries for every planet here; the fleet collision loop reads
@@ -534,6 +582,9 @@ impl EngineState {
             });
         }
 
+        #[cfg(feature = "profile")]
+        let _p2 = std::time::Instant::now();
+
         // Comet movement. Use planet_index_by_id to convert each comet's
         // planet id into a position in self.planets in O(1).
         let mut expired_postmove: Vec<i64> = Vec::new();
@@ -564,6 +615,9 @@ impl EngineState {
                 }
             }
         }
+
+        #[cfg(feature = "profile")]
+        let _p3 = std::time::Instant::now();
 
         // Fleet movement + collision detection. fleets_to_remove is a
         // per-fleet bool flag indexed by current fleet position.
@@ -608,6 +662,9 @@ impl EngineState {
                 continue;
             }
         }
+
+        #[cfg(feature = "profile")]
+        let _p4 = std::time::Instant::now();
 
         // Apply movement results to planets and resolve combat before any
         // planet-vec mutation, so combat_lists stays aligned with planet
@@ -687,6 +744,9 @@ impl EngineState {
             }
         }
 
+        #[cfg(feature = "profile")]
+        let _p5 = std::time::Instant::now();
+
         // Now that combat is resolved against the build-time planet indexing,
         // mutate the vecs.
         if !expired_postmove.is_empty() {
@@ -727,6 +787,20 @@ impl EngineState {
             self.done = false;
             self.step += 1;
         }
+
+        #[cfg(feature = "profile")]
+        {
+            let _p6 = std::time::Instant::now();
+            prof::add(0, _ps0 - _p0); // expired + remove
+            prof::add(1, _ps1 - _ps0); // spawn_comets
+            prof::add(2, _p1 - _ps1); // moves + production
+            prof::add(3, _p2 - _p1); // orbital
+            prof::add(4, _p3 - _p2); // comet_move
+            prof::add(5, _p4 - _p3); // fleet + collision
+            prof::add(6, _p5 - _p4); // apply + combat
+            prof::add(7, _p6 - _p5); // finalize
+        }
+
         Ok(self.done)
     }
 
@@ -1242,6 +1316,10 @@ fn generate_comet_paths(
         let semi_minor = semi_major * (1.0 - eccentricity * eccentricity).sqrt();
         let focus_c = semi_major * eccentricity;
         let phi = rng.uniform(PI / 6.0, PI / 3.0);
+        // phi is constant across the dense loop; computing cos/sin once is
+        // bit-identical to recomputing them per point (same pure function).
+        let phi_cos = phi.cos();
+        let phi_sin = phi.sin();
 
         let mut dense = Vec::with_capacity(5000);
         let num = 5000usize;
@@ -1249,8 +1327,8 @@ fn generate_comet_paths(
             let t = 0.3 * PI + 1.4 * PI * i as f64 / (num - 1) as f64;
             let ex = focus_c + semi_major * t.cos();
             let ey = semi_minor * t.sin();
-            let x = CENTER + ex * phi.cos() - ey * phi.sin();
-            let y = CENTER + ex * phi.sin() + ey * phi.cos();
+            let x = CENTER + ex * phi_cos - ey * phi_sin;
+            let y = CENTER + ex * phi_sin + ey * phi_cos;
             dense.push((x, y));
         }
 
@@ -1305,14 +1383,23 @@ fn generate_comet_paths(
         ];
 
         let mut static_planets = Vec::new();
-        let mut orbiting_planets = Vec::new();
+        // For orbiting planets, orb_r and init_angle depend only on the planet's
+        // (constant) initial position, not on the comet point. Precompute them
+        // once here instead of recomputing per comet point below. Computed
+        // exactly as the inner loop did (dx*dx form, not `distance`'s powi), so
+        // the resulting positions are bit-identical.
+        let mut orbiting_planets: Vec<(f64, f64, f64)> = Vec::new(); // (orb_r, init_angle, radius)
         for planet in initial_planets {
             if comet_pid_set.contains(&planet.id) {
                 continue;
             }
             let pr = distance((planet.x, planet.y), (CENTER, CENTER));
             if pr + planet.radius < ROTATION_RADIUS_LIMIT {
-                orbiting_planets.push(planet);
+                let dx = planet.x - CENTER;
+                let dy = planet.y - CENTER;
+                let orb_r = (dx * dx + dy * dy).sqrt();
+                let init_angle = dy.atan2(dx);
+                orbiting_planets.push((orb_r, init_angle, planet.radius));
             } else {
                 static_planets.push(planet);
             }
@@ -1349,16 +1436,12 @@ fn generate_comet_paths(
             }
 
             let game_step = spawn_step - 1 + k as i64;
-            for planet in &orbiting_planets {
-                let dx = planet.x - CENTER;
-                let dy = planet.y - CENTER;
-                let orb_r = (dx * dx + dy * dy).sqrt();
-                let init_angle = dy.atan2(dx);
+            for &(orb_r, init_angle, radius) in &orbiting_planets {
                 let cur_angle = init_angle + angular_velocity * game_step as f64;
                 let px = CENTER + orb_r * cur_angle.cos();
                 let py = CENTER + orb_r * cur_angle.sin();
                 for sp in sym_pts {
-                    if distance(sp, (px, py)) < planet.radius + COMET_RADIUS {
+                    if distance(sp, (px, py)) < radius + COMET_RADIUS {
                         valid = false;
                         break;
                     }
@@ -1505,6 +1588,133 @@ fn orbit_wars_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore] // run with: cargo test --release pure_sim_throughput -- --ignored --nocapture
+    fn pure_sim_throughput() {
+        let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
+        // Measure step_with_actions only (no PyO3); reset/regeneration excluded.
+        let mut state = EngineState::new(42, 2, Configuration::default());
+        let mut steps: u64 = 0;
+        let target: u64 = 2_000_000;
+        let mut seed = 42u64;
+        let mut sim_time = std::time::Duration::ZERO;
+        while steps < target {
+            let t = Instant::now();
+            let done = state.step_with_actions(&noop).unwrap();
+            sim_time += t.elapsed();
+            steps += 1;
+            if done {
+                seed += 1;
+                state = EngineState::new(seed, 2, Configuration::default());
+            }
+        }
+        let dt = sim_time.as_secs_f64();
+        println!(
+            "pure sim 2p: {steps} steps in {dt:.3}s -> {:.0} steps/s ({:.1} ns/step)",
+            steps as f64 / dt,
+            dt * 1e9 / steps as f64,
+        );
+    }
+
+    #[test]
+    #[ignore] // run with: cargo test --release pure_sim_with_fleets -- --ignored --nocapture
+    fn pure_sim_with_fleets() {
+        // Only the step itself is timed; action construction (fleet_actions)
+        // is excluded so we measure step_with_actions, not the test harness.
+        let mut state = EngineState::new(42, 2, Configuration::default());
+        let mut steps: u64 = 0;
+        let target: u64 = 2_000_000;
+        let mut seed = 42u64;
+        let mut max_fleets = 0usize;
+        let mut fleet_step_sum: u64 = 0;
+        let mut sim_time = std::time::Duration::ZERO;
+        while steps < target {
+            let actions = fleet_actions(&state);
+            let t = Instant::now();
+            let done = state.step_with_actions(&actions).unwrap();
+            sim_time += t.elapsed();
+            max_fleets = max_fleets.max(state.fleets.len());
+            fleet_step_sum += state.fleets.len() as u64;
+            steps += 1;
+            if done {
+                seed += 1;
+                state = EngineState::new(seed, 2, Configuration::default());
+            }
+        }
+        let dt = sim_time.as_secs_f64();
+        println!(
+            "pure sim 2p w/fleets: {steps} steps in {dt:.3}s -> {:.0} steps/s ({:.1} ns/step), avg_fleets={:.1}, max_fleets={max_fleets}",
+            steps as f64 / dt,
+            dt * 1e9 / steps as f64,
+            fleet_step_sum as f64 / steps as f64,
+        );
+    }
+
+    // Launch from every owned planet so fleets stay in flight, exercising the
+    // collision loop. Shared by the fleet throughput and profiling benchmarks.
+    #[cfg(test)]
+    fn fleet_actions(state: &EngineState) -> Vec<Vec<MoveAction>> {
+        let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); state.num_players];
+        for planet in &state.planets {
+            let owner = planet.owner;
+            if owner >= 0 && (owner as usize) < state.num_players && planet.ships >= 2 {
+                let angle = (planet.y - CENTER).atan2(planet.x - CENTER) + 0.3;
+                actions[owner as usize].push(MoveAction {
+                    from_id: planet.id,
+                    angle,
+                    ships: planet.ships / 2,
+                });
+            }
+        }
+        actions
+    }
+
+    #[test]
+    #[cfg(feature = "profile")]
+    // cargo test --release --features profile profile_sim_sections -- --ignored --nocapture
+    #[ignore]
+    fn profile_sim_sections() {
+        let mut state = EngineState::new(42, 2, Configuration::default());
+        let mut seed = 42u64;
+        // warmup
+        for _ in 0..2000 {
+            let acts = fleet_actions(&state);
+            if state.step_with_actions(&acts).unwrap() {
+                seed += 1;
+                state = EngineState::new(seed, 2, Configuration::default());
+            }
+        }
+        prof::reset();
+        let target: u64 = 1_000_000;
+        let mut steps: u64 = 0;
+        while steps < target {
+            let acts = fleet_actions(&state);
+            let done = state.step_with_actions(&acts).unwrap();
+            steps += 1;
+            if done {
+                seed += 1;
+                state = EngineState::new(seed, 2, Configuration::default());
+            }
+        }
+        let buckets = prof::snapshot();
+        let total: f64 = buckets.iter().map(|d| d.as_secs_f64()).sum();
+        println!("--- step_with_actions section profile ({steps} steps, 2p w/fleets) ---");
+        for (label, d) in prof::LABELS.iter().zip(buckets.iter()) {
+            let secs = d.as_secs_f64();
+            println!(
+                "  {label:<16} {:>7.1} ns/step  {:>5.1}%",
+                secs * 1e9 / steps as f64,
+                100.0 * secs / total,
+            );
+        }
+        println!(
+            "  {:<16} {:>7.1} ns/step  (sum of timed sections)",
+            "TOTAL",
+            total * 1e9 / steps as f64
+        );
+    }
 
     fn assert_close(a: f64, b: f64) {
         assert!(

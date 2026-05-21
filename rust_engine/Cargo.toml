@@ -8,6 +8,11 @@ description = "High-performance Orbit Wars engine for parity checks and RL rollo
 name = "orbit_wars_rust"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Enables cfg-gated per-section timers in `step_with_actions`. Zero cost when
+# off (the default). Used only by the `profile_sim_sections` test.
+profile = []
+
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
 sha2 = "0.10"
