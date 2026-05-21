@@ -1,0 +1,13 @@
+[package]
+name = "orbit_wars_rust"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance Orbit Wars engine for parity checks and RL rollouts"
+
+[lib]
+name = "orbit_wars_rust"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+sha2 = "0.10"
