@@ -1,5 +1,3 @@
-%%writefile submission.py
-
 import math
 import time
 from collections import defaultdict, namedtuple

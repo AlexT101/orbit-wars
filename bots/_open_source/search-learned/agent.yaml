@@ -1,9 +1,0 @@
-name: "LB 1000+ Search Learned Value Function"
-description: "Search-based agent that forward-simulates candidate moves and ranks terminal states with a learned gradient-boosted value function; packaged artifact falls back to heuristic scoring when the external tree dump dataset is absent."
-author: "unknown"
-kernel_slug: "unknown"
-kernel_version: unknown
-date_fetched: 2026-05-21
-license: "unknown"
-tags: [search, learned-value-function, gradient-boosting, minimax, heuristic]
-disabled: false
