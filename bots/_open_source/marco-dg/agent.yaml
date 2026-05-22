@@ -1,0 +1,9 @@
+name: "Marco DG Agent v3.3"
+description: "Public release Orbit Wars agent using Beam Search + Evolutionary/Data-Driven Agent (EDA). Notebook notes a top leaderboard score of 1060.5; Phase A precomputes graph and chain features, while Phase B runs per-step beam search over launch sequences."
+author: "Marco DG (marcodg)"
+kernel_slug: "unknown"
+kernel_version: "unknown"
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [beam-search, heuristic, search, benchmark]
+disabled: false

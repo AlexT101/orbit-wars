@@ -1,0 +1,9 @@
+name: "OW Proto"
+description: "Heuristic agent with a custom target-scoring formula, moving-planet interception, cooperative attacks, reinforcement timing, and sun/comet avoidance. Notebook notes report a peak leaderboard score around 1080 and stabilization around 1020-1050."
+author: "unknown"
+kernel_slug: unknown
+kernel_version: unknown
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [heuristic, scoring-formula, cooperative-attack, moving-planets, defense]
+disabled: false

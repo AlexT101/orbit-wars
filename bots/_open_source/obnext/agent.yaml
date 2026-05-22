@@ -1,0 +1,9 @@
+name: "OrbitBotNext"
+description: "Large heuristic search agent with predictive intercept routing, arrival-ledger simulation, multi-mission planning, reinforcement, defense, and late-game evacuation logic."
+author: "unknown"
+kernel_slug: "unknown"
+kernel_version: "unknown"
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [heuristic, search, simulation, benchmark]
+disabled: false

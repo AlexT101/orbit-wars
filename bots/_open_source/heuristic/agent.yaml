@@ -1,0 +1,9 @@
+name: "Heuristic Agent Scored 1000"
+description: "Single-file heuristic Orbit Wars agent with phase-based target selection, sun-safe intercept logic, decoy filtering, minimal multi-leg routing, and capture-window scoring bonuses. Source docstring says it scored above 1000 on the leaderboard."
+author: "unknown"
+kernel_slug: "unknown"
+kernel_version: "unknown"
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [heuristic, phase-based, interception, benchmark]
+disabled: false

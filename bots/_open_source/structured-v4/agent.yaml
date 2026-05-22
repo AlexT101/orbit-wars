@@ -1,0 +1,9 @@
+name: "V4 Heuristic Planner"
+description: "Single-file heuristic planner with predictive world simulation, moving-target interception, multi-source captures, proactive defense, and late-game total-war behavior."
+author: "unknown"
+kernel_slug: "unknown"
+kernel_version: unknown
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [heuristic, search, world-model, ffa, benchmark]
+disabled: false

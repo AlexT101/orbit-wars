@@ -1,0 +1,9 @@
+name: "LB 1200 PPO Strategy"
+description: "Single-file strategic agent built on pilkwang Structured Baseline v11 with six Hyperion-inspired modifications: tuned targeting constants, comet fallback detection, expanded elimination pressure, quick reinforcements, domination consolidation, and a late-aggression fleet ratio."
+author: "unknown"
+kernel_slug: unknown
+kernel_version: unknown
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [heuristic, planning, baseline-derived, benchmark]
+disabled: false

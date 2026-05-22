@@ -1,0 +1,9 @@
+name: "Sim + Value Search Agent"
+description: "Hybrid search agent with production-weighted defense, heuristic top-K target ranking, 20-tick forward simulation, cooperative attacks, moving-planet interception, and an optional gradient-boosted value model fallback."
+author: "unknown"
+kernel_slug: unknown
+kernel_version: unknown
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [heuristic, search, value-function, simulation, cooperative-attack, defense]
+disabled: false

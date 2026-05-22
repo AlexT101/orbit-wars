@@ -1,0 +1,9 @@
+name: "Smart Agent Baseline (1k)"
+description: "Heuristic baseline agent generated from the notebook submission cell. Uses timeline simulation, route planning, reserve-aware attack budgeting, rescue/recapture/reinforcement passes, and weakest-enemy gang-up targeting."
+author: "unknown"
+kernel_slug: unknown
+kernel_version: "unknown"
+date_fetched: 2026-05-21
+license: "unknown"
+tags: [heuristic, baseline, simulation, search]
+disabled: false
