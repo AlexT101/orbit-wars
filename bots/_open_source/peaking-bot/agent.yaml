@@ -1,0 +1,9 @@
+name: "Peaking Bot 1103"
+description: "Greedy adaptive Orbit Wars agent with a WorldModel, predicted interception for moving planets, dynamic target valuation, and mission-oriented planning. The notebook writeup says it peaked at 1103 on the leaderboard."
+author: "unknown"
+kernel_slug: "unknown"
+kernel_version: "unknown"
+date_fetched: 2026-05-22
+license: "unknown"
+tags: [heuristic, greedy, planning, benchmark]
+disabled: false
