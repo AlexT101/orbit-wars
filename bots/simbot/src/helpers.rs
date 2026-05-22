@@ -16,6 +16,9 @@ pub struct InitialPlanetPos {
     pub y: f64,
 }
 
+
+// ── Basic Helpers ────────────────────────────────────────────────────
+
 /// Euclidean distance between two points
 #[inline]
 pub fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
@@ -91,6 +94,45 @@ pub fn target_can_move(
         return false;
     };
     !is_static_planet(init.x, init.y, radius)
+}
+
+/// Counts distinct active players: every non-neutral planet owner plus every
+/// fleet owner. Floored at 2 since a match always has at least two players,
+/// even if one is currently wiped off the map but still has a fleet in flight.
+pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
+    let mut owners: HashSet<i64> = HashSet::new();
+    for p in planets {
+        if p.owner != -1 {
+            owners.insert(p.owner);
+        }
+    }
+    for f in fleets {
+        owners.insert(f.owner);
+    }
+    owners.len().max(2)
+}
+
+/// Shortest distance from `(px, py)` to the center of any planet in `set`.
+/// Returns `f64::INFINITY` for an empty set so callers can compare freely.
+pub fn nearest_distance_to_set(px: f64, py: f64, set: &[Planet]) -> f64 {
+    set.iter()
+        .map(|p| dist(px, py, p.x, p.y))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Returns `(planet, distance)` pairs sorted ascending by distance from
+/// `(tx, ty)`. NaN distances (shouldn't happen but be defensive) sort as
+/// equal to keep the sort total.
+pub fn sorted_by_distance_to(
+    planets: &[Planet],
+    tx: f64, ty: f64,
+) -> Vec<(Planet, f64)> {
+    let mut out: Vec<(Planet, f64)> = planets
+        .iter()
+        .map(|p| (p.clone(), dist(p.x, p.y, tx, ty)))
+        .collect();
+    out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// Calculate future planet position based on initial position, current angle, and angular velocity
@@ -194,6 +236,11 @@ pub fn planet_trajectory(
         .collect()
 }
 
+
+// ── Aiming Helpers ────────────────────────────────────────────────────────────
+// Solve for a shot that hits a (possibly moving) target.
+// Layered approach: distance estimators → sun-bypass sampling → verification → solvers.
+
 /// Calculates angle and travel distance between points
 /// Returns `None` if direct path blocked by sun
 pub fn safe_angle_and_distance(
@@ -240,14 +287,6 @@ pub fn estimate_arrival(
         estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships)?;
     let turns = (frac_turns.ceil() as i64).max(1);
     Some((angle, turns))
-}
-
-/// Forward-simulation scan window. `window = max(8, turns / 2)` provides
-/// enough headroom for slow (speed=1) fleets aimed at long intercepts to
-/// still have runway to confirm the hit.
-#[inline]
-pub fn fwd_window(turns: i64) -> i64 {
-    (turns / 2).max(8)
 }
 
 /// Sun-bypass chord sampling. When the direct path is blocked by the sun,
@@ -316,6 +355,14 @@ pub fn arc_safe_angle(
     best.map(|(_, angle, turns)| (angle, turns))
 }
 
+/// Forward-simulation scan window. `window = max(8, turns / 2)` provides
+/// enough headroom for slow (speed=1) fleets aimed at long intercepts to
+/// still have runway to confirm the hit.
+#[inline]
+pub fn fwd_window(turns: i64) -> i64 {
+    (turns / 2).max(8)
+}
+
 /// Ground-truth forward-sim. Returns `true` only if the fleet physically hits
 /// the target within the scan window. Used as a mandatory gate before any
 /// target intercept is accepted, helping eliminate false positives from
@@ -377,6 +424,73 @@ pub fn dynamic_tolerance(
     let orb_r = orbital_radius(init.x, init.y);
     let orb_speed = orb_r * angular_velocity.abs();
     if orb_speed >= 1.0 { 2 } else { 1 }
+}
+
+/// Iterative convergence solver. Calculates direct or sun-blocked trajectories
+/// by repeatedly refining the predicted intercept position. All results are
+/// UNVERIFIED — caller must verify via `verify_shot_hits`.
+#[allow(clippy::too_many_arguments)]
+pub fn aim_raw(
+    sx: f64, sy: f64, sr: f64,
+    target_id: i64,
+    tx: f64, ty: f64, tr: f64,
+    ships: i64,
+    initial_by_id: &HashMap<i64, InitialPlanetPos>,
+    angular_velocity: f64,
+    comets: &[CometGroup],
+    comet_ids: &HashSet<i64>,
+) -> Option<(f64, i64, f64, f64)> {
+    let tol = dynamic_tolerance(target_id, initial_by_id, angular_velocity, comet_ids);
+
+    let mut est = match estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships) {
+        Some(v) => v,
+        None => {
+            // Direct shot blocked by the sun — try a chord around it.
+            return arc_safe_angle(sx, sy, sr, tx, ty, tr, ships)
+                .map(|(a, t)| (a, t, tx, ty));
+        }
+    };
+
+    for _ in 0..FWD_ITER_MAX {
+        let (_, turns_f) = est;
+        let turns_i = turns_f.ceil() as i64;
+        let Some((ntx, nty)) = predict_target_position(
+            target_id, tx, ty, tr,
+            initial_by_id, angular_velocity,
+            comets, comet_ids, turns_i,
+        ) else {
+            return None;
+        };
+        let Some(next_est) = estimate_arrival_frac(sx, sy, sr, ntx, nty, tr, ships) else {
+            return arc_safe_angle(sx, sy, sr, ntx, nty, tr, ships)
+                .map(|(a, t)| (a, t, ntx, nty));
+        };
+        let (_, next_turns_f) = next_est;
+        if (next_turns_f - turns_f).abs() <= tol as f64 {
+            // Converged — return integer-turn result.
+            return match estimate_arrival(sx, sy, sr, ntx, nty, tr, ships) {
+                Some((a, t)) => Some((a, t, ntx, nty)),
+                None => arc_safe_angle(sx, sy, sr, ntx, nty, tr, ships)
+                    .map(|(a, t)| (a, t, ntx, nty)),
+            };
+        }
+        est = next_est;
+    }
+
+    // Fallthrough: best effort with the last predicted position.
+    let final_turns = est.1.ceil() as i64;
+    let Some((fpx, fpy)) = predict_target_position(
+        target_id, tx, ty, tr,
+        initial_by_id, angular_velocity,
+        comets, comet_ids, final_turns,
+    ) else {
+        return None;
+    };
+    match estimate_arrival(sx, sy, sr, fpx, fpy, tr, ships) {
+        Some((a, t)) => Some((a, t, fpx, fpy)),
+        None => arc_safe_angle(sx, sy, sr, fpx, fpy, tr, ships)
+            .map(|(a, t)| (a, t, fpx, fpy)),
+    }
 }
 
 /// Exhaustive scan: find the earliest valid intercept window. Every candidate
@@ -452,73 +566,6 @@ pub fn search_safe_intercept(
     None
 }
 
-/// Iterative convergence solver. Calculates direct or sun-blocked trajectories
-/// by repeatedly refining the predicted intercept position. All results are
-/// UNVERIFIED — caller must verify via `verify_shot_hits`.
-#[allow(clippy::too_many_arguments)]
-pub fn aim_raw(
-    sx: f64, sy: f64, sr: f64,
-    target_id: i64,
-    tx: f64, ty: f64, tr: f64,
-    ships: i64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    comets: &[CometGroup],
-    comet_ids: &HashSet<i64>,
-) -> Option<(f64, i64, f64, f64)> {
-    let tol = dynamic_tolerance(target_id, initial_by_id, angular_velocity, comet_ids);
-
-    let mut est = match estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships) {
-        Some(v) => v,
-        None => {
-            // Direct shot blocked by the sun — try a chord around it.
-            return arc_safe_angle(sx, sy, sr, tx, ty, tr, ships)
-                .map(|(a, t)| (a, t, tx, ty));
-        }
-    };
-
-    for _ in 0..FWD_ITER_MAX {
-        let (_, turns_f) = est;
-        let turns_i = turns_f.ceil() as i64;
-        let Some((ntx, nty)) = predict_target_position(
-            target_id, tx, ty, tr,
-            initial_by_id, angular_velocity,
-            comets, comet_ids, turns_i,
-        ) else {
-            return None;
-        };
-        let Some(next_est) = estimate_arrival_frac(sx, sy, sr, ntx, nty, tr, ships) else {
-            return arc_safe_angle(sx, sy, sr, ntx, nty, tr, ships)
-                .map(|(a, t)| (a, t, ntx, nty));
-        };
-        let (_, next_turns_f) = next_est;
-        if (next_turns_f - turns_f).abs() <= tol as f64 {
-            // Converged — return integer-turn result.
-            return match estimate_arrival(sx, sy, sr, ntx, nty, tr, ships) {
-                Some((a, t)) => Some((a, t, ntx, nty)),
-                None => arc_safe_angle(sx, sy, sr, ntx, nty, tr, ships)
-                    .map(|(a, t)| (a, t, ntx, nty)),
-            };
-        }
-        est = next_est;
-    }
-
-    // Fallthrough: best effort with the last predicted position.
-    let final_turns = est.1.ceil() as i64;
-    let Some((fpx, fpy)) = predict_target_position(
-        target_id, tx, ty, tr,
-        initial_by_id, angular_velocity,
-        comets, comet_ids, final_turns,
-    ) else {
-        return None;
-    };
-    match estimate_arrival(sx, sy, sr, fpx, fpy, tr, ships) {
-        Some((a, t)) => Some((a, t, fpx, fpy)),
-        None => arc_safe_angle(sx, sy, sr, fpx, fpy, tr, ships)
-            .map(|(a, t)| (a, t, fpx, fpy)),
-    }
-}
-
 /// Public solver. Returns `(angle, turns, target_x, target_y)` or `None`.
 ///
 /// Guarantee: every `Some` result is VERIFIED by `verify_shot_hits` before
@@ -562,6 +609,10 @@ pub fn aim_with_prediction(
         None,
     )
 }
+
+
+// ── Timeline Helpers ──────────────────────────────────────────────────────────
+// Forward simulation with initial timeline and hypothetical queries
 
 /// Per-planet arrival ledger: `{planet_id → [ArrivalEvent, ...]}`.
 /// Built once per turn via [`TimelineCache::build`].
@@ -1047,43 +1098,4 @@ pub fn reinforcement_needed_to_hold_until(
         }
     }
     lo
-}
-
-/// Counts distinct active players: every non-neutral planet owner plus every
-/// fleet owner. Floored at 2 since a match always has at least two players,
-/// even if one is currently wiped off the map but still has a fleet in flight.
-pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
-    let mut owners: HashSet<i64> = HashSet::new();
-    for p in planets {
-        if p.owner != -1 {
-            owners.insert(p.owner);
-        }
-    }
-    for f in fleets {
-        owners.insert(f.owner);
-    }
-    owners.len().max(2)
-}
-
-/// Shortest distance from `(px, py)` to the center of any planet in `set`.
-/// Returns `f64::INFINITY` for an empty set so callers can compare freely.
-pub fn nearest_distance_to_set(px: f64, py: f64, set: &[Planet]) -> f64 {
-    set.iter()
-        .map(|p| dist(px, py, p.x, p.y))
-        .fold(f64::INFINITY, f64::min)
-}
-
-/// Returns `(planet, distance)` pairs sorted ascending by distance from
-/// `(tx, ty)`. NaN distances (shouldn't happen but be defensive) sort as
-/// equal to keep the sort total.
-pub fn sorted_by_distance_to(
-    planets: &[Planet],
-    tx: f64, ty: f64,
-) -> Vec<(Planet, f64)> {
-    let mut out: Vec<(Planet, f64)> = planets
-        .iter()
-        .map(|p| (p.clone(), dist(p.x, p.y, tx, ty)))
-        .collect();
-    out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    out
 }
