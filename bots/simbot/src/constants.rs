@@ -5,14 +5,14 @@
 
 // Game rules
 pub const BOARD_SIZE: f64 = 100.0;
-pub const CENTER: f64 = BOARD_SIZE / 2.0;                           // Centre of board (also the sun / orbital centre).
+pub const CENTER: f64 = BOARD_SIZE / 2.0;                           // Center of board (also the sun / orbital center).
 pub const EPISODE_STEPS: i64 = 500;
 pub const MAX_PLAYERS: usize = 4;
 
 // Physics rules
 pub const SUN_RADIUS: f64 = 10.0;                                   // Radius of sun's destruction zone.
 pub const MAX_SHIP_SPEED: f64 = 6.0;                                // Maximum fleet speed (reached at ~1000 ships).
-pub const LAUNCH_CLEARANCE: f64 = 0.1;                              // Fleets spawn at `planet_radius + LAUNCH_CLEARANCE` from the planet centre.
+pub const LAUNCH_CLEARANCE: f64 = 0.1;                              // Fleets spawn at `planet_radius + LAUNCH_CLEARANCE` from the planet center.
 pub const ROTATION_LIMIT: f64 = 50.0;                               // `orbital_radius + planet_radius >= ROTATION_LIMIT` → planet is static.
 pub const COMET_RADIUS: f64 = 1.0;
 pub const COMET_PRODUCTION: i64 = 1;

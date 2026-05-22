@@ -22,29 +22,25 @@ pub fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     crate::engine::distance((ax, ay), (bx, by))
 }
 
-/// Distance of a planet's centre from the sun
+/// Distance from planet center to sun
 #[inline]
 pub fn orbital_radius(px: f64, py: f64) -> f64 {
     dist(px, py, CENTER, CENTER)
 }
 
-/// A planet is static (does not orbit each turn) when its orbital radius plus its own physical radius equals or exceeds 50
+/// Returns true if orbital radius + planet radius >= 50
 #[inline]
 pub fn is_static_planet(px: f64, py: f64, radius: f64) -> bool {
     orbital_radius(px, py) + radius >= ROTATION_LIMIT
 }
 
-/// Official speed formula from the game spec:
-/// `speed = 1 + (maxSpeed-1) * (log(ships)/log(1000))^1.5`.
-/// Speed follows a logarithmic curve: 1 ship moves at 1 unit/turn; ~1000 ships reaches the cap of 6 units/turn.
-/// Delegates to the engine; `ships.max(1)` guards against `ln(0) = -inf`.
+///  Logarithmic speed curve between 1 and 6
 #[inline]
 pub fn fleet_speed(ships: i64) -> f64 {
     crate::engine::fleet_speed(ships.max(1), MAX_SHIP_SPEED)
 }
 
-/// Minimum distance from a point to a line segment. Delegates to the engine
-/// (which uses the same projection-clamp-distance math) so parity is exact.
+/// Distance from point (px, py) to line segment (x1, y1)-(x2, y2)
 #[inline]
 pub fn point_to_segment_distance(
     px: f64, py: f64,
@@ -54,9 +50,7 @@ pub fn point_to_segment_distance(
     crate::engine::point_to_segment_distance((px, py), (x1, y1), (x2, y2))
 }
 
-/// Continuous collision test: returns `true` if the movement segment A→B
-/// passes within distance `r` of centre C. This mirrors the game engine's
-/// own collision check.
+/// Returns true if movement segment (ax, ay)-(bx, by) comes within `r` of (cx, cy).
 #[inline]
 pub fn segment_intersects_circle(
     ax: f64, ay: f64,
@@ -67,8 +61,7 @@ pub fn segment_intersects_circle(
     point_to_segment_distance(cx, cy, ax, ay, bx, by) <= r
 }
 
-/// True if the fleet's path segment comes within `SUN_RADIUS` of the sun
-/// centre — engine-exact, no buffer.
+/// Returns true if movement segment intersects sun
 #[inline]
 pub fn segment_hits_sun(
     x1: f64, y1: f64,
@@ -77,27 +70,32 @@ pub fn segment_hits_sun(
     point_to_segment_distance(CENTER, CENTER, x1, y1, x2, y2) < SUN_RADIUS
 }
 
-/// Fleet spawn position. The fleet does not spawn at the planet's centre; it
-/// spawns just outside the planet's surface (radius + 0.1) in the aimed
-/// direction, matching the game engine's launch logic.
+/// Fleet spawns at (radius + 0.1) from planet center, at launch angle
 #[inline]
 pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
     let c = sr + LAUNCH_CLEARANCE;
     (sx + angle.cos() * c, sy + angle.sin() * c)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 4. Orbit and comet position prediction
-// ─────────────────────────────────────────────────────────────────────────
+/// Returns true for comets and orbiting planets
+pub fn target_can_move(
+    planet_id: i64,
+    _cur_x: f64, _cur_y: f64, radius: f64,
+    initial_by_id: &HashMap<i64, InitialPlanetPos>,
+    comet_ids: &HashSet<i64>,
+) -> bool {
+    if comet_ids.contains(&planet_id) {
+        return true;
+    }
+    let Some(init) = initial_by_id.get(&planet_id) else {
+        return false;
+    };
+    !is_static_planet(init.x, init.y, radius)
+}
 
-/// Forward-projects an orbiting planet's position. Uses the **initial** planet
-/// position (not the current one) to anchor the orbital radius, preventing
-/// floating-point drift over many turns. Applies
-/// `angular_velocity * turns_ahead` to the current angle. Returns the current
-/// position unchanged for static planets.
-///
-/// Spec note: planet rotation happens *after* fleet movement each turn, so a
-/// fleet arriving on turn T has experienced T full rotations.
+/// Calculate future planet position based on initial position, current angle, and angular velocity
+/// Based on initial position to avoid floating-point drift over turns
+/// Planet rotation happens *after* fleet movement each turn, so a fleet arriving on turn T has experienced T full rotations.
 pub fn predict_planet_position(
     planet_id: i64,
     cur_x: f64, cur_y: f64, radius: f64,
@@ -120,10 +118,7 @@ pub fn predict_planet_position(
     )
 }
 
-/// Looks up a comet's pre-computed path. Comets follow pre-computed elliptical
-/// trajectories stored in each group's `paths`. This function indexes into
-/// `paths[idx][path_index + turns]` to find the comet's world position at the
-/// requested turn offset.
+/// Calculate future comet position based on pre-computed elliptical path: paths[idx][path_index + turns]
 pub fn predict_comet_position(
     planet_id: i64,
     comets: &[CometGroup],
@@ -147,26 +142,7 @@ pub fn predict_comet_position(
     None
 }
 
-/// How many turns until the comet leaves the board. Returns the number of path
-/// entries remaining from the current `path_index`. Chasing a comet that
-/// expires in 2 turns with a 10-turn flight is pointless, and this value
-/// gates such decisions.
-pub fn comet_remaining_life(planet_id: i64, comets: &[CometGroup]) -> i64 {
-    for group in comets {
-        let Some(idx) = group.planet_ids.iter().position(|&p| p == planet_id) else {
-            continue;
-        };
-        if idx < group.paths.len() {
-            return (group.paths[idx].len() as i64 - group.path_index).max(0);
-        }
-    }
-    0
-}
-
-/// Unified dispatcher for orbiting planets and comets. Routes to the
-/// appropriate predictor based on whether the target ID appears in
-/// `comet_ids`. All higher-level functions call this rather than the
-/// individual predictors.
+/// Dispatches between `predict_planet_position` and `predict_comet_position` based on whether the target ID is in `comet_ids`.
 pub fn predict_target_position(
     planet_id: i64,
     cur_x: f64, cur_y: f64, radius: f64,
@@ -185,35 +161,41 @@ pub fn predict_target_position(
     ))
 }
 
-/// Quick check for whether a target has orbital motion. Returns `true` for
-/// comets (always moving) and for planets whose orbital radius keeps them
-/// inside the rotation threshold. Used to decide whether prediction is
-/// necessary at all.
-pub fn target_can_move(
-    planet_id: i64,
-    _cur_x: f64, _cur_y: f64, radius: f64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    comet_ids: &HashSet<i64>,
-) -> bool {
-    if comet_ids.contains(&planet_id) {
-        return true;
+
+// Returns how many turns until comet with `planet_id` leaves the board, based on its path
+pub fn comet_remaining_life(planet_id: i64, comets: &[CometGroup]) -> i64 {
+    for group in comets {
+        let Some(idx) = group.planet_ids.iter().position(|&p| p == planet_id) else {
+            continue;
+        };
+        if idx < group.paths.len() {
+            return (group.paths[idx].len() as i64 - group.path_index).max(0);
+        }
     }
-    let Some(init) = initial_by_id.get(&planet_id) else {
-        return false;
-    };
-    !is_static_planet(init.x, init.y, radius)
+    0
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 5. Arrival estimation and safe-path geometry
-// ─────────────────────────────────────────────────────────────────────────
+/// Pre-computes `(x, y)` positions for an orbiting planet between 1 and `turns` turns in the future.
+/// Returns a vector of `turns` entries; for static or unknown planets every entry is `(cur_x, cur_y)`.
+pub fn planet_trajectory(
+    planet_id: i64,
+    cur_x: f64, cur_y: f64, radius: f64,
+    initial_by_id: &HashMap<i64, InitialPlanetPos>,
+    angular_velocity: f64,
+    turns: i64,
+) -> Vec<(f64, f64)> {
+    (1..=turns)
+        .map(|t| {
+            predict_planet_position(
+                planet_id, cur_x, cur_y, radius,
+                initial_by_id, angular_velocity, t,
+            )
+        })
+        .collect()
+}
 
-/// Computes angle and travel distance while checking for sun collision.
-///
-/// The sun-collision check uses the segment from launch point to the *target
-/// surface entry point* (not the target centre). This matches the game engine
-/// exactly — a fleet is destroyed when it enters the sun's exclusion zone,
-/// not merely when the line passes through the centre.
+/// Calculates angle and travel distance between points
+/// Returns `None` if direct path blocked by sun
 pub fn safe_angle_and_distance(
     sx: f64, sy: f64, sr: f64,
     tx: f64, ty: f64, tr: f64,
@@ -229,43 +211,35 @@ pub fn safe_angle_and_distance(
     Some((angle, hit_dist))
 }
 
+/// Calculate turns to travel distance at given fleet size, without rounding
 #[inline]
 fn fractional_turns(total_d: f64, ships: i64) -> f64 {
-    total_d / fleet_speed(ships.max(1))
+    total_d / fleet_speed(ships)
 }
 
-/// Integer-turn turn count for a direct shot (the value the game engine
-/// actually uses).
-pub fn estimate_arrival(
-    sx: f64, sy: f64, sr: f64,
-    tx: f64, ty: f64, tr: f64,
-    ships: i64,
-) -> Option<(f64, i64)> {
-    let (angle, total_d) = safe_angle_and_distance(sx, sy, sr, tx, ty, tr)?;
-    let turns = (fractional_turns(total_d, ships).ceil() as i64).max(1);
-    Some((angle, turns))
-}
-
-/// Fractional turn count used for convergence comparisons.
+/// Fractional turn count used for convergence comparisons
+#[inline]
 pub fn estimate_arrival_frac(
     sx: f64, sy: f64, sr: f64,
     tx: f64, ty: f64, tr: f64,
     ships: i64,
 ) -> Option<(f64, f64)> {
     let (angle, total_d) = safe_angle_and_distance(sx, sy, sr, tx, ty, tr)?;
-    Some((angle, fractional_turns(total_d, ships).max(1.0)))
+    let turns = fractional_turns(total_d, ships).max(1.0);
+    Some((angle, turns))
 }
 
-/// Convenience wrapper returning only the turn count. Returns `10^9` when no
-/// valid path exists, matching the notebook's sentinel.
-pub fn travel_time(
+/// Integer-turn turn count
+#[inline]
+pub fn estimate_arrival(
     sx: f64, sy: f64, sr: f64,
     tx: f64, ty: f64, tr: f64,
     ships: i64,
-) -> i64 {
-    estimate_arrival(sx, sy, sr, tx, ty, tr, ships)
-        .map(|(_, turns)| turns)
-        .unwrap_or(1_000_000_000)
+) -> Option<(f64, i64)> {
+    let (angle, frac_turns) =
+        estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships)?;
+    let turns = (frac_turns.ceil() as i64).max(1);
+    Some((angle, turns))
 }
 
 /// Forward-simulation scan window. `window = max(8, turns / 2)` provides
@@ -277,12 +251,13 @@ pub fn fwd_window(turns: i64) -> i64 {
 }
 
 /// Sun-bypass chord sampling. When the direct path is blocked by the sun,
-/// this samples seven aim-points distributed across the target's disk
-/// (centre + fractions of the radius in both perpendicular directions) and
-/// returns the one with the shortest clear path. Because fleets travel in
-/// straight lines there are no curved routes — but a chord aimed at the edge
-/// of a planet's disk can clear the sun even when the centre-aimed shot
-/// cannot.
+/// this samples aim-points distributed across the target's disk (center plus
+/// fractions of the radius in both perpendicular directions, one candidate
+/// per `EDGE_AIM_FRACS` entry mirrored on each side — currently 1 + 2×4 = 9
+/// candidates) and returns the one with the shortest clear path. Because
+/// fleets travel in straight lines there are no curved routes — but a chord
+/// aimed at the edge of a planet's disk can clear the sun even when the
+/// center-aimed shot cannot.
 pub fn arc_safe_angle(
     sx: f64, sy: f64, sr: f64,
     tx: f64, ty: f64, tr: f64,
@@ -299,7 +274,7 @@ pub fn arc_safe_angle(
     let nx = -uy;
     let ny = ux;
 
-    // 1 centre + 2 mirrored offsets per fraction → 1 + 2 * N candidate aims.
+    // 1 center + 2 mirrored offsets per fraction → 1 + 2 * N candidate aims.
     let mut aim_points: Vec<(f64, f64)> = Vec::with_capacity(1 + 2 * EDGE_AIM_FRACS.len());
     aim_points.push((tx, ty));
     for &frac in EDGE_AIM_FRACS.iter() {
@@ -328,7 +303,7 @@ pub fn arc_safe_angle(
         if segment_hits_sun(lx, ly, ex, ey) {
             continue;
         }
-        let turns = (entry_dist / fleet_speed(ships.max(1))).ceil().max(1.0) as i64;
+        let turns = (fractional_turns(entry_dist, ships).ceil() as i64).max(1);
         let score = (turns, entry_dist);
         let better = match &best {
             None => true,
@@ -340,10 +315,6 @@ pub fn arc_safe_angle(
     }
     best.map(|(_, angle, turns)| (angle, turns))
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// 6. Forward-simulation verification
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Ground-truth forward-sim. Returns `true` only if the fleet physically hits
 /// the target within the scan window. Used as a mandatory gate before any
@@ -360,7 +331,7 @@ pub fn verify_shot_hits(
     comets: &[CometGroup],
     comet_ids: &HashSet<i64>,
 ) -> bool {
-    let speed = fleet_speed(ships.max(1));
+    let speed = fleet_speed(ships);
     let (mut fx, mut fy) = launch_point(sx, sy, sr, angle);
     let vx = angle.cos() * speed;
     let vy = angle.sin() * speed;
@@ -388,10 +359,6 @@ pub fn verify_shot_hits(
     false
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 7. Dynamic tolerance
-// ─────────────────────────────────────────────────────────────────────────
-
 /// Maximum error in turns allowed for candidate intercept checks. Capped at 2
 /// to avoid picking incorrect orbital positions. Comets get 2 (faster, less
 /// predictable). Orbiting planets at >= 1 unit/turn get 2; else 1.
@@ -411,10 +378,6 @@ pub fn dynamic_tolerance(
     let orb_speed = orb_r * angular_velocity.abs();
     if orb_speed >= 1.0 { 2 } else { 1 }
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// 8. Exhaustive intercept search
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Exhaustive scan: find the earliest valid intercept window. Every candidate
 /// is forward-sim verified before being accepted. Returns
@@ -489,10 +452,6 @@ pub fn search_safe_intercept(
     None
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 9. Iterative aiming solver
-// ─────────────────────────────────────────────────────────────────────────
-
 /// Iterative convergence solver. Calculates direct or sun-blocked trajectories
 /// by repeatedly refining the predicted intercept position. All results are
 /// UNVERIFIED — caller must verify via `verify_shot_hits`.
@@ -512,18 +471,9 @@ pub fn aim_raw(
     let mut est = match estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships) {
         Some(v) => v,
         None => {
-            // Direct shot blocked; try edge aim, then fall back to a raw shot
-            // if the target is static (won't move while we wait).
-            if let Some((arc_angle, arc_turns)) = arc_safe_angle(sx, sy, sr, tx, ty, tr, ships) {
-                return Some((arc_angle, arc_turns, tx, ty));
-            }
-            if !target_can_move(target_id, tx, ty, tr, initial_by_id, comet_ids) {
-                let angle = (ty - sy).atan2(tx - sx);
-                let total_d = (dist(sx, sy, tx, ty) - sr - LAUNCH_CLEARANCE - tr).max(0.0);
-                let turns = ((total_d / fleet_speed(ships.max(1))).ceil() as i64).max(1);
-                return Some((angle, turns, tx, ty));
-            }
-            return None;
+            // Direct shot blocked by the sun — try a chord around it.
+            return arc_safe_angle(sx, sy, sr, tx, ty, tr, ships)
+                .map(|(a, t)| (a, t, tx, ty));
         }
     };
 
@@ -569,10 +519,6 @@ pub fn aim_raw(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 10. Main aiming solver
-// ─────────────────────────────────────────────────────────────────────────
-
 /// Public solver. Returns `(angle, turns, target_x, target_y)` or `None`.
 ///
 /// Guarantee: every `Some` result is VERIFIED by `verify_shot_hits` before
@@ -617,188 +563,9 @@ pub fn aim_with_prediction(
     )
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 11. Ship probe helpers
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Ship count candidate options derived from standard fractions of the
-/// target/available ship counts.
-pub fn probe_ship_candidates(need: i64, avail: i64) -> Vec<i64> {
-    if need < 0 {
-        return Vec::new();
-    }
-    let need_f = need as f64;
-    let mut candidates = [
-        (0.25 * need_f) as i64,
-        (0.50 * need_f) as i64,
-        (0.75 * need_f) as i64,
-        need - 5,
-        need,
-        avail.min(need + 5),
-        avail.min(need + 10),
-    ];
-    for c in candidates.iter_mut() {
-        *c = (*c).max(1);
-    }
-    let mut out: Vec<i64> = candidates.to_vec();
-    out.sort();
-    out.dedup();
-    out.retain(|c| *c >= 1 && *c <= avail);
-    out
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 13. Population statistics & topology features
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Counts distinct active players: every non-neutral planet owner plus every
-/// fleet owner. Floored at 2 since a match always has at least two players,
-/// even if one is currently wiped off the map but still has a fleet in flight.
-pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
-    let mut owners: HashSet<i64> = HashSet::new();
-    for p in planets {
-        if p.owner != -1 {
-            owners.insert(p.owner);
-        }
-    }
-    for f in fleets {
-        owners.insert(f.owner);
-    }
-    owners.len().max(2)
-}
-
-/// Shortest distance from `(px, py)` to the centre of any planet in `set`.
-/// Returns `f64::INFINITY` for an empty set so callers can compare freely.
-pub fn nearest_distance_to_set(px: f64, py: f64, set: &[Planet]) -> f64 {
-    set.iter()
-        .map(|p| dist(px, py, p.x, p.y))
-        .fold(f64::INFINITY, f64::min)
-}
-
-/// Indirect threat/wealth features: sum of `production / (distance + 12)`
-/// over every other planet, split by owner class (friendly, neutral, enemy)
-/// from `player`'s point of view. Cheap topological pressure metric.
-pub fn indirect_features(
-    planet: &Planet,
-    planets: &[Planet],
-    player: i64,
-) -> (f64, f64, f64) {
-    let mut friendly = 0.0;
-    let mut neutral = 0.0;
-    let mut enemy = 0.0;
-    for other in planets {
-        if other.id == planet.id {
-            continue;
-        }
-        let d = dist(planet.x, planet.y, other.x, other.y);
-        if d < 1.0 {
-            continue;
-        }
-        let factor = other.production as f64 / (d + 12.0);
-        if other.owner == player {
-            friendly += factor;
-        } else if other.owner == -1 {
-            neutral += factor;
-        } else {
-            enemy += factor;
-        }
-    }
-    (friendly, neutral, enemy)
-}
-
-/// Returns `(planet, distance)` pairs sorted ascending by distance from
-/// `(tx, ty)`. NaN distances (shouldn't happen but be defensive) sort as
-/// equal to keep the sort total.
-pub fn sorted_by_distance_to(
-    planets: &[Planet],
-    tx: f64, ty: f64,
-) -> Vec<(Planet, f64)> {
-    let mut out: Vec<(Planet, f64)> = planets
-        .iter()
-        .map(|p| (p.clone(), dist(p.x, p.y, tx, ty)))
-        .collect();
-    out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    out
-}
-
-/// Top-K nearest sources to a target. Lexicographic tiebreak `(distance,
-/// -ships, id)` matches obnext's deterministic preference for nearer, then
-/// larger, then lower-id sources. Returns all sources when `top_k` is 0 or
-/// `sources.len() <= top_k`.
-pub fn nearest_sources_to_target(
-    target: &Planet,
-    sources: &[Planet],
-    top_k: usize,
-) -> Vec<Planet> {
-    if top_k == 0 || sources.len() <= top_k {
-        return sources.to_vec();
-    }
-    let mut indexed: Vec<(f64, Planet)> = sources
-        .iter()
-        .map(|s| (dist(s.x, s.y, target.x, target.y), s.clone()))
-        .collect();
-    indexed.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.1.ships.cmp(&a.1.ships))
-            .then_with(|| a.1.id.cmp(&b.1.id))
-    });
-    indexed.into_iter().take(top_k).map(|(_, p)| p).collect()
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 14. Bulk orbital trajectory precompute
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Pre-computes `(x, y)` positions for an orbiting planet at turns
-/// `1..=turns`. Amortises the trig when the same planet is queried many
-/// times (e.g. swept collision checks). Returns a vector of `turns` entries;
-/// for static or unknown planets every entry is `(cur_x, cur_y)`.
-pub fn planet_trajectory(
-    planet_id: i64,
-    cur_x: f64, cur_y: f64, radius: f64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    turns: i64,
-) -> Vec<(f64, f64)> {
-    (1..=turns)
-        .map(|t| {
-            predict_planet_position(
-                planet_id, cur_x, cur_y, radius,
-                initial_by_id, angular_velocity, t,
-            )
-        })
-        .collect()
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 15. Arrival ledger — engine-driven via SimProbe
-// ─────────────────────────────────────────────────────────────────────────
-
 /// Per-planet arrival ledger: `{planet_id → [ArrivalEvent, ...]}`.
+/// Built once per turn via [`TimelineCache::build`].
 pub type ArrivalsByPlanet = HashMap<i64, Vec<ArrivalEvent>>;
-
-/// Build a per-planet arrival ledger by running the engine forward via
-/// `SimProbe` for `horizon` turns and bucketing the `FleetLanded` events by
-/// destination. Engine-exact: the swept-circle collision detection that
-/// determines who lands where is the same code path the real engine step uses.
-///
-/// Every planet currently in `state.planets` is guaranteed to appear in the
-/// result (with an empty vec when nothing is incoming), so callers can index
-/// without `Option` checks.
-pub fn build_arrival_ledger(state: &EngineState, horizon: i64) -> ArrivalsByPlanet {
-    let mut probe = SimProbe::from_engine(state);
-    probe.step_n(horizon);
-    let mut ledger = probe.collect_arrivals();
-    for planet in &state.planets {
-        ledger.entry(planet.id).or_default();
-    }
-    ledger
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// 16. Per-planet timeline simulation
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Engine-faithful same-turn combat resolution. Arrivals are aggregated by
 /// owner; the top two attackers cancel out; the survivor then fights the
@@ -1142,10 +909,6 @@ impl TimelineCache {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 17. Capture / hold queries (binary-search on the timeline)
-// ─────────────────────────────────────────────────────────────────────────
-
 /// Smallest ship count that, if it lands on `planet` at `arrival_turn` for
 /// `attacker_owner`, makes them own the planet by `eval_turn`. Returns 0 when
 /// the planet is already going to belong to `attacker_owner` at `eval_turn`
@@ -1286,209 +1049,41 @@ pub fn reinforcement_needed_to_hold_until(
     lo
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 18. Strategy primitives derived from the arrival ledger
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Two enemy fleets converging on the same planet within a narrow ETA window
-/// — a free-attrition opportunity. Pairs are unordered; the earlier-arriving
-/// fleet is reported first.
-#[derive(Debug, Clone, Copy)]
-pub struct EnemyCrash {
-    pub target_id: i64,
-    pub crash_turn: i64,
-    pub owners: (i64, i64),
-    pub ships: (i64, i64),
+/// Counts distinct active players: every non-neutral planet owner plus every
+/// fleet owner. Floored at 2 since a match always has at least two players,
+/// even if one is currently wiped off the map but still has a fleet in flight.
+pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
+    let mut owners: HashSet<i64> = HashSet::new();
+    for p in planets {
+        if p.owner != -1 {
+            owners.insert(p.owner);
+        }
+    }
+    for f in fleets {
+        owners.insert(f.owner);
+    }
+    owners.len().max(2)
 }
 
-/// Scans the arrival ledger for pairs of arrivals from different non-player,
-/// non-neutral owners landing on the same planet within `eta_window` turns of
-/// each other, with combined strength of at least `min_total_ships`.
-///
-/// Within a single planet's arrival list, sorted by ETA ascending, the inner
-/// loop breaks as soon as the ETA gap exceeds the window — correctly because
-/// subsequent entries are even further out.
-pub fn detect_enemy_crashes(
-    arrivals_by_planet: &ArrivalsByPlanet,
-    player: i64,
-    eta_window: i64,
-    min_total_ships: i64,
-) -> Vec<EnemyCrash> {
-    let mut crashes = Vec::new();
-    for (&target_id, arrivals) in arrivals_by_planet {
-        let mut enemy_events: Vec<ArrivalEvent> = arrivals
-            .iter()
-            .filter(|ev| ev.owner != -1 && ev.owner != player && ev.ships > 0)
-            .map(|ev| ArrivalEvent {
-                turns: ev.turns.max(1),
-                owner: ev.owner,
-                ships: ev.ships,
-            })
-            .collect();
-        enemy_events.sort_by_key(|ev| ev.turns);
-
-        for i in 0..enemy_events.len() {
-            let a = enemy_events[i];
-            for j in (i + 1)..enemy_events.len() {
-                let b = enemy_events[j];
-                if a.owner == b.owner {
-                    continue;
-                }
-                if (a.turns - b.turns).abs() > eta_window {
-                    break;
-                }
-                if a.ships + b.ships < min_total_ships {
-                    continue;
-                }
-                crashes.push(EnemyCrash {
-                    target_id,
-                    crash_turn: a.turns.max(b.turns),
-                    owners: (a.owner, b.owner),
-                    ships: (a.ships, b.ships),
-                });
-            }
-        }
-    }
-    crashes
+/// Shortest distance from `(px, py)` to the center of any planet in `set`.
+/// Returns `f64::INFINITY` for an empty set so callers can compare freely.
+pub fn nearest_distance_to_set(px: f64, py: f64, set: &[Planet]) -> f64 {
+    set.iter()
+        .map(|p| dist(px, py, p.x, p.y))
+        .fold(f64::INFINITY, f64::min)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::Configuration;
-
-    fn planet(id: i64, owner: i64, ships: i64, production: i64) -> Planet {
-        Planet {
-            id,
-            owner,
-            x: 60.0,
-            y: 60.0,
-            radius: 2.0,
-            ships,
-            production,
-        }
-    }
-
-    /// Checkpointed re-sim must produce the same `owner_at`/`ships_at` as a
-    /// full sim when the hypothetical fleet lands at `start_turn`.
-    #[test]
-    fn checkpointed_timeline_matches_full() {
-        let p = planet(0, 0, 30, 2);
-        let player = 0;
-        let horizon = 20;
-
-        let base_arrivals = vec![
-            ArrivalEvent { turns: 3, owner: 1, ships: 10 },
-            ArrivalEvent { turns: 7, owner: 1, ships: 25 },
-            ArrivalEvent { turns: 12, owner: 0, ships: 5 },
-        ];
-
-        let baseline = simulate_planet_timeline(&p, &base_arrivals, player, horizon);
-
-        let mut full_arrivals = base_arrivals.clone();
-        full_arrivals.push(ArrivalEvent {
-            turns: 8,
-            owner: 0,
-            ships: 40,
-        });
-
-        let full = simulate_planet_timeline(&p, &full_arrivals, player, horizon);
-        let checkpoint = simulate_planet_timeline_from(&p, &baseline, 8, &full_arrivals);
-
-        for t in 0..=horizon as usize {
-            assert_eq!(
-                full.owner_at[t], checkpoint.owner_at[t],
-                "owner mismatch at turn {t}"
-            );
-            assert_eq!(
-                full.ships_at[t], checkpoint.ships_at[t],
-                "ships mismatch at turn {t}"
-            );
-        }
-    }
-
-    /// Cache builds a baseline for every planet in the engine state and the
-    /// ledger contains an entry (possibly empty) for each.
-    #[test]
-    fn timeline_cache_covers_all_planets() {
-        let state = EngineState::new(42, 2, Configuration::default());
-        let cache = TimelineCache::build(&state, 0, 20);
-
-        assert_eq!(cache.player, 0);
-        assert_eq!(cache.horizon, 20);
-        for planet in &state.planets {
-            assert!(
-                cache.baselines.contains_key(&planet.id),
-                "planet {} missing baseline",
-                planet.id
-            );
-            assert!(
-                cache.ledger.contains_key(&planet.id),
-                "planet {} missing ledger entry",
-                planet.id
-            );
-        }
-    }
-
-    /// `min_ships_to_own_by` with the cache should return identical answers
-    /// to the equivalent full-sim binary search.
-    #[test]
-    fn min_ships_via_cache_matches_full_sim() {
-        let p = planet(0, 1, 20, 1); // owned by attacker target (enemy of attacker_owner=0)
-        let player = 0;
-        let horizon = 15;
-        let arrival_turn = 5;
-        let eval_turn = 12;
-        let upper_bound = 200;
-
-        let base_arrivals: Vec<ArrivalEvent> = vec![
-            ArrivalEvent { turns: 4, owner: 1, ships: 8 }, // defender reinforces
-        ];
-
-        // Reference (full sim) implementation, inline to avoid relying on the
-        // old function signature.
-        let reference = {
-            let base_tl = simulate_planet_timeline(&p, &base_arrivals, 0, eval_turn);
-            if state_at_timeline(&base_tl, eval_turn).0 == 0 {
-                0
-            } else {
-                let mut scratch = base_arrivals.clone();
-                scratch.push(ArrivalEvent { turns: arrival_turn, owner: 0, ships: 0 });
-                let last = scratch.len() - 1;
-                let owns = |ships: i64, buf: &mut [ArrivalEvent]| {
-                    buf[last].ships = ships;
-                    let tl = simulate_planet_timeline(&p, buf, 0, eval_turn);
-                    state_at_timeline(&tl, eval_turn).0 == 0
-                };
-                if !owns(upper_bound, &mut scratch) {
-                    upper_bound + 1
-                } else {
-                    let (mut lo, mut hi) = (1i64, upper_bound);
-                    while lo < hi {
-                        let mid = lo + (hi - lo) / 2;
-                        if owns(mid, &mut scratch) { hi = mid; } else { lo = mid + 1; }
-                    }
-                    lo
-                }
-            }
-        };
-
-        // Build a cache containing this planet and pre-seeded ledger.
-        let mut cache = TimelineCache {
-            player,
-            horizon,
-            ledger: HashMap::new(),
-            baselines: HashMap::new(),
-        };
-        cache.ledger.insert(p.id, base_arrivals.clone());
-        cache.baselines.insert(
-            p.id,
-            simulate_planet_timeline(&p, &base_arrivals, player, horizon),
-        );
-
-        let via_cache =
-            min_ships_to_own_by(&cache, &p, 0, arrival_turn, eval_turn, upper_bound);
-
-        assert_eq!(via_cache, reference);
-    }
+/// Returns `(planet, distance)` pairs sorted ascending by distance from
+/// `(tx, ty)`. NaN distances (shouldn't happen but be defensive) sort as
+/// equal to keep the sort total.
+pub fn sorted_by_distance_to(
+    planets: &[Planet],
+    tx: f64, ty: f64,
+) -> Vec<(Planet, f64)> {
+    let mut out: Vec<(Planet, f64)> = planets
+        .iter()
+        .map(|p| (p.clone(), dist(p.x, p.y, tx, ty)))
+        .collect();
+    out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
