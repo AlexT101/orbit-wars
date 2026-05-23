@@ -47,6 +47,7 @@ must carry a precompiled Linux `.so`. `build_submission.py` cross-builds one in
 the official manylinux Docker image, extracts it, and bundles it with `main.py`:
 
 ```powershell
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 python bots/simbot/build_submission.py
 kaggle competitions submit orbit-wars -f bots/simbot/submission.tar.gz -m "simbot v1"
 ```
