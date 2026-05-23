@@ -514,14 +514,24 @@ pub struct PlanetTimeline {
 /// Applies production each turn (only while owned), then resolves the
 /// arrivals landing that turn via `resolve_arrival_event`. Records the
 /// owner/ship trajectory plus several queryable summaries.
+///
+/// `expiry_turn`, when set, is the turn at which the planet leaves the board
+/// (typically `EntityCache::remaining_life` for a comet). Turns at or past
+/// expiry are recorded as ownerless with zero ships — no production, no
+/// arrival processing — so callers don't credit phantom garrisons.
 pub fn simulate_planet_timeline(
     planet: &Planet,
     arrivals: &[ArrivalEvent],
     player: i64,
     horizon: i64,
+    expiry_turn: Option<i64>,
 ) -> PlanetTimeline {
     let horizon = horizon.max(0);
-    let events = normalize_arrivals(arrivals, horizon);
+    let effective_horizon = match expiry_turn {
+        Some(exp) => horizon.min((exp - 1).max(0)),
+        None => horizon,
+    };
+    let events = normalize_arrivals(arrivals, effective_horizon);
 
     let len = (horizon + 1) as usize;
     let mut by_turn: Vec<Vec<ArrivalEvent>> = vec![Vec::new(); len];
@@ -537,7 +547,7 @@ pub fn simulate_planet_timeline(
     let mut first_enemy: Option<i64> = None;
     let mut fall_turn: Option<i64> = None;
 
-    for turn in 1..=horizon {
+    for turn in 1..=effective_horizon {
         if owner != -1 {
             garrison += planet.production;
         }
@@ -564,6 +574,12 @@ pub fn simulate_planet_timeline(
         }
     }
 
+    // Past expiry the planet doesn't exist: no owner, no ships.
+    for turn in (effective_horizon + 1)..=horizon {
+        owner_at[turn as usize] = -1;
+        ships_at[turn as usize] = 0;
+    }
+
     // keep_needed: smallest starting garrison that survives every arrival.
     let mut keep_needed: i64 = 0;
     let mut holds_full = true;
@@ -571,7 +587,7 @@ pub fn simulate_planet_timeline(
         let survives = |keep: i64| -> bool {
             let mut sim_owner = planet.owner;
             let mut sim_garrison = keep;
-            for turn in 1..=horizon {
+            for turn in 1..=effective_horizon {
                 if sim_owner != -1 {
                     sim_garrison += planet.production;
                 }
@@ -649,12 +665,17 @@ pub fn simulate_planet_timeline_from(
     baseline: &PlanetTimeline,
     start_turn: i64,
     arrivals: &[ArrivalEvent],
+    expiry_turn: Option<i64>,
 ) -> PlanetTimeline {
     let horizon = baseline.horizon;
     let start_turn = start_turn.clamp(1, horizon.max(1));
+    let effective_horizon = match expiry_turn {
+        Some(exp) => horizon.min((exp - 1).max(0)),
+        None => horizon,
+    };
     let len = (horizon + 1) as usize;
 
-    let events = normalize_arrivals(arrivals, horizon);
+    let events = normalize_arrivals(arrivals, effective_horizon);
     let mut by_turn: Vec<Vec<ArrivalEvent>> = vec![Vec::new(); len];
     for ev in &events {
         if ev.turns >= start_turn {
@@ -670,7 +691,7 @@ pub fn simulate_planet_timeline_from(
     let mut owner = owner_at[checkpoint_idx];
     let mut garrison = ships_at[checkpoint_idx];
 
-    for turn in start_turn..=horizon {
+    for turn in start_turn..=effective_horizon {
         if owner != -1 {
             garrison += planet.production;
         }
@@ -682,6 +703,12 @@ pub fn simulate_planet_timeline_from(
         }
         owner_at[turn as usize] = owner;
         ships_at[turn as usize] = garrison.max(0);
+    }
+
+    // Past expiry the planet doesn't exist.
+    for turn in (effective_horizon + 1).max(start_turn)..=horizon {
+        owner_at[turn as usize] = -1;
+        ships_at[turn as usize] = 0;
     }
 
     PlanetTimeline {
@@ -710,13 +737,23 @@ pub struct TimelineCache {
     pub horizon: i64,
     pub ledger: ArrivalsByPlanet,
     pub baselines: HashMap<i64, PlanetTimeline>,
+    /// Turn at which a planet leaves the board, populated only for planets
+    /// that expire within `horizon` (i.e. comets near end of life). Missing
+    /// entry means the planet survives the entire window.
+    pub expiry_at: HashMap<i64, i64>,
 }
 
 impl TimelineCache {
     /// Build the cache from a single SimProbe rollout. `O(horizon * |planets|)`
     /// total: one rollout for the ledger, plus one per-planet timeline sim
-    /// each (each `O(horizon)`).
-    pub fn build(state: &EngineState, player: i64, horizon: i64) -> Self {
+    /// each (each `O(horizon)`). The entity cache supplies per-planet expiry
+    /// so comet timelines stop producing ships once the comet exits the board.
+    pub fn build(
+        state: &EngineState,
+        player: i64,
+        horizon: i64,
+        entity_cache: &EntityCache,
+    ) -> Self {
         let mut probe = SimProbe::from_engine(state);
         probe.step_n(horizon);
         let mut ledger = probe.collect_arrivals();
@@ -725,14 +762,19 @@ impl TimelineCache {
         }
 
         let mut baselines = HashMap::with_capacity(state.planets.len());
+        let mut expiry_at: HashMap<i64, i64> = HashMap::new();
         for planet in &state.planets {
             let arrivals = ledger
                 .get(&planet.id)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
+            let expiry = expiry_within_horizon(entity_cache, planet.id, horizon);
+            if let Some(exp) = expiry {
+                expiry_at.insert(planet.id, exp);
+            }
             baselines.insert(
                 planet.id,
-                simulate_planet_timeline(planet, arrivals, player, horizon),
+                simulate_planet_timeline(planet, arrivals, player, horizon, expiry),
             );
         }
 
@@ -741,6 +783,7 @@ impl TimelineCache {
             horizon,
             ledger,
             baselines,
+            expiry_at,
         }
     }
 
@@ -758,6 +801,23 @@ impl TimelineCache {
     pub fn baseline(&self, planet_id: i64) -> Option<&PlanetTimeline> {
         self.baselines.get(&planet_id)
     }
+
+    /// Turn at which a planet leaves the board, if within the cache's horizon.
+    #[inline]
+    pub fn expiry(&self, planet_id: i64) -> Option<i64> {
+        self.expiry_at.get(&planet_id).copied()
+    }
+}
+
+/// Returns the planet's expiry turn iff it falls within `horizon`. Static and
+/// orbiting planets last the whole game, so they always return `None`.
+fn expiry_within_horizon(
+    entity_cache: &EntityCache,
+    planet_id: i64,
+    horizon: i64,
+) -> Option<i64> {
+    let life = entity_cache.remaining_life(planet_id);
+    if life <= horizon { Some(life) } else { None }
 }
 
 /// Smallest ship count that, if it lands on `planet` at `arrival_turn` for
@@ -788,6 +848,7 @@ pub fn min_ships_to_own_by(
 
     let baseline = cache.baseline(planet.id);
     let base_arrivals = cache.arrivals(planet.id);
+    let expiry = cache.expiry(planet.id);
 
     // owner_at is viewpoint-independent, so the cache's baseline (built for
     // cache.player) gives the right "no-extras" prediction for any attacker.
@@ -798,7 +859,8 @@ pub fn min_ships_to_own_by(
     } else {
         // Planet outside the cache (e.g. spawned later). Fall back to a full
         // sim — same behaviour as before, just less efficient.
-        let base_tl = simulate_planet_timeline(planet, base_arrivals, attacker_owner, eval_turn);
+        let base_tl =
+            simulate_planet_timeline(planet, base_arrivals, attacker_owner, eval_turn, expiry);
         if state_at_timeline(&base_tl, eval_turn).0 == attacker_owner {
             return 0;
         }
@@ -816,9 +878,9 @@ pub fn min_ships_to_own_by(
     let owns_at = |ships: i64, buf: &mut [ArrivalEvent]| -> bool {
         buf[last].ships = ships;
         let tl = if let Some(baseline) = baseline {
-            simulate_planet_timeline_from(planet, baseline, arrival_turn, buf)
+            simulate_planet_timeline_from(planet, baseline, arrival_turn, buf, expiry)
         } else {
-            simulate_planet_timeline(planet, buf, attacker_owner, eval_turn)
+            simulate_planet_timeline(planet, buf, attacker_owner, eval_turn, expiry)
         };
         state_at_timeline(&tl, eval_turn).0 == attacker_owner
     };
@@ -864,6 +926,7 @@ pub fn reinforcement_needed_to_hold_until(
 
     let baseline = cache.baseline(planet.id);
     let base_arrivals = cache.arrivals(planet.id);
+    let expiry = cache.expiry(planet.id);
 
     let mut scratch: Vec<ArrivalEvent> = Vec::with_capacity(base_arrivals.len() + 1);
     scratch.extend_from_slice(base_arrivals);
@@ -877,9 +940,9 @@ pub fn reinforcement_needed_to_hold_until(
     let holds = |ships: i64, buf: &mut [ArrivalEvent]| -> bool {
         buf[last].ships = ships;
         let tl = if let Some(baseline) = baseline {
-            simulate_planet_timeline_from(planet, baseline, arrival_turn, buf)
+            simulate_planet_timeline_from(planet, baseline, arrival_turn, buf, expiry)
         } else {
-            simulate_planet_timeline(planet, buf, player, hold_until)
+            simulate_planet_timeline(planet, buf, player, hold_until, expiry)
         };
         (arrival_turn..=hold_until).all(|t| tl.owner_at[t as usize] == player)
     };
