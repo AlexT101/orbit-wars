@@ -1,24 +1,27 @@
 # simbot
 
-A bot whose `main.py` is a thin wrapper that delegates decision-making to a
-native Rust extension. The Python side only marshals the observation; the Rust
-side (`src/lib.rs`) picks the moves.
+A Rust-native bot. `main.py` is a thin wrapper that instantiates one `Bot` and
+forwards every observation to it; all state, parsing, simulation, and
+decisions live in the Rust extension (`simbot_native`).
 
-Cloned from [`nearest-sniper-rust`](../nearest-sniper-rust/): the agent currently
-reproduces the open-source [`nearest-sniper`](../_open_source/nearest-sniper/)
-baseline. What makes simbot different is `src/engine.rs` — a vendored clone of
-the [`rust_engine`](../../rust_engine/) simulator — so the Rust agent can run
-forward simulations in-process and score candidate moves, rather than picking
-heuristically. `src/helpers.rs` is a placeholder for the scoring/search code
-built on top of it.
+The current strategy is the `nearest-sniper` baseline, but the foundation —
+vendored engine, forward simulator, pre-computed entity trajectories, aim
+solver, timeline simulator — is in place for a stronger replacement.
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `src/lib.rs` | PyO3 module + `compute_moves` agent entry point |
-| `src/engine.rs` | Vendored clone of `rust_engine` for in-bot simulation (resync when the engine changes) |
-| `src/helpers.rs` | Strategy helpers (simulation scoring, candidate generation) — empty for now |
+| `src/lib.rs` | PyO3 module: `Bot` pyclass + observation parsing |
+| `src/strategy.rs` | Decision layer (currently `nearest_sniper`) |
+| `src/entity_cache.rs` | Pre-computed 500-turn position tables per planet/comet |
+| `src/helpers.rs` | Aim solver + combat timeline simulator |
+| `src/sim_probe.rs` | Forward simulator for lookahead rollouts |
+| `src/engine.rs` | Vendored clone of `rust_engine` (resync when the engine changes) |
+| `src/constants.rs` | Game and simulation constants |
+
+The `Bot` owns an `EntityCache` across turns: built on the first call, comet
+portion refreshed at the engine's comet-spawn steps (`50, 150, 250, 350, 450`).
 
 ## Build
 

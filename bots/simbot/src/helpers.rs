@@ -3,18 +3,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::constants::{
-    CENTER, EDGE_AIM_FRACS, HORIZON, FWD_ITER_MAX, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, ROTATION_LIMIT, SUN_RADIUS,
+    CENTER, EDGE_AIM_FRACS, HORIZON, FWD_ITER_MAX, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS,
 };
 
-use crate::engine::{Planet, Fleet, CometGroup, EngineState};
+use crate::engine::{Planet, Fleet, EngineState};
+use crate::entity_cache::EntityCache;
 use crate::sim_probe::SimProbe;
 pub use crate::sim_probe::ArrivalEvent;
-
-#[derive(Debug, Clone, Copy)]
-pub struct InitialPlanetPos {
-    pub x: f64,
-    pub y: f64,
-}
 
 
 // ── Basic Helpers ────────────────────────────────────────────────────
@@ -23,18 +18,6 @@ pub struct InitialPlanetPos {
 #[inline]
 pub fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     crate::engine::distance((ax, ay), (bx, by))
-}
-
-/// Distance from planet center to sun
-#[inline]
-pub fn orbital_radius(px: f64, py: f64) -> f64 {
-    dist(px, py, CENTER, CENTER)
-}
-
-/// Returns true if orbital radius + planet radius >= 50
-#[inline]
-pub fn is_static_planet(px: f64, py: f64, radius: f64) -> bool {
-    orbital_radius(px, py) + radius >= ROTATION_LIMIT
 }
 
 ///  Logarithmic speed curve between 1 and 6
@@ -80,22 +63,6 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
     (sx + angle.cos() * c, sy + angle.sin() * c)
 }
 
-/// Returns true for comets and orbiting planets
-pub fn target_can_move(
-    planet_id: i64,
-    _cur_x: f64, _cur_y: f64, radius: f64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    comet_ids: &HashSet<i64>,
-) -> bool {
-    if comet_ids.contains(&planet_id) {
-        return true;
-    }
-    let Some(init) = initial_by_id.get(&planet_id) else {
-        return false;
-    };
-    !is_static_planet(init.x, init.y, radius)
-}
-
 /// Counts distinct active players: every non-neutral planet owner plus every
 /// fleet owner. Floored at 2 since a match always has at least two players,
 /// even if one is currently wiped off the map but still has a fleet in flight.
@@ -133,107 +100,6 @@ pub fn sorted_by_distance_to(
         .collect();
     out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     out
-}
-
-/// Calculate future planet position based on initial position, current angle, and angular velocity
-/// Based on initial position to avoid floating-point drift over turns
-/// Planet rotation happens *after* fleet movement each turn, so a fleet arriving on turn T has experienced T full rotations.
-pub fn predict_planet_position(
-    planet_id: i64,
-    cur_x: f64, cur_y: f64, radius: f64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    turns_ahead: i64,
-) -> (f64, f64) {
-    let Some(init) = initial_by_id.get(&planet_id) else {
-        return (cur_x, cur_y);
-    };
-    if is_static_planet(init.x, init.y, radius) {
-        return (cur_x, cur_y);
-    }
-    let r = orbital_radius(init.x, init.y);
-    let cur_ang = (cur_y - CENTER).atan2(cur_x - CENTER);
-    let new_ang = cur_ang + angular_velocity * turns_ahead as f64;
-    (
-        CENTER + r * new_ang.cos(),
-        CENTER + r * new_ang.sin(),
-    )
-}
-
-/// Calculate future comet position based on pre-computed elliptical path: paths[idx][path_index + turns]
-pub fn predict_comet_position(
-    planet_id: i64,
-    comets: &[CometGroup],
-    turns: i64,
-) -> Option<(f64, f64)> {
-    for group in comets {
-        let Some(idx) = group.planet_ids.iter().position(|&p| p == planet_id) else {
-            continue;
-        };
-        if idx >= group.paths.len() {
-            return None;
-        }
-        let future = group.path_index + turns;
-        let path = &group.paths[idx];
-        if future >= 0 && (future as usize) < path.len() {
-            let p = path[future as usize];
-            return Some((p[0], p[1]));
-        }
-        return None;
-    }
-    None
-}
-
-/// Dispatches between `predict_planet_position` and `predict_comet_position` based on whether the target ID is in `comet_ids`.
-pub fn predict_target_position(
-    planet_id: i64,
-    cur_x: f64, cur_y: f64, radius: f64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    comets: &[CometGroup],
-    comet_ids: &HashSet<i64>,
-    turns: i64,
-) -> Option<(f64, f64)> {
-    if comet_ids.contains(&planet_id) {
-        return predict_comet_position(planet_id, comets, turns);
-    }
-    Some(predict_planet_position(
-        planet_id, cur_x, cur_y, radius,
-        initial_by_id, angular_velocity, turns,
-    ))
-}
-
-
-// Returns how many turns until comet with `planet_id` leaves the board, based on its path
-pub fn comet_remaining_life(planet_id: i64, comets: &[CometGroup]) -> i64 {
-    for group in comets {
-        let Some(idx) = group.planet_ids.iter().position(|&p| p == planet_id) else {
-            continue;
-        };
-        if idx < group.paths.len() {
-            return (group.paths[idx].len() as i64 - group.path_index).max(0);
-        }
-    }
-    0
-}
-
-/// Pre-computes `(x, y)` positions for an orbiting planet between 1 and `turns` turns in the future.
-/// Returns a vector of `turns` entries; for static or unknown planets every entry is `(cur_x, cur_y)`.
-pub fn planet_trajectory(
-    planet_id: i64,
-    cur_x: f64, cur_y: f64, radius: f64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    turns: i64,
-) -> Vec<(f64, f64)> {
-    (1..=turns)
-        .map(|t| {
-            predict_planet_position(
-                planet_id, cur_x, cur_y, radius,
-                initial_by_id, angular_velocity, t,
-            )
-        })
-        .collect()
 }
 
 
@@ -367,17 +233,16 @@ pub fn fwd_window(turns: i64) -> i64 {
 /// the target within the scan window. Used as a mandatory gate before any
 /// target intercept is accepted, helping eliminate false positives from
 /// predictions.
-#[allow(clippy::too_many_arguments)]
 pub fn verify_shot_hits(
     sx: f64, sy: f64, sr: f64,
     angle: f64, turns: i64, ships: i64,
     target_id: i64,
-    tx: f64, ty: f64, tr: f64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    comets: &[CometGroup],
-    comet_ids: &HashSet<i64>,
+    cache: &EntityCache,
 ) -> bool {
+    let Some(target) = cache.get(target_id) else {
+        return false;
+    };
+    let tr = target.radius;
     let speed = fleet_speed(ships);
     let (mut fx, mut fy) = launch_point(sx, sy, sr, angle);
     let vx = angle.cos() * speed;
@@ -392,11 +257,7 @@ pub fn verify_shot_hits(
         if segment_hits_sun(pfx, pfy, fx, fy) {
             return false;
         }
-        let Some((px, py)) = predict_target_position(
-            target_id, tx, ty, tr,
-            initial_by_id, angular_velocity,
-            comets, comet_ids, t,
-        ) else {
+        let Some([px, py]) = cache.position(target_id, t) else {
             continue;
         };
         if segment_intersects_circle(pfx, pfy, fx, fy, px, py, tr) {
@@ -406,41 +267,19 @@ pub fn verify_shot_hits(
     false
 }
 
-/// Maximum error in turns allowed for candidate intercept checks. Capped at 2
-/// to avoid picking incorrect orbital positions. Comets get 2 (faster, less
-/// predictable). Orbiting planets at >= 1 unit/turn get 2; else 1.
-pub fn dynamic_tolerance(
-    target_id: i64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    comet_ids: &HashSet<i64>,
-) -> i64 {
-    if comet_ids.contains(&target_id) {
-        return 2;
-    }
-    let Some(init) = initial_by_id.get(&target_id) else {
-        return 1;
-    };
-    let orb_r = orbital_radius(init.x, init.y);
-    let orb_speed = orb_r * angular_velocity.abs();
-    if orb_speed >= 1.0 { 2 } else { 1 }
-}
-
 /// Iterative convergence solver. Calculates direct or sun-blocked trajectories
 /// by repeatedly refining the predicted intercept position. All results are
 /// UNVERIFIED — caller must verify via `verify_shot_hits`.
-#[allow(clippy::too_many_arguments)]
 pub fn aim_raw(
     sx: f64, sy: f64, sr: f64,
     target_id: i64,
-    tx: f64, ty: f64, tr: f64,
     ships: i64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    comets: &[CometGroup],
-    comet_ids: &HashSet<i64>,
+    cache: &EntityCache,
 ) -> Option<(f64, i64, f64, f64)> {
-    let tol = dynamic_tolerance(target_id, initial_by_id, angular_velocity, comet_ids);
+    let target = cache.get(target_id)?;
+    let tr = target.radius;
+    let tol = target.tolerance;
+    let [tx, ty] = cache.position(target_id, 0)?;
 
     let mut est = match estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships) {
         Some(v) => v,
@@ -454,11 +293,7 @@ pub fn aim_raw(
     for _ in 0..FWD_ITER_MAX {
         let (_, turns_f) = est;
         let turns_i = turns_f.ceil() as i64;
-        let Some((ntx, nty)) = predict_target_position(
-            target_id, tx, ty, tr,
-            initial_by_id, angular_velocity,
-            comets, comet_ids, turns_i,
-        ) else {
+        let Some([ntx, nty]) = cache.position(target_id, turns_i) else {
             return None;
         };
         let Some(next_est) = estimate_arrival_frac(sx, sy, sr, ntx, nty, tr, ships) else {
@@ -479,13 +314,7 @@ pub fn aim_raw(
 
     // Fallthrough: best effort with the last predicted position.
     let final_turns = est.1.ceil() as i64;
-    let Some((fpx, fpy)) = predict_target_position(
-        target_id, tx, ty, tr,
-        initial_by_id, angular_velocity,
-        comets, comet_ids, final_turns,
-    ) else {
-        return None;
-    };
+    let [fpx, fpy] = cache.position(target_id, final_turns)?;
     match estimate_arrival(sx, sy, sr, fpx, fpy, tr, ships) {
         Some((a, t)) => Some((a, t, fpx, fpy)),
         None => arc_safe_angle(sx, sy, sr, fpx, fpy, tr, ships)
@@ -496,32 +325,24 @@ pub fn aim_raw(
 /// Exhaustive scan: find the earliest valid intercept window. Every candidate
 /// is forward-sim verified before being accepted. Returns
 /// `(angle, turns, target_x, target_y)` on success.
-#[allow(clippy::too_many_arguments)]
 pub fn search_safe_intercept(
     sx: f64, sy: f64, sr: f64,
     target_id: i64,
-    tx: f64, ty: f64, tr: f64,
     ships: i64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    comets: &[CometGroup],
-    comet_ids: &HashSet<i64>,
+    cache: &EntityCache,
     tolerance: Option<i64>,
 ) -> Option<(f64, i64, f64, f64)> {
-    let tolerance = tolerance.unwrap_or_else(|| {
-        dynamic_tolerance(target_id, initial_by_id, angular_velocity, comet_ids)
-    });
+    let target = cache.get(target_id)?;
+    let tr = target.radius;
+    let tolerance = tolerance.unwrap_or(target.tolerance);
+
     let mut max_turns = HORIZON;
-    if comet_ids.contains(&target_id) {
-        max_turns = max_turns.min((comet_remaining_life(target_id, comets) - 1).max(0));
+    if target.is_comet() {
+        max_turns = max_turns.min((cache.remaining_life(target_id) - 1).max(0));
     }
 
     for candidate_turns in 1..=max_turns {
-        let Some((px, py)) = predict_target_position(
-            target_id, tx, ty, tr,
-            initial_by_id, angular_velocity,
-            comets, comet_ids, candidate_turns,
-        ) else {
+        let Some([px, py]) = cache.position(target_id, candidate_turns) else {
             continue;
         };
 
@@ -535,11 +356,7 @@ pub fn search_safe_intercept(
         }
 
         let actual_turns = turns.max(candidate_turns);
-        let Some((apx, apy)) = predict_target_position(
-            target_id, tx, ty, tr,
-            initial_by_id, angular_velocity,
-            comets, comet_ids, actual_turns,
-        ) else {
+        let Some([apx, apy]) = cache.position(target_id, actual_turns) else {
             continue;
         };
 
@@ -556,8 +373,7 @@ pub fn search_safe_intercept(
         // Verify before accepting — stops false positives in exhaustive search.
         if verify_shot_hits(
             sx, sy, sr, angle_out, turns_out, ships,
-            target_id, tx, ty, tr,
-            initial_by_id, angular_velocity, comets, comet_ids,
+            target_id, cache,
         ) {
             return Some((angle_out, turns_out, apx, apy));
         }
@@ -577,37 +393,21 @@ pub fn search_safe_intercept(
 ///   2. `verify_shot_hits()` — mandatory forward-sim gate
 ///   3. If raw fails verify → `search_safe_intercept()` (exhaustive, pre-verified)
 ///   4. If both fail        → `None` (shot correctly suppressed)
-#[allow(clippy::too_many_arguments)]
 pub fn aim_with_prediction(
     sx: f64, sy: f64, sr: f64,
     target_id: i64,
-    tx: f64, ty: f64, tr: f64,
     ships: i64,
-    initial_by_id: &HashMap<i64, InitialPlanetPos>,
-    angular_velocity: f64,
-    comets: &[CometGroup],
-    comet_ids: &HashSet<i64>,
+    cache: &EntityCache,
 ) -> Option<(f64, i64, f64, f64)> {
-    if let Some(res) = aim_raw(
-        sx, sy, sr, target_id, tx, ty, tr, ships,
-        initial_by_id, angular_velocity, comets, comet_ids,
-    ) {
+    if let Some(res) = aim_raw(sx, sy, sr, target_id, ships, cache) {
         let (angle, turns, _, _) = res;
-        if verify_shot_hits(
-            sx, sy, sr, angle, turns, ships,
-            target_id, tx, ty, tr,
-            initial_by_id, angular_velocity, comets, comet_ids,
-        ) {
+        if verify_shot_hits(sx, sy, sr, angle, turns, ships, target_id, cache) {
             return Some(res);
         }
     }
 
     // Raw missed or failed to verify — exhaustive search (verifies internally).
-    search_safe_intercept(
-        sx, sy, sr, target_id, tx, ty, tr, ships,
-        initial_by_id, angular_velocity, comets, comet_ids,
-        None,
-    )
+    search_safe_intercept(sx, sy, sr, target_id, ships, cache, None)
 }
 
 

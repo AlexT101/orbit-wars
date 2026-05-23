@@ -1,15 +1,10 @@
 """
 Orbit Wars - simbot
 
-A thin Python wrapper that delegates move selection to a native Rust extension
-(`simbot_native`). The Rust agent currently reproduces the open-source
-`nearest-sniper` baseline: for each owned planet, target the nearest planet we
-don't own and send `garrison + 1` ships when we can afford the takeover. The
-Rust side also vendors a clone of the engine (`src/engine.rs`) so the strategy
-can evolve to score candidate moves with in-bot simulation.
-
-The Python side only marshals data: it pulls `player` and `planets` out of the
-observation, hands them to Rust, and returns whatever Rust decides.
+A thin Python wrapper that delegates the entire turn to a native Rust extension
+(`simbot_native`). The Rust side owns all bot state — turn counter,
+pre-computed entity position trajectories, the vendored simulator — across
+calls; Python just normalizes the observation into a dict and forwards it.
 
 Build the native extension first:
 
@@ -27,15 +22,29 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import simbot_native
 
+# Module-level so it survives across every agent(obs) call within a match.
+# Kaggle imports main.py once per episode, giving this exactly the right
+# lifetime: persists turn-to-turn, dies with the process at episode end.
+_BOT = simbot_native.Bot()
+
+_OBS_FIELDS = (
+    "player",
+    "planets",
+    "fleets",
+    "angular_velocity",
+    "initial_planets",
+    "comets",
+    "comet_planet_ids",
+)
+
+
+def _as_dict(obs):
+    if isinstance(obs, dict):
+        return obs
+    return {k: getattr(obs, k) for k in _OBS_FIELDS}
+
 
 def agent(obs):
-    player = obs.get("player", 0) if isinstance(obs, dict) else obs.player
-    raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
-
-    # Forward raw planet tuples (id, owner, x, y, radius, ships, production)
-    # straight to Rust, which does the decision-making.
-    planets = [tuple(p) for p in raw_planets]
-    moves = simbot_native.compute_moves(player, planets)
-
+    moves = _BOT.compute_moves(_as_dict(obs))
     # Match the baseline's [from_planet_id, angle, num_ships] list-of-lists shape.
     return [list(move) for move in moves]
