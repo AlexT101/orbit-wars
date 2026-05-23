@@ -9,7 +9,8 @@ use std::collections::HashSet;
 use crate::engine::{EngineState, Planet};
 use crate::entity_cache::EntityCache;
 use crate::obnext::{
-    build_mission_artifacts, plan_from_artifacts, MissionArtifacts, PlanProfile, WorldModel,
+    build_mission_artifacts, patient_targets, plan_from_artifacts, MissionArtifacts, PlanProfile,
+    WorldModel,
 };
 use crate::rollout::{opponent_turn0_variants, rollout_score};
 use crate::world::WorldState;
@@ -125,9 +126,17 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
     // here, not per candidate.
     let artifacts = build_mission_artifacts(&model);
 
-    // Plan A: greedy full. Drives the offensive-target ordering for every
-    // forbid/only candidate below.
-    let plan_a = plan_from_artifacts(&model, &artifacts, PlanProfile::full(), &HashSet::new());
+    // Force-gated patience: targets where deferring one turn yields a
+    // strictly better mission (swarm → single, or shorter travel that beats
+    // the one-turn delay tax). Unioned into every candidate's forbid set so
+    // the eager-on-T variant is never offered to the rollout — patience is
+    // decided structurally, not under rollout variance.
+    let wait_set = patient_targets(&model, &artifacts);
+
+    // Plan A: full profile with patience-gating applied. All `offensive_targets`
+    // below are drawn from this plan, so forbid-prefix / only-* indices
+    // naturally never land on a wait_set member.
+    let plan_a = plan_from_artifacts(&model, &artifacts, PlanProfile::full(), &wait_set);
     let targets = &plan_a.offensive_targets;
     let take = |k: usize| -> Option<i64> { targets.get(k).copied() };
 
@@ -150,7 +159,16 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
         .map(|p| p.id)
         .collect();
 
-    let forbid_prefix = |k: usize| -> HashSet<i64> { targets.iter().take(k).copied().collect() };
+    // Every forbid set unions with wait_set. `only` and `opposing` already
+    // contain wait_set members by construction (wait_set ⊆ opposing); the
+    // others are unioned explicitly via `with_wait`.
+    let with_wait = |mut base: HashSet<i64>| -> HashSet<i64> {
+        base.extend(wait_set.iter().copied());
+        base
+    };
+    let forbid_prefix = |k: usize| -> HashSet<i64> {
+        with_wait(targets.iter().take(k).copied().collect())
+    };
     let only = |ids: &[i64]| -> HashSet<i64> {
         let mut f = opposing.clone();
         for id in ids {
@@ -183,8 +201,8 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
 
     // Owner-type partition. `neutrals` and `hostiles` may be subsets of
     // `opposing`; emitting all three still exercises distinct strategies.
-    emitter.run(&model, &artifacts, PlanProfile::full(), &neutrals);
-    emitter.run(&model, &artifacts, PlanProfile::full(), &hostiles);
+    emitter.run(&model, &artifacts, PlanProfile::full(), &with_wait(neutrals.clone()));
+    emitter.run(&model, &artifacts, PlanProfile::full(), &with_wait(hostiles.clone()));
     emitter.run(&model, &artifacts, PlanProfile::full(), &opposing);
 
     // Skip-second: keep t1 but force a different runner-up. Distinct from
@@ -192,18 +210,18 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
     if let Some(t2) = take(1) {
         let mut f = HashSet::new();
         f.insert(t2);
-        emitter.run(&model, &artifacts, PlanProfile::full(), &f);
+        emitter.run(&model, &artifacts, PlanProfile::full(), &with_wait(f));
     }
 
     // No-op: hold all ships.
     emitter.push_raw(Vec::new());
 
     // Fast-profile variants on the most useful structural choices.
-    emitter.run(&model, &artifacts, PlanProfile::fast(), &HashSet::new());
+    emitter.run(&model, &artifacts, PlanProfile::fast(), &wait_set);
     if let Some(t1) = take(0) {
         let mut f = HashSet::new();
         f.insert(t1);
-        emitter.run(&model, &artifacts, PlanProfile::fast(), &f);
+        emitter.run(&model, &artifacts, PlanProfile::fast(), &with_wait(f));
         emitter.run(&model, &artifacts, PlanProfile::fast(), &only(&[t1]));
     }
     emitter.run(&model, &artifacts, PlanProfile::fast(), &opposing);

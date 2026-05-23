@@ -3206,6 +3206,143 @@ pub fn plan_from_artifacts(
     }
 }
 
+// ── 8b. Patience analysis ────────────────────────────────────────────────
+
+/// Identify offensive targets where deferring one turn yields a strictly
+/// better mission for that target. Returned set is meant to be force-gated
+/// into every candidate's forbid set so the rollout cannot select an
+/// eager-on-T plan under variance — patience is decided here, structurally.
+///
+/// Two improvement axes are checked against today's best mission for each
+/// target:
+///
+///   1. **Swarm collapse** — today's mission is a multi-source swarm, but a
+///      single member's ship count plus one turn of production is enough to
+///      solo the capture by the same (or earlier) eval turn.
+///   2. **Faster travel** — the dominant source's best aim with a bumped cap
+///      reaches the target with `1 + travel' < today_eval`, i.e. the shorter
+///      travel more than compensates for the one-turn launch delay.
+///
+/// Snipe / CrashExploit / Rescue / Recapture / Reinforce are skipped: their
+/// scheduling is anchored to opponent or own-falling timing, so a one-turn
+/// delay risks missing the window entirely.
+pub fn patient_targets(world: &WorldModel, artifacts: &MissionArtifacts) -> HashSet<i64> {
+    let mut wait_set: HashSet<i64> = HashSet::new();
+    let mut considered: HashSet<i64> = HashSet::new();
+    let planned: PlannedCommitments = HashMap::new();
+
+    // Score-descending walk so the first mission we see for each target is
+    // the one we'd actually commit (matches plan_from_artifacts' ordering).
+    let mut missions = artifacts.missions.clone();
+    missions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    for mission in &missions {
+        if !considered.insert(mission.target_id) {
+            continue;
+        }
+        // The top-scoring mission for this target is what the planner will
+        // commit. If it isn't a Single/Swarm (Snipe/CrashExploit/Reinforce/
+        // Rescue/Recapture), deferring risks missing its timing window — so
+        // skip patience for this target entirely rather than re-evaluating
+        // against a lower-score Single/Swarm we'd never actually choose.
+        if !matches!(mission.kind, MissionKind::Single | MissionKind::Swarm) {
+            continue;
+        }
+        if delaying_dominates(world, mission, &planned) {
+            wait_set.insert(mission.target_id);
+        }
+    }
+    wait_set
+}
+
+fn delaying_dominates(
+    world: &WorldModel,
+    mission: &Mission,
+    planned: &PlannedCommitments,
+) -> bool {
+    let target_id = mission.target_id;
+    let target_ships = world.planet(target_id).ships;
+    let today_eval = mission.turns;
+
+    if matches!(mission.kind, MissionKind::Swarm) {
+        for option in &mission.options {
+            if can_solo_after_delay(world, option.src_id, target_id, target_ships, today_eval, planned) {
+                return true;
+            }
+        }
+    }
+
+    if let Some(dom) = mission.options.iter().max_by_key(|o| o.send_cap) {
+        if can_travel_faster_after_delay(world, dom.src_id, target_id, target_ships, today_eval, planned) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// True iff `src` with one turn of production accrued can solo-capture
+/// `target` by `today_eval` (i.e., arrival = 1 + travel' ≤ today_eval).
+fn can_solo_after_delay(
+    world: &WorldModel,
+    src_id: i64,
+    target_id: i64,
+    target_ships: i64,
+    today_eval: i64,
+    planned: &PlannedCommitments,
+) -> bool {
+    let src = world.planet(src_id);
+    let bumped_cap = src.ships + src.production;
+    if bumped_cap < 1 {
+        return false;
+    }
+    let hints = [target_ships + 1, target_ships + 4];
+    let Some((aim_ships, aim)) = world.best_probe_aim(
+        src_id, target_id, bumped_cap, &hints, None, None, None, None,
+    ) else {
+        return false;
+    };
+    let arrival = 1 + aim.1;
+    if arrival > today_eval {
+        return false;
+    }
+    let needed = world.min_ships_to_own_at(
+        target_id, arrival, world.player, planned, &[], Some(bumped_cap),
+    );
+    needed > 0 && needed <= bumped_cap && aim_ships >= needed
+}
+
+/// True iff `src` with one turn of production accrued can capture `target`
+/// with strictly fewer turns of game-time elapsed (`1 + travel' < today_eval`).
+fn can_travel_faster_after_delay(
+    world: &WorldModel,
+    src_id: i64,
+    target_id: i64,
+    target_ships: i64,
+    today_eval: i64,
+    planned: &PlannedCommitments,
+) -> bool {
+    let src = world.planet(src_id);
+    let bumped_cap = src.ships + src.production;
+    if bumped_cap < 1 {
+        return false;
+    }
+    let hints = [target_ships + 1, target_ships + 4];
+    let Some((aim_ships, aim)) = world.best_probe_aim(
+        src_id, target_id, bumped_cap, &hints, None, None, None, None,
+    ) else {
+        return false;
+    };
+    let arrival = 1 + aim.1;
+    if arrival >= today_eval {
+        return false;
+    }
+    let needed = world.min_ships_to_own_at(
+        target_id, arrival, world.player, planned, &[], Some(bumped_cap),
+    );
+    needed > 0 && needed <= bumped_cap && aim_ships >= needed
+}
+
 // ── 9. Entry point ────────────────────────────────────────────────────────
 
 /// Run the obnext-style planner end-to-end against a [`WorldState`] that the
