@@ -5,8 +5,10 @@ mod constants;
 mod engine;
 mod entity_cache;
 mod helpers;
+mod obnext;
 mod sim_probe;
 mod strategy;
+mod world;
 
 #[cfg(test)]
 mod tests;
@@ -18,7 +20,8 @@ use pyo3::types::{PyDict, PySequence};
 use crate::constants::COMET_SPAWN_STEPS;
 use crate::engine::{CometGroup, Fleet, Planet};
 use crate::entity_cache::EntityCache;
-use crate::strategy::nearest_sniper;
+use crate::strategy::obnext;
+use crate::world::WorldState;
 
 #[allow(dead_code)]
 struct Observation {
@@ -178,8 +181,21 @@ impl Bot {
         if let Some(cache) = &mut self.cache {
             cache.set_current_turn(self.current_turn);
         }
+        let cache = self.cache.as_ref().expect("entity cache populated above");
 
-        let moves = nearest_sniper(obs.player, &obs.planets);
+        let world = WorldState::build(
+            obs.player,
+            self.current_turn,
+            obs.planets,
+            obs.fleets,
+            obs.initial_planets,
+            obs.comets,
+            obs.comet_planet_ids,
+            obs.angular_velocity,
+            cache,
+        );
+
+        let moves = obnext(&world);
         self.current_turn += 1;
         Ok(moves)
     }

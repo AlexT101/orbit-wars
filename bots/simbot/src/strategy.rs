@@ -1,17 +1,28 @@
-//! Strategy logic
+//! Strategy entry points exposed to the PyO3 layer. Concrete strategy logic
+//! lives in dedicated modules (e.g. [`crate::obnext`]); functions here are
+//! thin orchestrators over the strategy-agnostic [`WorldState`].
+
+#![allow(dead_code)]
 
 use crate::engine::Planet;
+use crate::world::WorldState;
 
 /// Nearest-sniper baseline: for each owned planet, send `garrison + 1` ships
 /// at the closest non-owned planet when affordable.
-pub fn nearest_sniper(player: i64, planets: &[Planet]) -> Vec<(i64, f64, i64)> {
+pub fn nearest_sniper(world: &WorldState) -> Vec<(i64, f64, i64)> {
     let mut moves = Vec::new();
-    let mine: Vec<&Planet> = planets.iter().filter(|p| p.owner == player).collect();
-    let targets: Vec<&Planet> = planets.iter().filter(|p| p.owner != player).collect();
+    if world.my_planets.is_empty() {
+        return moves;
+    }
+    let targets: Vec<&Planet> = world
+        .enemy_planets
+        .iter()
+        .chain(world.neutral_planets.iter())
+        .collect();
     if targets.is_empty() {
         return moves;
     }
-    for m in &mine {
+    for m in &world.my_planets {
         let mut nearest: Option<&Planet> = None;
         let mut best = f64::INFINITY;
         for t in &targets {
@@ -31,4 +42,8 @@ pub fn nearest_sniper(player: i64, planets: &[Planet]) -> Vec<(i64, f64, i64)> {
         }
     }
     moves
+}
+
+pub fn obnext(world: &WorldState) -> Vec<(i64, f64, i64)> {
+    crate::obnext::plan(world)
 }
