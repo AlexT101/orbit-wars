@@ -6,7 +6,7 @@ use crate::constants::{
     CENTER, EDGE_AIM_FRACS, HORIZON, FWD_ITER_MAX, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS,
 };
 
-use crate::engine::{Planet, Fleet, EngineState};
+use crate::engine::{Planet, Fleet, EngineState, swept_pair_hit};
 use crate::entity_cache::EntityCache;
 use crate::sim_probe::SimProbe;
 pub use crate::sim_probe::ArrivalEvent;
@@ -253,6 +253,10 @@ pub fn verify_shot_hits(
     let vy = angle.sin() * speed;
     let window = fwd_window(turns);
 
+    // Target sweeps from position(t-1) → position(t) during step t, matching
+    // the engine's swept_pair_hit. Hoist prev_pos so we only do one cache
+    // lookup per iteration.
+    let mut prev_pos = cache.position(target_id, 0);
     for t in 1..=(turns + window) {
         let pfx = fx;
         let pfy = fy;
@@ -261,12 +265,23 @@ pub fn verify_shot_hits(
         if segment_hits_sun(pfx, pfy, fx, fy) {
             return false;
         }
-        let Some([px, py]) = cache.position(target_id, t) else {
-            continue;
+        let cur_pos = cache.position(target_id, t);
+        // Match engine PlanetPath semantics:
+        //   (Some, Some) normal flight,
+        //   (Some, None) comet expiry tick — stationary at prev, still collidable,
+        //   (None, _)    not on board yet (or already gone) — engine skips collision.
+        let (px0, py0, px1, py1) = match (prev_pos, cur_pos) {
+            (Some([x0, y0]), Some([x1, y1])) => (x0, y0, x1, y1),
+            (Some([x0, y0]), None) => (x0, y0, x0, y0),
+            _ => {
+                prev_pos = cur_pos;
+                continue;
+            }
         };
-        if segment_intersects_circle(pfx, pfy, fx, fy, px, py, tr) {
+        if swept_pair_hit((pfx, pfy), (fx, fy), (px0, py0), (px1, py1), tr) {
             return true;
         }
+        prev_pos = cur_pos;
     }
     false
 }
