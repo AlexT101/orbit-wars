@@ -823,6 +823,13 @@ fn expiry_within_horizon(
 /// the planet is already theirs at `eval_turn` without extras. Returns
 /// `upper_bound + 1` when not achievable within budget.
 ///
+/// `extras` is a slice of additional arrivals to incorporate alongside the
+/// timeline cache's in-flight arrivals (e.g. planned commitments from the
+/// current planning turn). When empty, the cache's pre-built baseline is
+/// reused as the checkpoint — `O(eval_turn - arrival_turn)` per probe.
+/// When non-empty, a "pre-attacker baseline" is simulated once that already
+/// incorporates the extras, then probes checkpoint off it the same way.
+///
 /// `eval_turn` is clamped to `cache.horizon`; if `arrival_turn > eval_turn`
 /// after clamping, returns `upper_bound + 1`.
 pub fn min_ships_to_own_by(
@@ -832,6 +839,7 @@ pub fn min_ships_to_own_by(
     arrival_turn: i64,
     eval_turn: i64,
     upper_bound: i64,
+    extras: &[ArrivalEvent],
 ) -> i64 {
     let arrival_turn = arrival_turn.max(1);
     let eval_turn = eval_turn.max(1).min(cache.horizon);
@@ -839,27 +847,33 @@ pub fn min_ships_to_own_by(
         return upper_bound + 1;
     }
 
-    let baseline = cache.baseline(planet.id);
     let base_arrivals = cache.arrivals(planet.id);
     let expiry = cache.expiry(planet.id);
 
-    // owner_at is viewpoint-independent — the cache's baseline gives the
-    // right "no-extras" prediction for any attacker.
-    if let Some(baseline) = baseline {
-        if state_at_timeline(baseline, eval_turn).0 == attacker_owner {
-            return 0;
-        }
+    // When no extras, the cache's pre-built baseline already reflects all
+    // in-flight arrivals. Otherwise simulate a one-shot "with-extras" baseline
+    // and use that as the checkpoint.
+    let local_baseline: Option<PlanetTimeline> = if extras.is_empty() {
+        None
     } else {
-        // Planet outside the cache (e.g. spawned later) — full sim fallback.
-        let base_tl =
-            simulate_planet_timeline(planet, base_arrivals, attacker_owner, eval_turn, expiry);
-        if state_at_timeline(&base_tl, eval_turn).0 == attacker_owner {
-            return 0;
-        }
+        let mut merged = Vec::with_capacity(base_arrivals.len() + extras.len());
+        merged.extend_from_slice(base_arrivals);
+        merged.extend_from_slice(extras);
+        Some(simulate_planet_timeline(planet, &merged, attacker_owner, eval_turn, expiry))
+    };
+    let baseline: &PlanetTimeline = local_baseline
+        .as_ref()
+        .or_else(|| cache.baseline(planet.id))
+        .expect("planet must be in the timeline cache");
+
+    if state_at_timeline(baseline, eval_turn).0 == attacker_owner {
+        return 0;
     }
 
-    let mut scratch: Vec<ArrivalEvent> = Vec::with_capacity(base_arrivals.len() + 1);
+    let mut scratch: Vec<ArrivalEvent> =
+        Vec::with_capacity(base_arrivals.len() + extras.len() + 1);
     scratch.extend_from_slice(base_arrivals);
+    scratch.extend_from_slice(extras);
     scratch.push(ArrivalEvent {
         turns: arrival_turn,
         owner: attacker_owner,
@@ -869,11 +883,7 @@ pub fn min_ships_to_own_by(
 
     let owns_at = |ships: i64, buf: &mut [ArrivalEvent]| -> bool {
         buf[last].ships = ships;
-        let tl = if let Some(baseline) = baseline {
-            simulate_planet_timeline_from(planet, baseline, arrival_turn, buf, expiry)
-        } else {
-            simulate_planet_timeline(planet, buf, attacker_owner, eval_turn, expiry)
-        };
+        let tl = simulate_planet_timeline_from(planet, baseline, arrival_turn, buf, expiry);
         state_at_timeline(&tl, eval_turn).0 == attacker_owner
     };
 
@@ -896,28 +906,52 @@ pub fn min_ships_to_own_by(
 /// Smallest reinforcement that arrives at `arrival_turn` and keeps
 /// `cache.player` in continuous ownership through `hold_until`. If the planet
 /// isn't currently `cache.player`'s, collapses to `min_ships_to_own_by` at
-/// `hold_until`. Returns `upper_bound + 1` if no value in `1..=upper_bound` works.
+/// `hold_until`. `extras` works the same as in `min_ships_to_own_by`.
+/// Returns `upper_bound + 1` if no value in `1..=upper_bound` works.
 pub fn reinforcement_needed_to_hold_until(
     cache: &TimelineCache,
     planet: &Planet,
     arrival_turn: i64,
     hold_until: i64,
     upper_bound: i64,
+    extras: &[ArrivalEvent],
 ) -> i64 {
     let player = cache.player;
     let arrival_turn = arrival_turn.max(1);
     let hold_until = hold_until.max(arrival_turn).min(cache.horizon);
 
     if planet.owner != player {
-        return min_ships_to_own_by(cache, planet, player, arrival_turn, hold_until, upper_bound);
+        return min_ships_to_own_by(
+            cache,
+            planet,
+            player,
+            arrival_turn,
+            hold_until,
+            upper_bound,
+            extras,
+        );
     }
 
-    let baseline = cache.baseline(planet.id);
     let base_arrivals = cache.arrivals(planet.id);
     let expiry = cache.expiry(planet.id);
 
-    let mut scratch: Vec<ArrivalEvent> = Vec::with_capacity(base_arrivals.len() + 1);
+    let local_baseline: Option<PlanetTimeline> = if extras.is_empty() {
+        None
+    } else {
+        let mut merged = Vec::with_capacity(base_arrivals.len() + extras.len());
+        merged.extend_from_slice(base_arrivals);
+        merged.extend_from_slice(extras);
+        Some(simulate_planet_timeline(planet, &merged, player, hold_until, expiry))
+    };
+    let baseline: &PlanetTimeline = local_baseline
+        .as_ref()
+        .or_else(|| cache.baseline(planet.id))
+        .expect("planet must be in the timeline cache");
+
+    let mut scratch: Vec<ArrivalEvent> =
+        Vec::with_capacity(base_arrivals.len() + extras.len() + 1);
     scratch.extend_from_slice(base_arrivals);
+    scratch.extend_from_slice(extras);
     scratch.push(ArrivalEvent {
         turns: arrival_turn,
         owner: player,
@@ -927,11 +961,7 @@ pub fn reinforcement_needed_to_hold_until(
 
     let holds = |ships: i64, buf: &mut [ArrivalEvent]| -> bool {
         buf[last].ships = ships;
-        let tl = if let Some(baseline) = baseline {
-            simulate_planet_timeline_from(planet, baseline, arrival_turn, buf, expiry)
-        } else {
-            simulate_planet_timeline(planet, buf, player, hold_until, expiry)
-        };
+        let tl = simulate_planet_timeline_from(planet, baseline, arrival_turn, buf, expiry);
         (arrival_turn..=hold_until).all(|t| tl.owner_at[t as usize] == player)
     };
 
