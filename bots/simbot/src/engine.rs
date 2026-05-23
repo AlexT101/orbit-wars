@@ -414,6 +414,47 @@ impl EngineState {
         }
     }
 
+    /// Construct an `EngineState` from raw observation parts, skipping the
+    /// random map generation `new()` runs. Useful for the bot when it wants to
+    /// build a `TimelineCache` / `SimProbe` from the observation it just got
+    /// from Kaggle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_observation_parts(
+        step: i64,
+        angular_velocity: f64,
+        planets: Vec<Planet>,
+        initial_planets: Vec<Planet>,
+        fleets: Vec<Fleet>,
+        next_fleet_id: i64,
+        comet_planet_ids: Vec<i64>,
+        comets: Vec<CometGroup>,
+        num_players: usize,
+        configuration: Configuration,
+    ) -> Self {
+        let planet_index_by_id = planets
+            .iter()
+            .enumerate()
+            .map(|(idx, planet)| (planet.id, idx))
+            .collect();
+        Self {
+            step,
+            angular_velocity,
+            planets,
+            initial_planets,
+            fleets,
+            next_fleet_id,
+            comet_planet_ids,
+            comets,
+            done: false,
+            rewards: None,
+            seed: 0,
+            num_players,
+            configuration,
+            planet_index_by_id,
+            initial_planets_version: 0,
+        }
+    }
+
     pub fn rebuild_planet_index(&mut self) {
         self.planet_index_by_id.clear();
         self.planet_index_by_id.reserve(self.planets.len());
