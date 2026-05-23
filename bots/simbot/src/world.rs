@@ -11,7 +11,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::{EPISODE_STEPS, HORIZON};
 use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
@@ -80,18 +80,39 @@ impl<'a> WorldState<'a> {
         let engine = EngineState::from_observation_parts(
             step,
             angular_velocity,
-            planets.clone(),
+            planets,
             initial_planets,
-            fleets.clone(),
+            fleets,
             next_fleet_id,
-            comet_planet_ids.clone(),
+            comet_planet_ids,
             comets,
             num_players,
             Configuration::default(),
         );
-        let timeline_cache = TimelineCache::build(&engine, player, HORIZON, entity_cache);
+        Self::from_engine(player, &engine, entity_cache)
+    }
 
-        let mut planet_by_id: HashMap<i64, Planet> = HashMap::with_capacity(planets.len());
+    /// Fast-path constructor for callers that already have an `EngineState`
+    /// (the rollout / search loop). Skips the EngineState reconstruction and
+    /// the two-stage Vec clones that `build` does when called with owned
+    /// observation parts.
+    pub fn from_engine(
+        player: i64,
+        engine: &EngineState,
+        entity_cache: &'a EntityCache,
+    ) -> Self {
+        let step = engine.step;
+        let angular_velocity = engine.angular_velocity;
+        let num_players = engine.num_players;
+        let timeline_cache = TimelineCache::build(engine, player, HORIZON, entity_cache);
+
+        // Clone the planets/fleets/comet ids once for the owned WorldState
+        // fields (vs. twice when the caller routed through `build`).
+        let planets: Vec<Planet> = engine.planets.clone();
+        let fleets: Vec<Fleet> = engine.fleets.clone();
+        let comet_planet_ids: Vec<i64> = engine.comet_planet_ids.clone();
+
+        let mut planet_by_id: HashMap<i64, Planet> = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
         for planet in &planets {
             planet_by_id.insert(planet.id, planet.clone());
         }
@@ -121,8 +142,8 @@ impl<'a> WorldState<'a> {
         let remaining_steps = (EPISODE_STEPS - step).max(1);
         let is_four_player = num_players >= 4;
 
-        let mut owner_strength: HashMap<i64, i64> = HashMap::new();
-        let mut owner_production: HashMap<i64, i64> = HashMap::new();
+        let mut owner_strength: HashMap<i64, i64> = HashMap::default();
+        let mut owner_production: HashMap<i64, i64> = HashMap::default();
         for planet in &planets {
             if planet.owner != -1 {
                 *owner_strength.entry(planet.owner).or_insert(0) += planet.ships;
@@ -151,11 +172,11 @@ impl<'a> WorldState<'a> {
             .map(|(_, s)| *s)
             .sum();
 
-        let mut keep_needed_map = HashMap::with_capacity(planets.len());
-        let mut min_owned_map = HashMap::with_capacity(planets.len());
-        let mut first_enemy_map = HashMap::with_capacity(planets.len());
-        let mut fall_turn_map = HashMap::with_capacity(planets.len());
-        let mut holds_full_map = HashMap::with_capacity(planets.len());
+        let mut keep_needed_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        let mut min_owned_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        let mut first_enemy_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        let mut fall_turn_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        let mut holds_full_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
         for planet in &planets {
             if let Some(baseline) = timeline_cache.baseline(planet.id) {
                 keep_needed_map.insert(planet.id, baseline.keep_needed);

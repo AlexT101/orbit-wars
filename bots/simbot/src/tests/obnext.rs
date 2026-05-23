@@ -121,12 +121,12 @@ fn min_ships_to_own_at_drops_with_planned_commitments() {
         .first()
         .expect("seed 42 should leave at least one neutral");
 
-    let empty_planned = std::collections::HashMap::new();
+    let empty_planned = rustc_hash::FxHashMap::default();
     let need_alone = world.min_ships_to_own_at(target.id, 6, 0, &empty_planned, &[], None);
     assert!(need_alone >= 1);
 
     let half = (need_alone / 2).max(1);
-    let mut planned = std::collections::HashMap::new();
+    let mut planned = rustc_hash::FxHashMap::default();
     planned.insert(
         target.id,
         vec![ArrivalEvent {

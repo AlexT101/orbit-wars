@@ -32,6 +32,7 @@ environment before `main.py` can import it:
 ```powershell
 cd bots/simbot
 maturin develop --release
+cd ../..
 ```
 
 ## Run

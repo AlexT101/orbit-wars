@@ -5,7 +5,8 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::{CENTER, COMET_RADIUS, EPISODE_STEPS, ROTATION_LIMIT};
 use crate::engine::{CometGroup, Planet};
@@ -91,7 +92,8 @@ impl EntityCache {
         current_step: i64,
     ) -> Self {
         let comet_ids: HashSet<i64> = comet_planet_ids.iter().copied().collect();
-        let mut entities = HashMap::with_capacity(initial_planets.len());
+        let mut entities =
+            HashMap::with_capacity_and_hasher(initial_planets.len(), Default::default());
 
         for ip in initial_planets {
             if comet_ids.contains(&ip.id) {
@@ -106,7 +108,7 @@ impl EntityCache {
             }
         }
 
-        let aim_cache = (0..EPISODE_STEPS).map(|_| HashMap::new()).collect();
+        let aim_cache = (0..EPISODE_STEPS).map(|_| HashMap::default()).collect();
 
         Self {
             current_turn: current_step,

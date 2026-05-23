@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use crate::engine::{EngineState, Planet};
 use crate::entity_cache::EntityCache;
@@ -208,7 +208,7 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
     // Skip-second: keep t1 but force a different runner-up. Distinct from
     // forbid-prefix variants because t1 remains the top attack.
     if let Some(t2) = take(1) {
-        let mut f = HashSet::new();
+        let mut f = HashSet::default();
         f.insert(t2);
         emitter.run(&model, &artifacts, PlanProfile::full(), &with_wait(f));
     }
@@ -219,7 +219,7 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
     // Fast-profile variants on the most useful structural choices.
     emitter.run(&model, &artifacts, PlanProfile::fast(), &wait_set);
     if let Some(t1) = take(0) {
-        let mut f = HashSet::new();
+        let mut f = HashSet::default();
         f.insert(t1);
         emitter.run(&model, &artifacts, PlanProfile::fast(), &with_wait(f));
         emitter.run(&model, &artifacts, PlanProfile::fast(), &only(&[t1]));
@@ -245,7 +245,7 @@ impl CandidateEmitter {
     fn new(first: Vec<(i64, f64, i64)>) -> Self {
         let mut e = Self {
             candidates: Vec::new(),
-            seen: HashSet::new(),
+            seen: HashSet::default(),
         };
         e.push_raw(first);
         e
@@ -273,7 +273,7 @@ impl CandidateEmitter {
     }
 }
 
-/// Order-insensitive fingerprint for move-list dedup. `to_bits` keeps the
+/// Order-insensitive exact key for move-list dedup. `to_bits` keeps the
 /// angle comparison exact: two plans built off the same `WorldModel` hit the
 /// same `plan_shot` cache entries and produce bit-identical angles.
 fn dedup_key(moves: &[(i64, f64, i64)]) -> Vec<(i64, u64, i64)> {

@@ -192,38 +192,30 @@ impl Bot {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
 
-        // Build the rollout seed before moving obs fields into WorldState.
+        // Construct the engine state once and reuse it for both the candidate
+        // WorldState and the rollout seed — avoids parsing/cloning the
+        // observation vecs a second time.
         let next_fleet_id = obs.fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
         let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
+        let player = obs.player;
         let initial_state = EngineState::from_observation_parts(
             self.current_turn,
             obs.angular_velocity,
-            obs.planets.clone(),
-            obs.initial_planets.clone(),
-            obs.fleets.clone(),
+            obs.planets,
+            obs.initial_planets,
+            obs.fleets,
             next_fleet_id,
-            obs.comet_planet_ids.clone(),
-            obs.comets.clone(),
+            obs.comet_planet_ids,
+            obs.comets,
             num_players,
             Configuration::default(),
         );
-        let player = obs.player;
 
         // Plan candidates inside a block so the WorldState's immutable borrow
         // on the cache ends before the rollout reborrows it mutably.
         let candidates = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
-            let world = WorldState::build(
-                player,
-                self.current_turn,
-                obs.planets,
-                obs.fleets,
-                obs.initial_planets,
-                obs.comets,
-                obs.comet_planet_ids,
-                obs.angular_velocity,
-                cache_ref,
-            );
+            let world = WorldState::from_engine(player, &initial_state, cache_ref);
             obnext_candidates(&world)
         };
 

@@ -16,7 +16,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::{BOARD_SIZE, CENTER, MAX_PLAYERS, ROTATION_LIMIT, SUN_RADIUS};
 use crate::engine::{
@@ -138,7 +138,10 @@ impl<'a> SimProbe<'a> {
             planet_paths: vec![None; planet_count],
             fleets_to_remove: vec![false; fleet_count],
             combat_lists: (0..planet_count).map(|_| Vec::new()).collect(),
-            comet_id_set: HashSet::with_capacity(state.comet_planet_ids.len()),
+            comet_id_set: HashSet::with_capacity_and_hasher(
+                state.comet_planet_ids.len(),
+                Default::default(),
+            ),
             expired_postmove: Vec::new(),
 
             events: Vec::with_capacity(64),
@@ -422,7 +425,7 @@ impl<'a> SimProbe<'a> {
     /// that the bot's strategy layer consumes. `OwnerChanged` events are
     /// ignored — read them separately via `events()`.
     pub fn collect_arrivals(&self) -> HashMap<i64, Vec<ArrivalEvent>> {
-        let mut out: HashMap<i64, Vec<ArrivalEvent>> = HashMap::new();
+        let mut out: HashMap<i64, Vec<ArrivalEvent>> = HashMap::default();
         for ev in &self.events {
             if let SimEvent::FleetLanded {
                 turn,

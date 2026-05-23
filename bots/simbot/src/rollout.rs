@@ -11,7 +11,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use crate::engine::{EngineState, MoveAction};
 use crate::entity_cache::EntityCache;
@@ -70,17 +70,7 @@ pub fn rollout_score(
                 actions[p] = turn0_opponents[p].clone();
                 continue;
             }
-            let ws = WorldState::build(
-                pid,
-                engine.step,
-                engine.planets.clone(),
-                engine.fleets.clone(),
-                engine.initial_planets.clone(),
-                engine.comets.clone(),
-                engine.comet_planet_ids.clone(),
-                engine.angular_velocity,
-                cache,
-            );
+            let ws = WorldState::from_engine(pid, &engine, cache);
             actions[p] = to_move_actions(&plan_with_profile(&ws, PlanProfile::full()));
         }
         if engine.step_with_actions(&actions).is_err() {
@@ -120,17 +110,7 @@ pub fn opponent_turn0_actions(
         if pid == my_player {
             continue;
         }
-        let ws = WorldState::build(
-            pid,
-            initial_state.step,
-            initial_state.planets.clone(),
-            initial_state.fleets.clone(),
-            initial_state.initial_planets.clone(),
-            initial_state.comets.clone(),
-            initial_state.comet_planet_ids.clone(),
-            initial_state.angular_velocity,
-            cache,
-        );
+        let ws = WorldState::from_engine(pid, initial_state, cache);
         actions[p] = to_move_actions(&plan_with_profile(&ws, PlanProfile::full()));
     }
     cache.set_current_turn(saved_turn);
@@ -161,17 +141,7 @@ pub fn opponent_turn0_variants(
     let saved_turn = cache.current_turn;
     cache.set_current_turn(initial_state.step);
 
-    let opp_ws = WorldState::build(
-        opp_player,
-        initial_state.step,
-        initial_state.planets.clone(),
-        initial_state.fleets.clone(),
-        initial_state.initial_planets.clone(),
-        initial_state.comets.clone(),
-        initial_state.comet_planet_ids.clone(),
-        initial_state.angular_velocity,
-        cache,
-    );
+    let opp_ws = WorldState::from_engine(opp_player, initial_state, cache);
 
     if opp_ws.my_planets.is_empty() {
         cache.set_current_turn(saved_turn);
@@ -184,7 +154,7 @@ pub fn opponent_turn0_variants(
     let opp_artifacts = build_mission_artifacts(&opp_model);
 
     let plan_greedy =
-        plan_from_artifacts(&opp_model, &opp_artifacts, PlanProfile::full(), &HashSet::new());
+        plan_from_artifacts(&opp_model, &opp_artifacts, PlanProfile::full(), &HashSet::default());
     let opp_targets = plan_greedy.offensive_targets.clone();
     let opposing: HashSet<i64> = opp_ws
         .planets
@@ -193,19 +163,16 @@ pub fn opponent_turn0_variants(
         .map(|p| p.id)
         .collect();
 
-    let mut seen: HashSet<Vec<(i64, u64, i64)>> = HashSet::new();
+    let mut seen: HashSet<Vec<(i64, u64, i64)>> = HashSet::default();
     let mut variants: Vec<Vec<(i64, f64, i64)>> = Vec::new();
     let push = |moves: Vec<(i64, f64, i64)>,
                     seen: &mut HashSet<Vec<(i64, u64, i64)>>,
                     variants: &mut Vec<Vec<(i64, f64, i64)>>| {
-        let key: Vec<(i64, u64, i64)> = {
-            let mut k: Vec<(i64, u64, i64)> = moves
-                .iter()
-                .map(|&(src, angle, ships)| (src, angle.to_bits(), ships))
-                .collect();
-            k.sort_unstable();
-            k
-        };
+        let mut key: Vec<(i64, u64, i64)> = moves
+            .iter()
+            .map(|&(src, angle, ships)| (src, angle.to_bits(), ships))
+            .collect();
+        key.sort_unstable();
         if seen.insert(key) {
             variants.push(moves);
         }
@@ -213,7 +180,7 @@ pub fn opponent_turn0_variants(
 
     push(plan_greedy.moves, &mut seen, &mut variants);
     if let Some(t1) = opp_targets.first().copied() {
-        let mut forbid_t1 = HashSet::new();
+        let mut forbid_t1 = HashSet::default();
         forbid_t1.insert(t1);
         let p = plan_from_artifacts(&opp_model, &opp_artifacts, PlanProfile::full(), &forbid_t1);
         push(p.moves, &mut seen, &mut variants);

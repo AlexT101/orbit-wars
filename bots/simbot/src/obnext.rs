@@ -20,8 +20,9 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::HORIZON;
 use crate::engine::Planet;
@@ -248,12 +249,39 @@ pub type PlannedCommitments = HashMap<i64, Vec<ArrivalEvent>>;
 /// `(angle, turns, target_x, target_y)` — return shape of every solver here.
 type AimResult = (f64, i64, f64, f64);
 
+/// Inline-storage hint key. Hints in practice are 0–3 elements; capping at 4
+/// (and storing on the stack) lets the probe caches use a `Copy` key instead
+/// of allocating a `Vec<i64>` per lookup/insert.
+///
+/// This path intentionally supports up to 4 hints only. Callers that exceed
+/// that bound should fail fast rather than silently changing solver behavior.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+struct HintsKey {
+    data: [i64; 4],
+    len: u8,
+}
+
+impl HintsKey {
+    fn from_slice(hints: &[i64]) -> Self {
+        assert!(hints.len() <= 4, "HintsKey supports at most 4 hints");
+        let mut data = [0i64; 4];
+        let len = hints.len();
+        data[..len].copy_from_slice(&hints[..len]);
+        Self { data, len: len as u8 }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[i64] {
+        &self.data[..self.len as usize]
+    }
+}
+
 /// Cache key for `WorldModel::best_probe_aim` (mirrors obnext's tuple key).
 type BestProbeKey = (
     i64,            // src_id
     i64,            // target_id
     i64,            // source_cap
-    Vec<i64>,       // hints
+    HintsKey,       // hints (inline, up to 4)
     Option<i64>,    // min_turn
     Option<i64>,    // max_turn
     Option<i64>,    // anchor_turn
@@ -277,7 +305,7 @@ pub struct WorldModel<'a> {
     pub indirect_feature_map: HashMap<i64, (f64, f64, f64)>,
 
     shot_cache: RefCell<HashMap<(i64, i64, i64), Option<AimResult>>>,
-    probe_candidate_cache: RefCell<HashMap<(i64, i64, i64, Vec<i64>), Vec<i64>>>,
+    probe_candidate_cache: RefCell<HashMap<(i64, i64, i64, HintsKey), Vec<i64>>>,
     best_probe_cache: RefCell<HashMap<BestProbeKey, Option<(i64, AimResult)>>>,
     reaction_cache: RefCell<HashMap<i64, (i64, i64)>>,
     exact_need_cache: RefCell<HashMap<(i64, i64, i64), i64>>,
@@ -297,7 +325,8 @@ impl<'a> WorldModel<'a> {
         let is_late = state.remaining_steps < LATE_REMAINING_TURNS;
         let is_very_late = state.remaining_steps < VERY_LATE_REMAINING_TURNS;
 
-        let mut indirect_feature_map = HashMap::with_capacity(state.planets.len());
+        let mut indirect_feature_map =
+            HashMap::with_capacity_and_hasher(state.planets.len(), Default::default());
         for planet in &state.planets {
             indirect_feature_map
                 .insert(planet.id, indirect_features(planet, &state.planets, state.player));
@@ -310,11 +339,11 @@ impl<'a> WorldModel<'a> {
             is_late,
             is_very_late,
             indirect_feature_map,
-            shot_cache: RefCell::new(HashMap::new()),
-            probe_candidate_cache: RefCell::new(HashMap::new()),
-            best_probe_cache: RefCell::new(HashMap::new()),
-            reaction_cache: RefCell::new(HashMap::new()),
-            exact_need_cache: RefCell::new(HashMap::new()),
+            shot_cache: RefCell::new(HashMap::default()),
+            probe_candidate_cache: RefCell::new(HashMap::default()),
+            best_probe_cache: RefCell::new(HashMap::default()),
+            reaction_cache: RefCell::new(HashMap::default()),
+            exact_need_cache: RefCell::new(HashMap::default()),
         }
     }
 
@@ -359,14 +388,38 @@ impl<'a> WorldModel<'a> {
         hints: &[i64],
     ) -> Vec<i64> {
         let source_cap = source_cap.max(1);
-        let mut normalized_hints: Vec<i64> = hints
-            .iter()
-            .filter(|&&h| h > 0)
-            .map(|&h| h)
-            .collect();
-        normalized_hints.sort_unstable();
-        normalized_hints.dedup();
-        let cache_key = (src_id, target_id, source_cap, normalized_hints.clone());
+        assert!(hints.len() <= 4, "probe_ship_candidates supports at most 4 hints");
+        // Normalize in place on a stack-friendly buffer (hints are 0–4 long
+        // in practice, matching the inline cache key contract).
+        let mut normalized_buf = [0i64; 4];
+        let mut normalized_len = 0usize;
+        for &h in hints {
+            if h > 0 && normalized_len < normalized_buf.len() {
+                normalized_buf[normalized_len] = h;
+                normalized_len += 1;
+            }
+        }
+        normalized_buf[..normalized_len].sort_unstable();
+        // dedup in place
+        let mut write = 0usize;
+        let mut prev: Option<i64> = None;
+        for i in 0..normalized_len {
+            let v = normalized_buf[i];
+            if Some(v) != prev {
+                normalized_buf[write] = v;
+                write += 1;
+                prev = Some(v);
+            }
+        }
+        normalized_len = write;
+        let normalized_hints = &normalized_buf[..normalized_len];
+
+        let cache_key = (
+            src_id,
+            target_id,
+            source_cap,
+            HintsKey::from_slice(normalized_hints),
+        );
         if let Some(cached) = self.probe_candidate_cache.borrow().get(&cache_key) {
             return cached.clone();
         }
@@ -374,31 +427,38 @@ impl<'a> WorldModel<'a> {
         let target = self.planet(target_id);
         let target_ships = target.ships.max(1);
 
-        let mut values: HashSet<i64> = HashSet::new();
+        // The set has at most ~12 entries (8 fixed slots + up to 5 deltas per
+        // hint, all clamped to `[1, source_cap]`). A Vec + sort + dedup beats
+        // a HashSet at this size, avoiding allocation + hashing overhead.
+        let mut values: Vec<i64> = Vec::with_capacity(16);
+        let push = |v: i64, values: &mut Vec<i64>| {
+            if (1..=source_cap).contains(&v) {
+                values.push(v);
+            }
+        };
         for v in 1..=source_cap.min(6) {
-            values.insert(v);
+            push(v, &mut values);
         }
-        values.insert(source_cap);
-        values.insert((source_cap / 2).max(1));
-        values.insert((source_cap / 3).max(1));
-        values.insert(source_cap.min(PARTIAL_SOURCE_MIN_SHIPS));
-        values.insert(source_cap.min(target_ships + 1));
-        values.insert(source_cap.min(target_ships + 2));
-        values.insert(source_cap.min(target_ships + 4));
-        values.insert(source_cap.min(target_ships + 8));
+        push(source_cap, &mut values);
+        push((source_cap / 2).max(1), &mut values);
+        push((source_cap / 3).max(1), &mut values);
+        push(source_cap.min(PARTIAL_SOURCE_MIN_SHIPS), &mut values);
+        push(source_cap.min(target_ships + 1), &mut values);
+        push(source_cap.min(target_ships + 2), &mut values);
+        push(source_cap.min(target_ships + 4), &mut values);
+        push(source_cap.min(target_ships + 8), &mut values);
 
-        for &hint in &normalized_hints {
+        for &hint in normalized_hints {
             let base = hint.clamp(1, source_cap);
             for delta in [-2, -1, 0, 1, 2] {
                 let candidate = base + delta;
-                if (1..=source_cap).contains(&candidate) {
-                    values.insert(candidate);
-                }
+                push(candidate, &mut values);
             }
         }
 
-        let mut result: Vec<i64> = values.into_iter().collect();
-        result.sort_unstable();
+        values.sort_unstable();
+        values.dedup();
+        let result = values;
         self.probe_candidate_cache
             .borrow_mut()
             .insert(cache_key, result.clone());
@@ -420,12 +480,12 @@ impl<'a> WorldModel<'a> {
         max_anchor_diff: Option<i64>,
     ) -> Option<(i64, AimResult)> {
         let source_cap = source_cap.max(1);
-        let hints_vec: Vec<i64> = hints.to_vec();
+        let hints_key = HintsKey::from_slice(hints);
         let cache_key: BestProbeKey = (
             src_id,
             target_id,
             source_cap,
-            hints_vec.clone(),
+            hints_key,
             min_turn,
             max_turn,
             anchor_turn,
@@ -440,7 +500,7 @@ impl<'a> WorldModel<'a> {
         // ordering to obnext.
         let mut best_key: Option<(i64, i64, i64)> = None;
 
-        for ships in self.probe_ship_candidates(src_id, target_id, source_cap, &hints_vec) {
+        for ships in self.probe_ship_candidates(src_id, target_id, source_cap, hints_key.as_slice()) {
             let Some(aim) = self.plan_shot(src_id, target_id, ships) else {
                 continue;
             };
@@ -1074,7 +1134,7 @@ pub struct Modes {
 }
 
 fn build_policy_state(world: &WorldModel) -> PolicyState {
-    let mut indirect_wealth_map: HashMap<i64, f64> = HashMap::new();
+    let mut indirect_wealth_map: HashMap<i64, f64> = HashMap::default();
     for (&id, &(friendly, neutral, enemy)) in &world.indirect_feature_map {
         indirect_wealth_map.insert(
             id,
@@ -1084,7 +1144,7 @@ fn build_policy_state(world: &WorldModel) -> PolicyState {
         );
     }
 
-    let mut reaction_time_map: HashMap<i64, (i64, i64)> = HashMap::new();
+    let mut reaction_time_map: HashMap<i64, (i64, i64)> = HashMap::default();
     for target in &world.planets {
         if target.owner == world.player {
             continue;
@@ -1097,8 +1157,8 @@ fn build_policy_state(world: &WorldModel) -> PolicyState {
         reaction_time_map.insert(target.id, (my_t, enemy_t));
     }
 
-    let mut reserve: HashMap<i64, i64> = HashMap::new();
-    let mut attack_budget: HashMap<i64, i64> = HashMap::new();
+    let mut reserve: HashMap<i64, i64> = HashMap::default();
+    let mut attack_budget: HashMap<i64, i64> = HashMap::default();
     for planet in &world.my_planets {
         let exact_keep = world.keep_needed_map.get(&planet.id).copied().unwrap_or(0);
 
@@ -1205,7 +1265,7 @@ fn settle_plan(
 
     // tested.insert(send → Option<EvalRow>). None means "this send doesn't
     // settle for some reason"; Some means "this is a candidate".
-    let mut tested: HashMap<i64, Option<EvalRow>> = HashMap::new();
+    let mut tested: HashMap<i64, Option<EvalRow>> = HashMap::default();
     let mut tested_order: Vec<i64> = Vec::new();
 
     let evaluate = |send: i64,
@@ -1353,7 +1413,7 @@ fn settle_plan(
             .then(a.cmp(b))
     });
 
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for send in candidate_sends {
         if !seen.insert(send) {
             continue;
@@ -1407,7 +1467,7 @@ fn settle_reinforce_plan(
     }
     let seed_hint = send_guess.clamp(1, src_cap);
 
-    let mut tested: HashMap<i64, Option<EvalRow>> = HashMap::new();
+    let mut tested: HashMap<i64, Option<EvalRow>> = HashMap::default();
     let mut tested_order: Vec<i64> = Vec::new();
 
     let evaluate = |send: i64,
@@ -2099,9 +2159,9 @@ struct PlanState {
 impl PlanState {
     fn new() -> Self {
         Self {
-            planned_commitments: HashMap::new(),
+            planned_commitments: HashMap::default(),
             moves: Vec::new(),
-            spent_total: HashMap::new(),
+            spent_total: HashMap::default(),
         }
     }
 
@@ -2125,7 +2185,7 @@ impl PlanState {
     }
 
     fn finalize_moves(&self, world: &WorldModel) -> Vec<(i64, f64, i64)> {
-        let mut used_final: HashMap<i64, i64> = HashMap::new();
+        let mut used_final: HashMap<i64, i64> = HashMap::default();
         let mut out = Vec::with_capacity(self.moves.len());
         for &(src_id, angle, ships) in &self.moves {
             let source = world.planet(src_id);
@@ -2141,7 +2201,7 @@ impl PlanState {
 }
 
 fn compute_live_doomed(world: &WorldModel, state: &PlanState) -> HashSet<i64> {
-    let mut doomed = HashSet::new();
+    let mut doomed = HashSet::default();
     for planet in &world.my_planets {
         let status = world.hold_status(planet.id, &state.planned_commitments, DOOMED_EVAC_TURN_LIMIT);
         if !status.holds_full
@@ -2232,7 +2292,7 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
 }
 
 pub fn plan_moves_with_profile(world: &WorldModel, profile: PlanProfile) -> Vec<(i64, f64, i64)> {
-    plan_moves_full(world, profile, &HashSet::new()).moves
+    plan_moves_full(world, profile, &HashSet::default()).moves
 }
 
 /// Per-plan output. `offensive_targets` is the score-descending unique list of
@@ -2275,6 +2335,9 @@ pub struct MissionArtifacts {
     pub modes: Modes,
     pub policy: PolicyState,
     pub missions: Vec<Mission>,
+    /// Pre-collected once so candidate commit loops don't rebuild them.
+    pub my_planet_ids: Vec<i64>,
+    pub all_planet_ids: Vec<i64>,
 }
 
 pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
@@ -2283,7 +2346,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
     let state = PlanState::new();
 
     // Per-target option lists for multi-source swarm consideration.
-    let mut source_options_by_target: HashMap<i64, Vec<ShotOption>> = HashMap::new();
+    let mut source_options_by_target: HashMap<i64, Vec<ShotOption>> = HashMap::default();
     let mut missions: Vec<Mission> = Vec::new();
 
     // Reinforce + rescue + recapture (defensive — target our own planets,
@@ -2316,12 +2379,12 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
         if src_available <= 0 {
             continue;
         }
-        let src = world.planet(*src_id).clone();
+        let src = world.planet(*src_id);
         for target_id in &all_planet_ids {
             if *target_id == *src_id {
                 continue;
             }
-            let target = world.planet(*target_id).clone();
+            let target = world.planet(*target_id);
             if target.owner == world.player {
                 continue;
             }
@@ -2344,7 +2407,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
             } else {
                 LATE_CAPTURE_BUFFER
             };
-            if !candidate_time_valid(&target, rough_turns, world, buf) {
+            if !candidate_time_valid(target, rough_turns, world, buf) {
                 continue;
             }
             let global_needed = world.min_ships_to_own_at(
@@ -2358,14 +2421,14 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
             if global_needed <= 0 {
                 continue;
             }
-            if opening_filter(&target, rough_turns, global_needed, src_available, world, &policy) {
+            if opening_filter(target, rough_turns, global_needed, src_available, world, &policy) {
                 continue;
             }
 
             // Swarm fragment (heavy-superset — fast candidates drop these in
             // plan_from_artifacts).
             let partial_send_cap = src_available
-                .min(preferred_send(&target, global_needed, rough_turns, src_available, world, &modes, &policy));
+                .min(preferred_send(target, global_needed, rough_turns, src_available, world, &modes, &policy));
             if partial_send_cap >= PARTIAL_SOURCE_MIN_SHIPS {
                 let partial_hints = [partial_send_cap, global_needed, target.ships + 1];
                 if let Some((_, partial_aim)) = world.best_probe_aim(
@@ -2379,16 +2442,16 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                     None,
                 ) {
                     let (p_angle, p_turns, _, _) = partial_aim;
-                    if time_filters_pass(&target, p_turns, global_needed, src_available, world, &policy) {
+                    if time_filters_pass(target, p_turns, global_needed, src_available, world, &policy) {
                         let partial_value =
-                            target_value(&target, p_turns, MissionKind::Swarm, world, &modes, &policy);
+                            target_value(target, p_turns, MissionKind::Swarm, world, &modes, &policy);
                         if partial_value > 0.0 {
                             let partial_score = apply_score_modifiers(
                                 partial_value
                                     / (partial_send_cap as f64
                                         + p_turns as f64 * ATTACK_COST_TURN_WEIGHT
                                         + 1.0),
-                                &target,
+                                target,
                                 MissionKind::Swarm,
                                 world,
                             );
@@ -2413,11 +2476,11 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
 
             if global_needed <= src_available {
                 let send_guess =
-                    preferred_send(&target, global_needed, rough_turns, src_available, world, &modes, &policy);
+                    preferred_send(target, global_needed, rough_turns, src_available, world, &modes, &policy);
                 if let Some(plan) = settle_plan(
                     world,
-                    &src,
-                    &target,
+                    src,
+                    target,
                     src_available,
                     send_guess,
                     &state.planned_commitments,
@@ -2429,18 +2492,18 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                     None,
                     4,
                 ) {
-                    if time_filters_pass(&target, plan.turns, plan.need, src_available, world, &policy)
+                    if time_filters_pass(target, plan.turns, plan.need, src_available, world, &policy)
                         && plan.send >= 1
                     {
                         let value =
-                            target_value(&target, plan.turns, MissionKind::Capture, world, &modes, &policy);
+                            target_value(target, plan.turns, MissionKind::Capture, world, &modes, &policy);
                         if value > 0.0 {
                             let score = apply_score_modifiers(
                                 value
                                     / (plan.send as f64
                                         + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT
                                         + 1.0),
-                                &target,
+                                target,
                                 MissionKind::Capture,
                                 world,
                             );
@@ -2470,7 +2533,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
             }
 
             if let Some(snipe) =
-                build_snipe_mission(world, &src, &target, src_available, &state.planned_commitments, &modes, &policy)
+                build_snipe_mission(world, src, target, src_available, &state.planned_commitments, &modes, &policy)
             {
                 missions.push(snipe);
             }
@@ -2480,12 +2543,16 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
     // Multi-source swarm pairing (heavy-superset).
     let target_ids_with_options: Vec<i64> = source_options_by_target.keys().copied().collect();
     for target_id in &target_ids_with_options {
-        let options = source_options_by_target.get(target_id).cloned().unwrap_or_default();
-        if options.len() < 2 {
+        // `options` is only used to populate `top_options`; build `top_options`
+        // directly from the source map and skip the intermediate clone.
+        let Some(options_ref) = source_options_by_target.get(target_id) else {
+            continue;
+        };
+        if options_ref.len() < 2 {
             continue;
         }
-        let target = world.planet(*target_id).clone();
-        let mut top_options = options.clone();
+        let target = world.planet(*target_id);
+        let mut top_options: Vec<ShotOption> = options_ref.clone();
         top_options.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         top_options.truncate(MULTI_SOURCE_TOP_K);
 
@@ -2496,7 +2563,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                 if first.src_id == second.src_id {
                     continue;
                 }
-                let pair_tol = swarm_eta_tolerance(&[first, second], &target, world);
+                let pair_tol = swarm_eta_tolerance(&[first, second], target, world);
                 if (first.turns - second.turns).abs() > pair_tol {
                     continue;
                 }
@@ -2519,13 +2586,13 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                 if total_cap < need {
                     continue;
                 }
-                let value = target_value(&target, joint_turn, MissionKind::Swarm, world, &modes, &policy);
+                let value = target_value(target, joint_turn, MissionKind::Swarm, world, &modes, &policy);
                 if value <= 0.0 {
                     continue;
                 }
                 let pair_score = apply_score_modifiers(
                     value / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0),
-                    &target,
+                    target,
                     MissionKind::Swarm,
                     world,
                 ) * MULTI_SOURCE_PLAN_PENALTY;
@@ -2550,7 +2617,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                 for j in (i + 1)..top_options.len() {
                     for k in (j + 1)..top_options.len() {
                         let trio = [top_options[i], top_options[j], top_options[k]];
-                        let mut src_ids = HashSet::new();
+                        let mut src_ids = HashSet::default();
                         for opt in &trio {
                             src_ids.insert(opt.src_id);
                         }
@@ -2558,7 +2625,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                             continue;
                         }
                         let trio_vec = trio.to_vec();
-                        let trio_tol = swarm_eta_tolerance(&trio_vec, &target, world);
+                        let trio_tol = swarm_eta_tolerance(&trio_vec, target, world);
                         let turns: [i64; 3] = [trio[0].turns, trio[1].turns, trio[2].turns];
                         let max_t = *turns.iter().max().unwrap();
                         let min_t = *turns.iter().min().unwrap();
@@ -2584,13 +2651,13 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                             continue;
                         }
                         let value =
-                            target_value(&target, joint_turn, MissionKind::Swarm, world, &modes, &policy);
+                            target_value(target, joint_turn, MissionKind::Swarm, world, &modes, &policy);
                         if value <= 0.0 {
                             continue;
                         }
                         let trio_score = apply_score_modifiers(
                             value / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0),
-                            &target,
+                            target,
                             MissionKind::Swarm,
                             world,
                         ) * THREE_SOURCE_PLAN_PENALTY;
@@ -2620,6 +2687,8 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
         modes,
         policy,
         missions,
+        my_planet_ids,
+        all_planet_ids,
     }
 }
 
@@ -2647,13 +2716,14 @@ pub fn plan_from_artifacts(
     forbidden_targets: &HashSet<i64>,
 ) -> PlanOutput {
     let modes = artifacts.modes;
-    let policy = artifacts.policy.clone();
+    let policy = &artifacts.policy;
     let mut state = PlanState::new();
-    let my_planet_ids: Vec<i64> = world.my_planets.iter().map(|p| p.id).collect();
-    let all_planet_ids: Vec<i64> = world.planets.iter().map(|p| p.id).collect();
+    let my_planet_ids: &[i64] = &artifacts.my_planet_ids;
+    let all_planet_ids: &[i64] = &artifacts.all_planet_ids;
 
     // Heavy-superset filter: drop Swarm + CrashExploit for fast profile.
-    let mut missions: Vec<Mission> = artifacts
+    // Iterate by reference (no Mission clones, no PolicyState clone).
+    let mut missions: Vec<&Mission> = artifacts
         .missions
         .iter()
         .filter(|m| {
@@ -2661,11 +2731,10 @@ pub fn plan_from_artifacts(
                 && (profile.heavy
                     || !matches!(m.kind, MissionKind::Swarm | MissionKind::CrashExploit))
         })
-        .cloned()
         .collect();
     missions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut seen_offensive: HashSet<i64> = HashSet::new();
+    let mut seen_offensive: HashSet<i64> = HashSet::default();
     let offensive_targets: Vec<i64> = missions
         .iter()
         .filter(|m| is_offensive_mission(m.kind))
@@ -2674,7 +2743,8 @@ pub fn plan_from_artifacts(
     let top_offensive_target = offensive_targets.first().copied();
 
     for mission in &missions {
-        let target = world.planet(mission.target_id).clone();
+        let mission: &Mission = *mission;
+        let target = world.planet(mission.target_id);
         match mission.kind {
             MissionKind::Single
             | MissionKind::Snipe
@@ -2683,9 +2753,9 @@ pub fn plan_from_artifacts(
             | MissionKind::Reinforce
             | MissionKind::CrashExploit => {
                 let option = mission.options[0];
-                let src = world.planet(option.src_id).clone();
+                let src = world.planet(option.src_id);
                 let Some((plan, left)) = settle_single_source_mission(
-                    world, mission, &option, &src, &target, &state, &modes, &policy,
+                    world, mission, &option, src, target, &state, &modes, &policy,
                 ) else {
                     continue;
                 };
@@ -2743,7 +2813,7 @@ pub fn plan_from_artifacts(
                         .then(a.0.src_id.cmp(&b.0.src_id))
                 });
                 let mut remaining = missing;
-                let mut sends: HashMap<i64, i64> = HashMap::new();
+                let mut sends: HashMap<i64, i64> = HashMap::default();
                 for idx in 0..ordered.len() {
                     let (option, limit) = ordered[idx];
                     let remaining_other: i64 =
@@ -2762,7 +2832,7 @@ pub fn plan_from_artifacts(
                     if send <= 0 {
                         continue;
                     }
-                    let src = world.planet(option.src_id).clone();
+                    let src = world.planet(option.src_id);
                     let Some(aim) = world.plan_shot(src.id, target.id, send) else {
                         aim_failed = true;
                         break;
@@ -2774,7 +2844,7 @@ pub fn plan_from_artifacts(
                     continue;
                 }
                 let turns_only: Vec<i64> = reaimed.iter().map(|r| r.2).collect();
-                let eta_tol = swarm_eta_tolerance(&mission.options, &target, world);
+                let eta_tol = swarm_eta_tolerance(&mission.options, target, world);
                 let max_t = *turns_only.iter().max().unwrap();
                 let min_t = *turns_only.iter().min().unwrap();
                 if max_t - min_t > eta_tol {
@@ -2831,18 +2901,21 @@ pub fn plan_from_artifacts(
     // Optional follow-up pass: use remaining attack budget for one extra shot
     // per source. Skipped in very-late games and in the fast profile.
     if profile.heavy && !world.is_very_late {
-        for src_id in &my_planet_ids {
+        for src_id in my_planet_ids {
             let src_left = state.source_attack_left(&policy, *src_id);
             if src_left < FOLLOWUP_MIN_SHIPS {
                 continue;
             }
-            let src = world.planet(*src_id).clone();
-            let mut best: Option<(f64, Planet, SettleResult)> = None;
-            for target_id in &all_planet_ids {
+            let src = world.planet(*src_id);
+            // Stash only the chosen target's id; we re-resolve it via
+            // `world.planet(...)` after the inner search to avoid carrying an
+            // owned Planet across the loop boundary.
+            let mut best: Option<(f64, i64, SettleResult)> = None;
+            for target_id in all_planet_ids {
                 if *target_id == *src_id {
                     continue;
                 }
-                let target = world.planet(*target_id).clone();
+                let target = world.planet(*target_id);
                 if target.owner == world.player {
                     continue;
                 }
@@ -2879,17 +2952,17 @@ pub fn plan_from_artifacts(
                 if rough_needed <= 0 || rough_needed > src_left {
                     continue;
                 }
-                if opening_filter(&target, est_turns, rough_needed, src_left, world, &policy) {
+                if opening_filter(target, est_turns, rough_needed, src_left, world, &policy) {
                     continue;
                 }
-                let send = preferred_send(&target, rough_needed, est_turns, src_left, world, &modes, &policy);
+                let send = preferred_send(target, rough_needed, est_turns, src_left, world, &modes, &policy);
                 if send < rough_needed {
                     continue;
                 }
                 let Some(plan) = settle_plan(
                     world,
-                    &src,
-                    &target,
+                    src,
+                    target,
                     src_left,
                     send,
                     &state.planned_commitments,
@@ -2909,29 +2982,30 @@ pub fn plan_from_artifacts(
                 if plan.send < plan.need {
                     continue;
                 }
-                let value = target_value(&target, plan.turns, MissionKind::Capture, world, &modes, &policy);
+                let value = target_value(target, plan.turns, MissionKind::Capture, world, &modes, &policy);
                 if value <= 0.0 {
                     continue;
                 }
                 let score = apply_score_modifiers(
                     value / (plan.send as f64 + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT + 1.0),
-                    &target,
+                    target,
                     MissionKind::Capture,
                     world,
                 );
                 if best.as_ref().map_or(true, |b| score > b.0) {
-                    best = Some((score, target, plan));
+                    best = Some((score, target.id, plan));
                 }
             }
-            let Some((_, target, plan)) = best else { continue };
+            let Some((_, target_id, plan)) = best else { continue };
+            let target = world.planet(target_id);
             let src_left = state.source_attack_left(&policy, *src_id);
             if plan.need > src_left {
                 continue;
             }
             let Some(plan2) = settle_plan(
                 world,
-                &src,
-                &target,
+                src,
+                target,
                 src_left,
                 src_left.min(plan.send),
                 &state.planned_commitments,
@@ -2964,12 +3038,17 @@ pub fn plan_from_artifacts(
         }
     }
 
-    // Doomed evac: planets that look lost get one last capture, else retreat.
+    // `live_doomed` is invariant across the doomed-evac pass below: evac only
+    // mutates `state.spent_total` and pushes commitments to captured targets
+    // (never our own planets), neither of which feed back into the
+    // `hold_status` query that defines doom for our own planets. So we build
+    // it once here and reuse it for rear staging too.
     let live_doomed = compute_live_doomed(world, &state);
-    if !live_doomed.is_empty() {
-        let frontier = FrontierContext::build(world, &live_doomed);
+    let frontier = FrontierContext::build(world, &live_doomed);
 
-        for planet in world.my_planets.clone() {
+    // Doomed evac: planets that look lost get one last capture, else retreat.
+    if !live_doomed.is_empty() {
+        for planet in &world.my_planets {
             if !live_doomed.contains(&planet.id) {
                 continue;
             }
@@ -3012,7 +3091,7 @@ pub fn plan_from_artifacts(
                 }
                 let Some(plan) = settle_plan(
                     world,
-                    &planet,
+                    planet,
                     target,
                     available_now,
                     available_now.min(need.max(target.ships + 1)),
@@ -3055,32 +3134,28 @@ pub fn plan_from_artifacts(
                 continue;
             }
 
-            // Retreat: pick the safest ally to fall back to.
-            let safe_allies: Vec<Planet> = world
+            // Retreat: pick the safest ally to fall back to. We only need its
+            // id, so iterate by reference and skip the safe-allies Vec clone.
+            let Some(retreat_target_id) = world
                 .my_planets
                 .iter()
                 .filter(|ally| ally.id != planet.id && !live_doomed.contains(&ally.id))
-                .cloned()
-                .collect();
-            if safe_allies.is_empty() {
-                continue;
-            }
-            let retreat_target = safe_allies
-                .iter()
                 .min_by(|a, b| {
                     frontier
                         .dist_of(a.id)
                         .partial_cmp(&frontier.dist_of(b.id))
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| {
-                            planet_distance(&planet, a)
-                                .partial_cmp(&planet_distance(&planet, b))
+                            planet_distance(planet, a)
+                                .partial_cmp(&planet_distance(planet, b))
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         })
                 })
-                .unwrap()
-                .clone();
-            let Some(aim) = world.plan_shot(planet.id, retreat_target.id, available_now) else {
+                .map(|p| p.id)
+            else {
+                continue;
+            };
+            let Some(aim) = world.plan_shot(planet.id, retreat_target_id, available_now) else {
                 continue;
             };
             let (angle, _, _, _) = aim;
@@ -3088,16 +3163,15 @@ pub fn plan_from_artifacts(
         }
     }
 
-    // Rear staging: deep-back planets feed forward.
+    // Rear staging: deep-back planets feed forward. Reuses the `live_doomed`
+    // / `frontier` built before the evac pass (see invariant note above).
     if profile.heavy
         && (!world.enemy_planets.is_empty() || !world.neutral_planets.is_empty())
         && world.my_planets.len() > 1
         && !world.is_late
     {
-        let live_doomed = compute_live_doomed(world, &state);
-        let frontier = FrontierContext::build(world, &live_doomed);
         if !frontier.targets.is_empty() && !frontier.safe_fronts.is_empty() {
-            let front_anchor = frontier
+            let front_anchor_id = frontier
                 .safe_fronts
                 .iter()
                 .min_by(|a, b| {
@@ -3107,7 +3181,7 @@ pub fn plan_from_artifacts(
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .unwrap()
-                .clone();
+                .id;
             let mut send_ratio = if world.is_four_player {
                 REAR_SEND_RATIO_FOUR_PLAYER
             } else {
@@ -3116,7 +3190,8 @@ pub fn plan_from_artifacts(
             if modes.is_finishing {
                 send_ratio = send_ratio.max(REAR_SEND_RATIO_FOUR_PLAYER);
             }
-            let mut sorted_rears: Vec<Planet> = world.my_planets.clone();
+            // Sort references rather than cloning the whole Vec<Planet>.
+            let mut sorted_rears: Vec<&Planet> = world.my_planets.iter().collect();
             sorted_rears.sort_by(|a, b| {
                 frontier
                     .dist_of(b.id)
@@ -3124,34 +3199,34 @@ pub fn plan_from_artifacts(
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             for rear in &sorted_rears {
-                if rear.id == front_anchor.id || live_doomed.contains(&rear.id) {
+                let rear: &Planet = *rear;
+                if rear.id == front_anchor_id || live_doomed.contains(&rear.id) {
                     continue;
                 }
                 if state.source_attack_left(&policy, rear.id) < REAR_SOURCE_MIN_SHIPS {
                     continue;
                 }
                 let rear_dist = frontier.dist_of(rear.id);
-                let anchor_dist = frontier.dist_of(front_anchor.id);
+                let anchor_dist = frontier.dist_of(front_anchor_id);
                 if rear_dist < anchor_dist * REAR_DISTANCE_RATIO {
                     continue;
                 }
-                let stage_candidates: Vec<&Planet> = frontier
+                // Pick the staging front id (closest staged ally, or fallback
+                // to ally closest to the rear's objective). Only the id is
+                // needed downstream — avoid cloning the Planet.
+                let stage_pick: Option<&Planet> = frontier
                     .safe_fronts
                     .iter()
                     .filter(|p| {
                         p.id != rear.id && frontier.dist_of(p.id) < rear_dist * REAR_STAGE_PROGRESS
                     })
-                    .collect();
-                let front: Planet = if !stage_candidates.is_empty() {
-                    stage_candidates
-                        .into_iter()
-                        .min_by(|a, b| {
-                            planet_distance(rear, a)
-                                .partial_cmp(&planet_distance(rear, b))
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .cloned()
-                        .unwrap()
+                    .min_by(|a, b| {
+                        planet_distance(rear, a)
+                            .partial_cmp(&planet_distance(rear, b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                let front_id = if let Some(p) = stage_pick {
+                    p.id
                 } else {
                     // No stage closer than REAR_STAGE_PROGRESS; pick the
                     // ally closest to the rear's objective.
@@ -3162,32 +3237,28 @@ pub fn plan_from_artifacts(
                     }) else {
                         continue;
                     };
-                    let remaining_fronts: Vec<&Planet> = frontier
+                    let Some(fallback) = frontier
                         .safe_fronts
                         .iter()
                         .filter(|p| p.id != rear.id)
-                        .collect();
-                    if remaining_fronts.is_empty() {
-                        continue;
-                    }
-                    remaining_fronts
-                        .into_iter()
                         .min_by(|a, b| {
                             planet_distance(a, objective)
                                 .partial_cmp(&planet_distance(b, objective))
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         })
-                        .cloned()
-                        .unwrap()
+                    else {
+                        continue;
+                    };
+                    fallback.id
                 };
-                if front.id == rear.id {
+                if front_id == rear.id {
                     continue;
                 }
                 let send = (state.source_attack_left(&policy, rear.id) as f64 * send_ratio) as i64;
                 if send < REAR_SEND_MIN_SHIPS {
                     continue;
                 }
-                let Some(aim) = world.plan_shot(rear.id, front.id, send) else {
+                let Some(aim) = world.plan_shot(rear.id, front_id, send) else {
                     continue;
                 };
                 let (angle, turns, _, _) = aim;
@@ -3227,9 +3298,9 @@ pub fn plan_from_artifacts(
 /// scheduling is anchored to opponent or own-falling timing, so a one-turn
 /// delay risks missing the window entirely.
 pub fn patient_targets(world: &WorldModel, artifacts: &MissionArtifacts) -> HashSet<i64> {
-    let mut wait_set: HashSet<i64> = HashSet::new();
-    let mut considered: HashSet<i64> = HashSet::new();
-    let planned: PlannedCommitments = HashMap::new();
+    let mut wait_set: HashSet<i64> = HashSet::default();
+    let mut considered: HashSet<i64> = HashSet::default();
+    let planned: PlannedCommitments = HashMap::default();
 
     // Score-descending walk so the first mission we see for each target is
     // the one we'd actually commit (matches plan_from_artifacts' ordering).

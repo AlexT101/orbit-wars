@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::constants::{
     CENTER, EDGE_AIM_FRACS, HORIZON, FWD_ITER_MAX, INTERCEPT_TOLERANCE, LAUNCH_CLEARANCE,
@@ -79,17 +79,25 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
 /// Counts distinct active players: every non-neutral planet owner plus every
 /// fleet owner. Floored at 2 since a match always has at least two players,
 /// even if one is currently wiped off the map but still has a fleet in flight.
+///
+/// Player ids are always in `0..MAX_PLAYERS` (or -1 for neutral), so we use a
+/// fixed-size bitset instead of a HashSet — no allocation, no hashing.
 pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
-    let mut owners: HashSet<i64> = HashSet::new();
-    for p in planets {
-        if p.owner != -1 {
-            owners.insert(p.owner);
+    use crate::constants::MAX_PLAYERS;
+    let mut seen = [false; MAX_PLAYERS];
+    let mark = |owner: i64, seen: &mut [bool; MAX_PLAYERS]| {
+        if owner >= 0 && (owner as usize) < MAX_PLAYERS {
+            seen[owner as usize] = true;
         }
+    };
+    for p in planets {
+        mark(p.owner, &mut seen);
     }
     for f in fleets {
-        owners.insert(f.owner);
+        mark(f.owner, &mut seen);
     }
-    owners.len().max(2)
+    let n = seen.iter().filter(|&&v| v).count();
+    n.max(2)
 }
 
 /// Shortest distance from `(px, py)` to the center of any planet in `set`.
@@ -445,7 +453,7 @@ pub fn resolve_arrival_event(
     if arrivals.is_empty() {
         return (owner, garrison.max(0));
     }
-    let mut by_owner: HashMap<i64, i64> = HashMap::new();
+    let mut by_owner: HashMap<i64, i64> = HashMap::default();
     for ev in arrivals {
         *by_owner.entry(ev.owner).or_insert(0) += ev.ships;
     }
@@ -761,8 +769,9 @@ impl TimelineCache {
             ledger.entry(planet.id).or_default();
         }
 
-        let mut baselines = HashMap::with_capacity(state.planets.len());
-        let mut expiry_at: HashMap<i64, i64> = HashMap::new();
+        let mut baselines =
+            HashMap::with_capacity_and_hasher(state.planets.len(), Default::default());
+        let mut expiry_at: HashMap<i64, i64> = HashMap::default();
         for planet in &state.planets {
             let arrivals = ledger
                 .get(&planet.id)
