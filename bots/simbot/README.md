@@ -12,6 +12,7 @@ solver, timeline simulator — is in place for a stronger replacement.
 
 | File | Role |
 |---|---|
+| `src/tests` | Contains all test files |
 | `src/lib.rs` | PyO3 module: `Bot` pyclass + observation parsing |
 | `src/strategy.rs` | Decision layer (currently `nearest_sniper`) |
 | `src/entity_cache.rs` | Pre-computed 500-turn position tables per planet/comet |

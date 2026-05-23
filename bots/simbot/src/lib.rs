@@ -8,6 +8,9 @@ mod helpers;
 mod sim_probe;
 mod strategy;
 
+#[cfg(test)]
+mod tests;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
