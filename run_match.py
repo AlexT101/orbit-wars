@@ -3,8 +3,10 @@ import contextlib
 import importlib.util
 import logging
 import os
+import random
 import sys
 from pathlib import Path
+from time import perf_counter
 
 
 ROOT = Path(__file__).resolve().parent
@@ -87,10 +89,19 @@ def run_rust_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> in
     engine = RustEngine()
     obs = engine.reset(seed, len(agents))
 
+    total_time = [0.0] * len(agents)
+    call_counts = [0] * len(agents)
+
     done = False
     steps_run = 0
     for _ in range(MAX_STEPS):
-        actions = [agents[i](obs[i].as_dict()) for i in range(len(agents))]
+        actions = []
+        for i in range(len(agents)):
+            start = perf_counter()
+            action = agents[i](obs[i].as_dict())
+            total_time[i] += perf_counter() - start
+            call_counts[i] += 1
+            actions.append(action)
         obs, done = engine.step(actions)
         steps_run += 1
         if done:
@@ -100,7 +111,8 @@ def run_rust_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> in
     print(f"Finished: done={done} steps={steps_run}")
     rewards = snap.rewards if snap.rewards is not None else [None] * len(agents)
     for i, reward in enumerate(rewards):
-        print(f"Player {i} ({bot_names[i]}): reward={reward}")
+        avg_ms = (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
+        print(f"Player {i} ({bot_names[i]}): reward={reward}, avg_step_ms={avg_ms:.2f}")
     return 0
 
 
@@ -117,9 +129,37 @@ def run_kaggle_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> 
     env = make("orbit_wars", configuration={"seed": seed}, debug=True)
     env.run([str(path) for path in bot_paths])
 
+    n_players = len(bot_names)
+    total_time = [0.0] * n_players
+    call_counts = [0] * n_players
+    over_budget = [0] * n_players
+    act_timeout = env.configuration.actTimeout
+    for step_logs in env.logs:
+        if not step_logs:
+            continue
+        for i in range(n_players):
+            if i < len(step_logs) and "duration" in step_logs[i]:
+                duration = step_logs[i]["duration"]
+                total_time[i] += duration
+                call_counts[i] += 1
+                if duration > act_timeout:
+                    over_budget[i] += 1
+
     final = env.steps[-1]
     for i, state in enumerate(final):
-        print(f"Player {i} ({bot_names[i]}): reward={state.reward}, status={state.status}")
+        avg_ms = (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
+        print(
+            f"Player {i} ({bot_names[i]}): reward={state.reward}, "
+            f"status={state.status}, avg_step_ms={avg_ms:.2f}"
+        )
+
+    timed_out = any(over_budget) or any(s.status == "TIMEOUT" for s in final)
+    if timed_out:
+        parts = [
+            f"P{i} ({bot_names[i]})={over_budget[i]}{' [KILLED]' if final[i].status == 'TIMEOUT' else ''}"
+            for i in range(n_players)
+        ]
+        print(f"Turns over actTimeout ({act_timeout}s): " + ", ".join(parts))
     return 0
 
 
@@ -128,12 +168,20 @@ def main() -> int:
     parser.add_argument("bot1")
     parser.add_argument("bot2")
     parser.add_argument(
-        "--use-kaggle",
+        "--kaggle",
         action="store_true",
         help="Use the Kaggle reference engine (env.run). Default: native Rust engine.",
     )
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for the match. If omitted, a random seed is chosen and printed.",
+    )
     args = parser.parse_args()
+
+    seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
+    print(f"Seed: {seed}")
 
     bot_names = [args.bot1, args.bot2]
     bot_paths = [bot_entry(name) for name in bot_names]
@@ -145,9 +193,9 @@ def main() -> int:
             print(f"  {path}")
         return 1
 
-    if args.use_kaggle:
-        return run_kaggle_match(bot_paths, bot_names, args.seed)
-    return run_rust_match(bot_paths, bot_names, args.seed)
+    if args.kaggle:
+        return run_kaggle_match(bot_paths, bot_names, seed)
+    return run_rust_match(bot_paths, bot_names, seed)
 
 
 if __name__ == "__main__":
