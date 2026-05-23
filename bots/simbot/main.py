@@ -18,7 +18,10 @@ import sys
 # Ensure the bundled native module (simbot_native.*.so) sitting next to this
 # file is importable, regardless of the harness's cwd or sys.path. This is what
 # lets the Kaggle submission tarball work: main.py + the .so live side by side.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+except NameError:
+    pass
 
 import simbot_native
 
