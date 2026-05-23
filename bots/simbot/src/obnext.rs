@@ -25,6 +25,7 @@ use std::ops::Deref;
 
 use crate::constants::HORIZON;
 use crate::engine::Planet;
+use crate::entity_cache::AimCacheVerdict;
 use crate::helpers::{self, aim_with_prediction, dist, nearest_distance_to_set, ArrivalEvent};
 use crate::world::{HoldStatus, WorldState};
 
@@ -317,18 +318,32 @@ impl<'a> WorldModel<'a> {
         }
     }
 
-    /// Cached `aim_with_prediction`. Returns the same `(angle, turns, tx, ty)`
-    /// tuple the underlying helper returns; misses cache on (src, target, ships)
-    /// triples that haven't been queried this turn.
+    /// Cached `aim_with_prediction`. Two-level cache:
+    ///   * L1 — per-`WorldModel` `shot_cache`: avoids repeated traffic to the
+    ///     L2 `RefCell` inside the hot probe loops.
+    ///   * L2 — `EntityCache::aim_cache`: shares results across every
+    ///     `WorldModel` built during the same bot turn (candidate plans,
+    ///     opponent-rollout rebuilds) and across turns when geometry is still
+    ///     valid. Stale entries are re-verified or evicted lazily.
     pub fn plan_shot(&self, src_id: i64, target_id: i64, ships: i64) -> Option<AimResult> {
         let ships = ships.max(1);
         let key = (src_id, target_id, ships);
         if let Some(cached) = self.shot_cache.borrow().get(&key) {
             return *cached;
         }
-        let src = self.planet(src_id);
-        let result =
-            aim_with_prediction(src.x, src.y, src.radius, target_id, ships, self.entity_cache);
+
+        let result = match self.entity_cache.aim_cache_lookup(src_id, target_id, ships) {
+            AimCacheVerdict::Hit(r) => r,
+            AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
+                let src = self.planet(src_id);
+                let r = aim_with_prediction(
+                    src.x, src.y, src.radius, target_id, ships, self.entity_cache,
+                );
+                self.entity_cache.aim_cache_store(src_id, target_id, ships, r);
+                r
+            }
+        };
+
         self.shot_cache.borrow_mut().insert(key, result);
         result
     }
@@ -2220,11 +2235,14 @@ pub fn plan_moves_with_profile(world: &WorldModel, profile: PlanProfile) -> Vec<
     plan_moves_full(world, profile, &HashSet::new()).moves
 }
 
-/// Per-plan output exposing the top-scoring offensive mission's target so the
-/// caller can build a "forbid this; pick the next-best attack" alternative.
+/// Per-plan output. `offensive_targets` is the score-descending unique list of
+/// targets among offensive missions (Capture/Single/Snipe/Swarm/CrashExploit);
+/// the caller uses it to drive forbid-prefix / only-target beam variants.
+/// `top_offensive_target` is the head of that list, kept for older callers.
 pub struct PlanOutput {
     pub moves: Vec<(i64, f64, i64)>,
     pub top_offensive_target: Option<i64>,
+    pub offensive_targets: Vec<i64>,
 }
 
 #[inline]
@@ -2239,20 +2257,37 @@ fn is_offensive_mission(kind: MissionKind) -> bool {
     )
 }
 
-pub fn plan_moves_full(
-    world: &WorldModel,
-    profile: PlanProfile,
-    forbidden_targets: &HashSet<i64>,
-) -> PlanOutput {
+/// Per-WorldModel artifacts shared across candidate plans:
+///   * `modes` and `policy` are pure functions of the WorldModel.
+///   * `missions` is the *heavy-superset* mission list. Swarm/CrashExploit
+///     missions are present even though they used to be gated by
+///     `profile.heavy`; [`plan_from_artifacts`] filters them out when running
+///     a fast-profile candidate. Building one list lets 25 candidates share
+///     the expensive O(my × all) sweep + multi-source swarm pairing instead
+///     of repeating it per candidate.
+///
+/// The reinforce/rescue/recapture/crash-exploit builders and the offensive
+/// sweep here all read `state.planned_commitments` / `state.spent_total` —
+/// which are empty at this stage — so mission scores reflect the pre-commit
+/// world. Per-candidate `plan_from_artifacts` runs its own `PlanState` for
+/// the commit loop.
+pub struct MissionArtifacts {
+    pub modes: Modes,
+    pub policy: PolicyState,
+    pub missions: Vec<Mission>,
+}
+
+pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
     let modes = build_modes(world);
     let policy = build_policy_state(world);
-    let mut state = PlanState::new();
+    let state = PlanState::new();
 
     // Per-target option lists for multi-source swarm consideration.
     let mut source_options_by_target: HashMap<i64, Vec<ShotOption>> = HashMap::new();
     let mut missions: Vec<Mission> = Vec::new();
 
-    // Reinforce + rescue + recapture (heavy + defensive).
+    // Reinforce + rescue + recapture (defensive — target our own planets,
+    // independent of profile).
     missions.extend(build_reinforce_missions(
         world,
         &policy,
@@ -2327,9 +2362,11 @@ pub fn plan_moves_full(
                 continue;
             }
 
+            // Swarm fragment (heavy-superset — fast candidates drop these in
+            // plan_from_artifacts).
             let partial_send_cap = src_available
                 .min(preferred_send(&target, global_needed, rough_turns, src_available, world, &modes, &policy));
-            if profile.heavy && partial_send_cap >= PARTIAL_SOURCE_MIN_SHIPS {
+            if partial_send_cap >= PARTIAL_SOURCE_MIN_SHIPS {
                 let partial_hints = [partial_send_cap, global_needed, target.ships + 1];
                 if let Some((_, partial_aim)) = world.best_probe_aim(
                     src.id,
@@ -2440,12 +2477,8 @@ pub fn plan_moves_full(
         }
     }
 
-    // Multi-source swarm pairing.
-    let target_ids_with_options: Vec<i64> = if profile.heavy {
-        source_options_by_target.keys().copied().collect()
-    } else {
-        Vec::new()
-    };
+    // Multi-source swarm pairing (heavy-superset).
+    let target_ids_with_options: Vec<i64> = source_options_by_target.keys().copied().collect();
     for target_id in &target_ids_with_options {
         let options = source_options_by_target.get(target_id).cloned().unwrap_or_default();
         if options.len() < 2 {
@@ -2574,24 +2607,71 @@ pub fn plan_moves_full(
         }
     }
 
-    if profile.heavy {
-        missions.extend(build_crash_exploit_missions(
-            world,
-            &policy,
-            &state.planned_commitments,
-            &modes,
-        ));
-    }
+    // Crash exploit (heavy-superset; build_crash_exploit_missions itself
+    // gates on CRASH_EXPLOIT_ENABLED + 4-player mode).
+    missions.extend(build_crash_exploit_missions(
+        world,
+        &policy,
+        &state.planned_commitments,
+        &modes,
+    ));
 
-    if !forbidden_targets.is_empty() {
-        missions.retain(|m| !forbidden_targets.contains(&m.target_id));
+    MissionArtifacts {
+        modes,
+        policy,
+        missions,
     }
+}
+
+/// Thin wrapper: build artifacts and immediately commit. Use this for one-off
+/// plans; the rollout-search path uses [`build_mission_artifacts`] +
+/// [`plan_from_artifacts`] directly so all candidates share one artifact set.
+pub fn plan_moves_full(
+    world: &WorldModel,
+    profile: PlanProfile,
+    forbidden_targets: &HashSet<i64>,
+) -> PlanOutput {
+    let artifacts = build_mission_artifacts(world);
+    plan_from_artifacts(world, &artifacts, profile, forbidden_targets)
+}
+
+/// Per-candidate commit pass over a shared `MissionArtifacts`. Filters the
+/// heavy-superset mission list by `forbidden_targets` (and drops Swarm/
+/// CrashExploit when `profile.heavy` is false), then runs the same commit /
+/// followup / doomed-evac / rear-staging pipeline that used to live inside
+/// `plan_moves_full`.
+pub fn plan_from_artifacts(
+    world: &WorldModel,
+    artifacts: &MissionArtifacts,
+    profile: PlanProfile,
+    forbidden_targets: &HashSet<i64>,
+) -> PlanOutput {
+    let modes = artifacts.modes;
+    let policy = artifacts.policy.clone();
+    let mut state = PlanState::new();
+    let my_planet_ids: Vec<i64> = world.my_planets.iter().map(|p| p.id).collect();
+    let all_planet_ids: Vec<i64> = world.planets.iter().map(|p| p.id).collect();
+
+    // Heavy-superset filter: drop Swarm + CrashExploit for fast profile.
+    let mut missions: Vec<Mission> = artifacts
+        .missions
+        .iter()
+        .filter(|m| {
+            !forbidden_targets.contains(&m.target_id)
+                && (profile.heavy
+                    || !matches!(m.kind, MissionKind::Swarm | MissionKind::CrashExploit))
+        })
+        .cloned()
+        .collect();
     missions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    let top_offensive_target = missions
+    let mut seen_offensive: HashSet<i64> = HashSet::new();
+    let offensive_targets: Vec<i64> = missions
         .iter()
-        .find(|m| is_offensive_mission(m.kind))
-        .map(|m| m.target_id);
+        .filter(|m| is_offensive_mission(m.kind))
+        .filter_map(|m| seen_offensive.insert(m.target_id).then_some(m.target_id))
+        .collect();
+    let top_offensive_target = offensive_targets.first().copied();
 
     for mission in &missions {
         let target = world.planet(mission.target_id).clone();
@@ -3122,6 +3202,7 @@ pub fn plan_moves_full(
     PlanOutput {
         moves: state.finalize_moves(world),
         top_offensive_target,
+        offensive_targets,
     }
 }
 

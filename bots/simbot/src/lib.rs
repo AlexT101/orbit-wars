@@ -137,7 +137,7 @@ impl Observation {
     }
 }
 
-#[pyclass]
+#[pyclass(unsendable)]
 pub struct Bot {
     current_turn: i64,
     cache: Option<EntityCache>,
@@ -253,6 +253,10 @@ impl Bot {
         }
         if let Some(cache) = &mut self.cache {
             cache.set_current_turn(self.current_turn);
+            // Drop the prior bot turn's aim entries. Slots from rollout
+            // forward-sim of earlier turns are released the same way as they
+            // age past `current_turn`.
+            cache.clear_aim_cache_slot(self.current_turn - 1);
         }
     }
 }
