@@ -1,27 +1,18 @@
-//! Lookahead simulator for bot decision-making.
+//! Lookahead simulator for bot decision-making — a fast-path version of
+//! `engine::EngineState::step_with_actions` for repeated short-horizon rollouts.
 //!
-//! Mirrors `engine::EngineState::step_with_actions` but optimized for repeated
-//! short-horizon rollouts:
+//! - Borrows comet path tables and initial-planet positions from the parent
+//!   engine instead of cloning (≈8KB saved per probe).
+//! - Reuses per-step scratch buffers across the rollout.
+//! - Emits a per-step event log so callers observe the rollout instead of
+//!   re-deriving collision math.
 //!
-//! - Borrows the parent engine's comet path tables and initial-planet positions
-//!   instead of cloning them (≈8KB saved per probe — comet paths dominate).
-//! - Reuses per-step scratch buffers across the rollout (no `vec![..; n]`
-//!   allocations inside the step loop, unlike the engine).
-//! - Emits a per-step event log so callers can build the arrival ledger or
-//!   per-planet timeline by *observing* the rollout instead of re-deriving the
-//!   collision math.
+//! Two deliberate simplifications:
 //!
-//! Bit-exact with the engine for planet orbits, fleet motion, swept-circle
-//! collision, and combat. Two deliberate simplifications:
-//!
-//! 1. Comet spawning during the rollout is skipped. Comets that don't exist on
-//!    turn 0 aren't observable to the bot anyway, so the bot can't react to
-//!    them — modelling their future arrival adds complexity without value.
-//! 2. Episode termination and reward computation are skipped — the probe keeps
-//!    stepping past the engine's would-be `done` flag. Callers cap the horizon.
-//!
-//! When `engine.rs` changes, keep this in lockstep. The engine is the source
-//! of truth; this is a derived lookahead-only fast path.
+//! 1. Comets spawned mid-rollout are skipped — the bot can't observe them on
+//!    turn 0 anyway.
+//! 2. Episode termination and reward computation are skipped; callers cap
+//!    the horizon.
 
 #![allow(dead_code)]
 
@@ -79,7 +70,7 @@ pub struct SimProbe<'a> {
     angular_velocity: f64,
     ship_speed: f64,
 
-    // ── Owned mutable state (mirrors the relevant `EngineState` fields).
+    // ── Owned mutable state.
     step: i64,
     initial_step: i64,
     planets: Vec<Planet>,
@@ -334,8 +325,7 @@ impl<'a> SimProbe<'a> {
                 }
             }
 
-            // Identical top-1/top-2 scan to the engine, including the ascending
-            // player_idx tie-break.
+            // Top-1/top-2 scan with ascending player_idx tie-break.
             let mut top_player: i64 = -1;
             let mut top_ships: i64 = -1;
             let mut second_ships: i64 = -1;
@@ -487,8 +477,7 @@ impl<'a> SimProbe<'a> {
         }
     }
 
-    /// Mirrors engine's `expired_comet_ids` + `remove_comets` pair, run before
-    /// the rest of the step starts.
+    /// Drop comets whose path ran out before this turn began.
     fn expire_pre_step(&mut self) {
         if self.comet_groups.is_empty() {
             return;

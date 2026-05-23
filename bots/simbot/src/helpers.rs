@@ -99,9 +99,7 @@ pub fn nearest_distance_to_set(px: f64, py: f64, set: &[Planet]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// Returns `(planet, distance)` pairs sorted ascending by distance from
-/// `(tx, ty)`. NaN distances (shouldn't happen but be defensive) sort as
-/// equal to keep the sort total.
+/// `(planet, distance)` pairs sorted ascending by distance from `(tx, ty)`.
 pub fn sorted_by_distance_to(
     planets: &[Planet],
     tx: f64, ty: f64,
@@ -167,14 +165,10 @@ pub fn estimate_arrival(
     Some((angle, turns))
 }
 
-/// Sun-bypass chord sampling. When the direct path is blocked by the sun,
-/// this samples aim-points distributed across the target's disk (center plus
-/// fractions of the radius in both perpendicular directions, one candidate
-/// per `EDGE_AIM_FRACS` entry mirrored on each side — currently 1 + 2×4 = 9
-/// candidates) and returns the one with the shortest clear path. Because
-/// fleets travel in straight lines there are no curved routes — but a chord
-/// aimed at the edge of a planet's disk can clear the sun even when the
-/// center-aimed shot cannot.
+/// Sun-bypass chord sampling. Samples aim-points across the target's disk
+/// (center plus `EDGE_AIM_FRACS` mirrored offsets) and returns the one with
+/// the shortest clear path. A chord aimed at the edge of a disk can clear
+/// the sun when a center-aimed shot can't.
 pub fn arc_safe_angle(
     sx: f64, sy: f64, sr: f64,
     tx: f64, ty: f64, tr: f64,
@@ -233,18 +227,16 @@ pub fn arc_safe_angle(
     best.map(|(_, angle, turns)| (angle, turns))
 }
 
-/// Forward-simulation scan window. `window = max(8, turns / 2)` provides
-/// enough headroom for slow (speed=1) fleets aimed at long intercepts to
-/// still have runway to confirm the hit.
+/// Forward-sim scan window — `max(8, turns / 2)`, wide enough for slow
+/// fleets on long intercepts to still confirm the hit.
 #[inline]
 pub fn fwd_window(turns: i64) -> i64 {
     (turns / 2).max(8)
 }
 
 /// Ground-truth forward-sim. Returns `true` only if the fleet physically hits
-/// the target within the scan window. Used as a mandatory gate before any
-/// target intercept is accepted, helping eliminate false positives from
-/// predictions.
+/// the target within the scan window. Mandatory gate before any intercept is
+/// accepted.
 pub fn verify_shot_hits(
     sx: f64, sy: f64, sr: f64,
     angle: f64, turns: i64, ships: i64,
@@ -395,16 +387,11 @@ pub fn search_safe_intercept(
 }
 
 /// Public solver. Returns `(angle, turns, target_x, target_y)` or `None`.
+/// Every `Some` result is verified by `verify_shot_hits` — callers will
+/// never send a fleet this predicts will miss.
 ///
-/// Guarantee: every `Some` result is VERIFIED by `verify_shot_hits` before
-/// being returned, so the caller will never send a fleet this solver predicts
-/// will miss. False positives should be ~0.
-///
-/// Pipeline:
-///   1. `aim_raw()`          — fast iterative convergence (unverified)
-///   2. `verify_shot_hits()` — mandatory forward-sim gate
-///   3. If raw fails verify → `search_safe_intercept()` (exhaustive, pre-verified)
-///   4. If both fail        → `None` (shot correctly suppressed)
+/// Pipeline: `aim_raw` (fast iterative) → `verify_shot_hits` gate → fall
+/// back to `search_safe_intercept` (exhaustive, verifies internally) → `None`.
 pub fn aim_with_prediction(
     sx: f64, sy: f64, sr: f64,
     target_id: i64,
@@ -430,11 +417,9 @@ pub fn aim_with_prediction(
 /// Built once per turn via [`TimelineCache::build`].
 pub type ArrivalsByPlanet = HashMap<i64, Vec<ArrivalEvent>>;
 
-/// Engine-faithful same-turn combat resolution. Arrivals are aggregated by
-/// owner; the top two attackers cancel out; the survivor then fights the
-/// garrison. Ties at the top neutralise to ownerless (`-1`, 0 ships).
-/// Mirrors the engine's exact combat order — the foundation of every
-/// timeline query.
+/// Same-turn combat resolution. Arrivals aggregated by owner; the top two
+/// attackers cancel out; the survivor fights the garrison. Top-2 ties
+/// neutralise to ownerless (`-1`, 0 ships).
 pub fn resolve_arrival_event(
     owner: i64,
     garrison: i64,
@@ -523,14 +508,11 @@ pub struct PlanetTimeline {
 }
 
 /// Turn-by-turn rollout of one planet under a given arrival schedule.
-/// Applies production each turn (only while owned), then resolves the
-/// arrivals landing that turn via `resolve_arrival_event`. Records the
-/// owner/ship trajectory plus several queryable summaries.
+/// Applies production each turn (only while owned), then resolves arrivals
+/// via `resolve_arrival_event`. Records the trajectory plus queryable summaries.
 ///
-/// `expiry_turn`, when set, is the turn at which the planet leaves the board
-/// (typically `EntityCache::remaining_life` for a comet). Turns at or past
-/// expiry are recorded as ownerless with zero ships — no production, no
-/// arrival processing — so callers don't credit phantom garrisons.
+/// `expiry_turn`, when set, is the turn the planet leaves the board. Turns
+/// at or past expiry are recorded as ownerless with zero ships.
 pub fn simulate_planet_timeline(
     planet: &Planet,
     arrivals: &[ArrivalEvent],
@@ -592,7 +574,6 @@ pub fn simulate_planet_timeline(
         ships_at[turn as usize] = 0;
     }
 
-    // keep_needed: smallest starting garrison that survives every arrival.
     let mut keep_needed: i64 = 0;
     let mut holds_full = true;
     if planet.owner == player {
@@ -657,21 +638,14 @@ pub fn state_at_timeline(timeline: &PlanetTimeline, arrival_turn: i64) -> (i64, 
     (timeline.owner_at[turn], timeline.ships_at[turn].max(0))
 }
 
-/// Checkpointed re-simulation: starts from the baseline's state at turn
-/// `start_turn - 1` and re-runs only `start_turn..=horizon` with the full
-/// (baseline + hypothetical) arrival list. Used by capture/hold queries when
-/// only a hypothetical fleet at a known turn perturbs the schedule — the
-/// unchanged prefix `0..start_turn` is read directly from `baseline`.
+/// Checkpointed re-simulation: reuses `baseline` through `start_turn - 1`
+/// and re-runs only `start_turn..=horizon` with the full arrival list.
 ///
-/// Precondition: every arrival in `arrivals` whose turn differs from the
-/// baseline's must land at turn `>= start_turn`. Earlier-than-`start_turn`
-/// arrivals are taken as already-accounted-for in `baseline` and skipped.
+/// Precondition: arrivals differing from baseline must land at turn
+/// `>= start_turn`; earlier arrivals are assumed already in `baseline`.
 ///
-/// Returns a `PlanetTimeline` whose `owner_at` and `ships_at` fields are
-/// fully valid; the per-player metrics (`keep_needed`, `min_owned`,
-/// `first_enemy`, `fall_turn`, `holds_full`) are NOT recomputed and are left
-/// at safe defaults. Callers that need them must use the full
-/// `simulate_planet_timeline` instead.
+/// Only `owner_at`/`ships_at` are valid; per-player metrics are left at
+/// defaults. Use `simulate_planet_timeline` if those are needed.
 pub fn simulate_planet_timeline_from(
     planet: &Planet,
     baseline: &PlanetTimeline,
@@ -756,10 +730,7 @@ pub struct TimelineCache {
 }
 
 impl TimelineCache {
-    /// Build the cache from a single SimProbe rollout. `O(horizon * |planets|)`
-    /// total: one rollout for the ledger, plus one per-planet timeline sim
-    /// each (each `O(horizon)`). The entity cache supplies per-planet expiry
-    /// so comet timelines stop producing ships once the comet exits the board.
+    /// Build the cache from a single SimProbe rollout. `O(horizon * |planets|)`.
     pub fn build(
         state: &EngineState,
         player: i64,
@@ -833,17 +804,12 @@ fn expiry_within_horizon(
 }
 
 /// Smallest ship count that, if it lands on `planet` at `arrival_turn` for
-/// `attacker_owner`, makes them own the planet by `eval_turn`. Returns 0 when
-/// the planet is already going to belong to `attacker_owner` at `eval_turn`
-/// without any extra ships. Returns `upper_bound + 1` to signal "not
-/// achievable within the budget".
+/// `attacker_owner`, makes them own the planet by `eval_turn`. Returns 0 if
+/// the planet is already theirs at `eval_turn` without extras. Returns
+/// `upper_bound + 1` when not achievable within budget.
 ///
-/// Reuses `cache`'s baseline timeline as a checkpoint at turn `arrival_turn`,
-/// so each binary-search iteration only re-simulates `arrival_turn..=eval_turn`
-/// instead of the full horizon.
-///
-/// `eval_turn` is clamped to `cache.horizon`. If `arrival_turn > eval_turn`
-/// after clamping, returns `upper_bound + 1` (no valid action).
+/// `eval_turn` is clamped to `cache.horizon`; if `arrival_turn > eval_turn`
+/// after clamping, returns `upper_bound + 1`.
 pub fn min_ships_to_own_by(
     cache: &TimelineCache,
     planet: &Planet,
@@ -862,15 +828,14 @@ pub fn min_ships_to_own_by(
     let base_arrivals = cache.arrivals(planet.id);
     let expiry = cache.expiry(planet.id);
 
-    // owner_at is viewpoint-independent, so the cache's baseline (built for
-    // cache.player) gives the right "no-extras" prediction for any attacker.
+    // owner_at is viewpoint-independent — the cache's baseline gives the
+    // right "no-extras" prediction for any attacker.
     if let Some(baseline) = baseline {
         if state_at_timeline(baseline, eval_turn).0 == attacker_owner {
             return 0;
         }
     } else {
-        // Planet outside the cache (e.g. spawned later). Fall back to a full
-        // sim — same behaviour as before, just less efficient.
+        // Planet outside the cache (e.g. spawned later) — full sim fallback.
         let base_tl =
             simulate_planet_timeline(planet, base_arrivals, attacker_owner, eval_turn, expiry);
         if state_at_timeline(&base_tl, eval_turn).0 == attacker_owner {
@@ -915,12 +880,8 @@ pub fn min_ships_to_own_by(
 
 /// Smallest reinforcement that arrives at `arrival_turn` and keeps
 /// `cache.player` in continuous ownership through `hold_until`. If the planet
-/// is not currently `cache.player`'s, this collapses to `min_ships_to_own_by`
-/// evaluated at `hold_until`. Returns `upper_bound + 1` if no value in
-/// `1..=upper_bound` works.
-///
-/// Like `min_ships_to_own_by`, uses the cached baseline as a checkpoint at
-/// `arrival_turn` to avoid re-simulating the unchanged prefix.
+/// isn't currently `cache.player`'s, collapses to `min_ships_to_own_by` at
+/// `hold_until`. Returns `upper_bound + 1` if no value in `1..=upper_bound` works.
 pub fn reinforcement_needed_to_hold_until(
     cache: &TimelineCache,
     planet: &Planet,
