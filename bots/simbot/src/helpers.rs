@@ -3,7 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::constants::{
-    CENTER, EDGE_AIM_FRACS, HORIZON, FWD_ITER_MAX, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS,
+    CENTER, EDGE_AIM_FRACS, HORIZON, FWD_ITER_MAX, INTERCEPT_TOLERANCE, LAUNCH_CLEARANCE,
+    MAX_SHIP_SPEED, SUN_RADIUS,
 };
 
 use crate::engine::{Planet, Fleet, EngineState, swept_pair_hit};
@@ -297,8 +298,7 @@ pub fn aim_raw(
 ) -> Option<(f64, i64, f64, f64)> {
     let target = cache.get(target_id)?;
     let tr = target.radius;
-    let tol = target.tolerance;
-    let [tx, ty] = cache.position(target_id, 0)?;
+    let [mut tx, mut ty] = cache.position(target_id, 0)?;
 
     let mut est = match estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships) {
         Some(v) => v,
@@ -320,14 +320,18 @@ pub fn aim_raw(
                 .map(|(a, t)| (a, t, ntx, nty));
         };
         let (_, next_turns_f) = next_est;
-        if (next_turns_f - turns_f).abs() <= tol as f64 {
-            // Converged — return integer-turn result.
+        if (ntx - tx).abs() < 0.3
+            && (nty - ty).abs() < 0.3
+            && (next_turns_f - turns_f).abs() <= INTERCEPT_TOLERANCE as f64
+        {
             return match estimate_arrival(sx, sy, sr, ntx, nty, tr, ships) {
                 Some((a, t)) => Some((a, t, ntx, nty)),
                 None => arc_safe_angle(sx, sy, sr, ntx, nty, tr, ships)
                     .map(|(a, t)| (a, t, ntx, nty)),
             };
         }
+        tx = ntx;
+        ty = nty;
         est = next_est;
     }
 
@@ -349,11 +353,9 @@ pub fn search_safe_intercept(
     target_id: i64,
     ships: i64,
     cache: &EntityCache,
-    tolerance: Option<i64>,
 ) -> Option<(f64, i64, f64, f64)> {
     let target = cache.get(target_id)?;
     let tr = target.radius;
-    let tolerance = tolerance.unwrap_or(target.tolerance);
 
     let mut max_turns = HORIZON;
     if target.is_comet() {
@@ -370,7 +372,7 @@ pub fn search_safe_intercept(
         let Some((_, turns)) = est else {
             continue;
         };
-        if (turns - candidate_turns).abs() > tolerance {
+        if (turns - candidate_turns).abs() > INTERCEPT_TOLERANCE {
             continue;
         }
 
@@ -385,7 +387,7 @@ pub fn search_safe_intercept(
             continue;
         };
 
-        if (turns_out - actual_turns).abs() > tolerance {
+        if (turns_out - actual_turns).abs() > INTERCEPT_TOLERANCE {
             continue;
         }
 
@@ -421,7 +423,7 @@ pub fn aim_with_prediction(
     }
 
     // Raw missed or failed to verify — exhaustive search (verifies internally).
-    search_safe_intercept(sx, sy, sr, target_id, ships, cache, None)
+    search_safe_intercept(sx, sy, sr, target_id, ships, cache)
 }
 
 

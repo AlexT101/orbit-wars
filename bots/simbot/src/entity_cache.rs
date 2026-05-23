@@ -22,7 +22,6 @@ pub struct Entity {
     pub kind: EntityKind,
     pub radius: f64,
     pub orbital_radius: f64,                // 0.0 for comets since they don't orbit sun
-    pub tolerance: i64,                     // Turn tolerance for intercept checks
     pub positions: Vec<Option<[f64; 2]>>,   // Pre-computed positions, or None if not on board (comets)
 }
 
@@ -171,20 +170,11 @@ fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {
         }
     }
 
-    let tolerance = if is_static {
-        1
-    } else if orbital_radius * angular_velocity.abs() >= 1.0 {
-        2
-    } else {
-        1
-    };
-
     Entity {
         id: planet.id,
         kind,
         radius: planet.radius,
         orbital_radius,
-        tolerance,
         positions,
     }
 }
@@ -214,7 +204,6 @@ fn build_comet_entity(
         kind: EntityKind::Comet,
         radius: COMET_RADIUS,
         orbital_radius: 0.0,
-        tolerance: 2,
         positions,
     }
 }
