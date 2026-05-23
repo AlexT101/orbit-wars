@@ -6,6 +6,7 @@ mod engine;
 mod entity_cache;
 mod helpers;
 mod obnext;
+mod rollout;
 mod sim_probe;
 mod strategy;
 mod world;
@@ -18,9 +19,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
 use crate::constants::COMET_SPAWN_STEPS;
-use crate::engine::{CometGroup, Fleet, Planet};
+use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
 use crate::entity_cache::EntityCache;
-use crate::strategy::obnext;
+use crate::strategy::{obnext, obnext_candidates, pick_plan_by_rollout};
 use crate::world::WorldState;
 
 #[allow(dead_code)]
@@ -162,7 +163,79 @@ impl Bot {
         obs: &Bound<'_, PyDict>,
     ) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
+        self.refresh_cache(&obs);
+        let cache = self.cache.as_ref().expect("entity cache populated above");
 
+        let world = WorldState::build(
+            obs.player,
+            self.current_turn,
+            obs.planets,
+            obs.fleets,
+            obs.initial_planets,
+            obs.comets,
+            obs.comet_planet_ids,
+            obs.angular_velocity,
+            cache,
+        );
+
+        let moves = obnext(&world);
+        self.current_turn += 1;
+        Ok(moves)
+    }
+
+    /// Plan with rollout-based multi-candidate selection. Costs ~5-10x more
+    /// than `compute_moves` but rejects plans that lose to a modeled opponent.
+    fn compute_moves_with_search(
+        &mut self,
+        obs: &Bound<'_, PyDict>,
+    ) -> PyResult<Vec<(i64, f64, i64)>> {
+        let obs = Observation::from_dict(obs)?;
+        self.refresh_cache(&obs);
+
+        // Build the rollout seed before moving obs fields into WorldState.
+        let next_fleet_id = obs.fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
+        let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
+        let initial_state = EngineState::from_observation_parts(
+            self.current_turn,
+            obs.angular_velocity,
+            obs.planets.clone(),
+            obs.initial_planets.clone(),
+            obs.fleets.clone(),
+            next_fleet_id,
+            obs.comet_planet_ids.clone(),
+            obs.comets.clone(),
+            num_players,
+            Configuration::default(),
+        );
+        let player = obs.player;
+
+        // Plan candidates inside a block so the WorldState's immutable borrow
+        // on the cache ends before the rollout reborrows it mutably.
+        let candidates = {
+            let cache_ref = self.cache.as_ref().expect("entity cache populated above");
+            let world = WorldState::build(
+                player,
+                self.current_turn,
+                obs.planets,
+                obs.fleets,
+                obs.initial_planets,
+                obs.comets,
+                obs.comet_planet_ids,
+                obs.angular_velocity,
+                cache_ref,
+            );
+            obnext_candidates(&world)
+        };
+
+        let cache_mut = self.cache.as_mut().expect("entity cache populated above");
+        let moves = pick_plan_by_rollout(&initial_state, player, candidates, cache_mut);
+        self.current_turn += 1;
+        Ok(moves)
+    }
+}
+
+impl Bot {
+    fn refresh_cache(&mut self, obs: &Observation) {
         match &mut self.cache {
             None => {
                 self.cache = Some(EntityCache::build(
@@ -181,23 +254,6 @@ impl Bot {
         if let Some(cache) = &mut self.cache {
             cache.set_current_turn(self.current_turn);
         }
-        let cache = self.cache.as_ref().expect("entity cache populated above");
-
-        let world = WorldState::build(
-            obs.player,
-            self.current_turn,
-            obs.planets,
-            obs.fleets,
-            obs.initial_planets,
-            obs.comets,
-            obs.comet_planet_ids,
-            obs.angular_velocity,
-            cache,
-        );
-
-        let moves = obnext(&world);
-        self.current_turn += 1;
-        Ok(moves)
     }
 }
 

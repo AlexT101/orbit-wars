@@ -172,6 +172,33 @@ const FINISHING_ATTACK_MARGIN_BONUS: f64 = 0.08;
 const DOOMED_EVAC_TURN_LIMIT: i64 = 24;
 const DOOMED_MIN_SHIPS: i64 = 8;
 
+// ── 2. PlanProfile ────────────────────────────────────────────────────────
+
+/// Toggles optimization features. Defensive features (reinforce/rescue/
+/// recapture/doomed evac) and core offense (Single + Snipe) are always on.
+/// `heavy = false` is used by the rollout opponent model to keep per-turn
+/// cost down.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanProfile {
+    /// Enables 2-/3-source swarms, crash exploit, follow-up pass, rear staging.
+    pub heavy: bool,
+}
+
+impl PlanProfile {
+    pub const fn full() -> Self {
+        Self { heavy: true }
+    }
+    pub const fn fast() -> Self {
+        Self { heavy: false }
+    }
+}
+
+impl Default for PlanProfile {
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
 // ── 2. Mission / option / commitment types ────────────────────────────────
 
 /// What a single shot is trying to do. Used both on `ShotOption.mission` (per
@@ -2186,6 +2213,37 @@ fn time_filters_pass(
 }
 
 pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
+    plan_moves_with_profile(world, PlanProfile::full())
+}
+
+pub fn plan_moves_with_profile(world: &WorldModel, profile: PlanProfile) -> Vec<(i64, f64, i64)> {
+    plan_moves_full(world, profile, &HashSet::new()).moves
+}
+
+/// Per-plan output exposing the top-scoring offensive mission's target so the
+/// caller can build a "forbid this; pick the next-best attack" alternative.
+pub struct PlanOutput {
+    pub moves: Vec<(i64, f64, i64)>,
+    pub top_offensive_target: Option<i64>,
+}
+
+#[inline]
+fn is_offensive_mission(kind: MissionKind) -> bool {
+    matches!(
+        kind,
+        MissionKind::Capture
+            | MissionKind::Single
+            | MissionKind::Snipe
+            | MissionKind::Swarm
+            | MissionKind::CrashExploit
+    )
+}
+
+pub fn plan_moves_full(
+    world: &WorldModel,
+    profile: PlanProfile,
+    forbidden_targets: &HashSet<i64>,
+) -> PlanOutput {
     let modes = build_modes(world);
     let policy = build_policy_state(world);
     let mut state = PlanState::new();
@@ -2271,7 +2329,7 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
 
             let partial_send_cap = src_available
                 .min(preferred_send(&target, global_needed, rough_turns, src_available, world, &modes, &policy));
-            if partial_send_cap >= PARTIAL_SOURCE_MIN_SHIPS {
+            if profile.heavy && partial_send_cap >= PARTIAL_SOURCE_MIN_SHIPS {
                 let partial_hints = [partial_send_cap, global_needed, target.ships + 1];
                 if let Some((_, partial_aim)) = world.best_probe_aim(
                     src.id,
@@ -2383,7 +2441,11 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
     }
 
     // Multi-source swarm pairing.
-    let target_ids_with_options: Vec<i64> = source_options_by_target.keys().copied().collect();
+    let target_ids_with_options: Vec<i64> = if profile.heavy {
+        source_options_by_target.keys().copied().collect()
+    } else {
+        Vec::new()
+    };
     for target_id in &target_ids_with_options {
         let options = source_options_by_target.get(target_id).cloned().unwrap_or_default();
         if options.len() < 2 {
@@ -2512,14 +2574,24 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
         }
     }
 
-    missions.extend(build_crash_exploit_missions(
-        world,
-        &policy,
-        &state.planned_commitments,
-        &modes,
-    ));
+    if profile.heavy {
+        missions.extend(build_crash_exploit_missions(
+            world,
+            &policy,
+            &state.planned_commitments,
+            &modes,
+        ));
+    }
 
+    if !forbidden_targets.is_empty() {
+        missions.retain(|m| !forbidden_targets.contains(&m.target_id));
+    }
     missions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    let top_offensive_target = missions
+        .iter()
+        .find(|m| is_offensive_mission(m.kind))
+        .map(|m| m.target_id);
 
     for mission in &missions {
         let target = world.planet(mission.target_id).clone();
@@ -2677,8 +2749,8 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
     }
 
     // Optional follow-up pass: use remaining attack budget for one extra shot
-    // per source. Skipped in very-late games.
-    if !world.is_very_late {
+    // per source. Skipped in very-late games and in the fast profile.
+    if profile.heavy && !world.is_very_late {
         for src_id in &my_planet_ids {
             let src_left = state.source_attack_left(&policy, *src_id);
             if src_left < FOLLOWUP_MIN_SHIPS {
@@ -2937,7 +3009,8 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
     }
 
     // Rear staging: deep-back planets feed forward.
-    if (!world.enemy_planets.is_empty() || !world.neutral_planets.is_empty())
+    if profile.heavy
+        && (!world.enemy_planets.is_empty() || !world.neutral_planets.is_empty())
         && world.my_planets.len() > 1
         && !world.is_late
     {
@@ -3046,7 +3119,10 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
         }
     }
 
-    state.finalize_moves(world)
+    PlanOutput {
+        moves: state.finalize_moves(world),
+        top_offensive_target,
+    }
 }
 
 // ── 9. Entry point ────────────────────────────────────────────────────────
@@ -3054,9 +3130,13 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
 /// Run the obnext-style planner end-to-end against a [`WorldState`] that the
 /// caller already built.
 pub fn plan(world: &WorldState) -> Vec<(i64, f64, i64)> {
+    plan_with_profile(world, PlanProfile::full())
+}
+
+pub fn plan_with_profile(world: &WorldState, profile: PlanProfile) -> Vec<(i64, f64, i64)> {
     if world.my_planets.is_empty() {
         return Vec::new();
     }
     let model = WorldModel::build(world);
-    plan_moves(&model)
+    plan_moves_with_profile(&model, profile)
 }

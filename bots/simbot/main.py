@@ -48,6 +48,6 @@ def _as_dict(obs):
 
 
 def agent(obs):
-    moves = _BOT.compute_moves(_as_dict(obs))
+    moves = _BOT.compute_moves_with_search(_as_dict(obs))
     # Match the baseline's [from_planet_id, angle, num_ships] list-of-lists shape.
     return [list(move) for move in moves]
