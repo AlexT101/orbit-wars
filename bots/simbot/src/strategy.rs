@@ -15,6 +15,9 @@ use crate::obnext::{
 use crate::rollout::{opponent_turn0_variants, rollout_score};
 use crate::world::WorldState;
 
+/// Compile-time gate for the rollout-search patience filter.
+const ENABLE_PATIENCE: bool = false;
+
 /// Nearest-sniper baseline: for each owned planet, send `garrison + 1` ships
 /// at the closest non-owned planet when affordable.
 pub fn nearest_sniper(world: &WorldState) -> Vec<(i64, f64, i64)> {
@@ -131,7 +134,11 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
     // the one-turn delay tax). Unioned into every candidate's forbid set so
     // the eager-on-T variant is never offered to the rollout — patience is
     // decided structurally, not under rollout variance.
-    let wait_set = patient_targets(&model, &artifacts);
+    let wait_set = if ENABLE_PATIENCE {
+        patient_targets(&model, &artifacts)
+    } else {
+        HashSet::default()
+    };
 
     // Plan A: full profile with patience-gating applied. All `offensive_targets`
     // below are drawn from this plan, so forbid-prefix / only-* indices
