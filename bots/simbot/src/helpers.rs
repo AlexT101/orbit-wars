@@ -26,14 +26,26 @@ pub fn fleet_speed(ships: i64) -> f64 {
     crate::engine::fleet_speed(ships.max(1), MAX_SHIP_SPEED)
 }
 
-/// Distance from point (px, py) to line segment (x1, y1)-(x2, y2)
+
+/// Squared distance from point (px, py) to line segment (x1, y1)-(x2, y2)
 #[inline]
-pub fn point_to_segment_distance(
+pub fn point_to_segment_distance_sq(
     px: f64, py: f64,
     x1: f64, y1: f64,
     x2: f64, y2: f64,
 ) -> f64 {
-    crate::engine::point_to_segment_distance((px, py), (x1, y1), (x2, y2))
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let l2 = dx * dx + dy * dy;
+    let (qx, qy) = if l2 == 0.0 {
+        (x1, y1)
+    } else {
+        let t = (((px - x1) * dx + (py - y1) * dy) / l2).clamp(0.0, 1.0);
+        (x1 + t * dx, y1 + t * dy)
+    };
+    let ex = px - qx;
+    let ey = py - qy;
+    ex * ex + ey * ey
 }
 
 /// Returns true if movement segment (ax, ay)-(bx, by) comes within `r` of (cx, cy).
@@ -44,7 +56,7 @@ pub fn segment_intersects_circle(
     cx: f64, cy: f64,
     r: f64,
 ) -> bool {
-    point_to_segment_distance(cx, cy, ax, ay, bx, by) <= r
+    point_to_segment_distance_sq(cx, cy, ax, ay, bx, by) <= r * r
 }
 
 /// Returns true if movement segment intersects sun
@@ -53,7 +65,7 @@ pub fn segment_hits_sun(
     x1: f64, y1: f64,
     x2: f64, y2: f64,
 ) -> bool {
-    point_to_segment_distance(CENTER, CENTER, x1, y1, x2, y2) < SUN_RADIUS
+    point_to_segment_distance_sq(CENTER, CENTER, x1, y1, x2, y2) < SUN_RADIUS * SUN_RADIUS
 }
 
 /// Fleet spawns at (radius + 0.1) from planet center, at launch angle
