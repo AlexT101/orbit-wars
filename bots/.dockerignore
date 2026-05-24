@@ -1,0 +1,22 @@
+# Rust build artifacts and toolchain caches — huge and platform-specific.
+**/target/
+**/.cargo-home/
+**/.rustup/
+
+# Python caches
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/venv/
+
+# Build outputs / packaged submissions
+**/*.tar.gz
+**/*.zip
+**/build/
+**/dist/
+**/*.egg-info/
+
+# Editor / OS junk
+**/.DS_Store
+**/.idea/
+**/.vscode/
