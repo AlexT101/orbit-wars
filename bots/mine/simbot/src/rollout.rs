@@ -1,13 +1,8 @@
 //! Opponent-modeled rollout for scoring candidate plans.
 //!
-//! Structure: 5 turns of full simulation where every player replans with the
+//! Structure: 2 turns of full simulation where every player replans with the
 //! full obnext profile, then 20 turns of "ballistic" stepping with no new
 //! launches (in-flight fleets keep moving, combat resolves, planets produce).
-//!
-//! This catches the failure mode where a plan looks good against a no-op
-//! opponent but loses to a real reaction — and skips planning during the
-//! ballistic phase where decisions don't change the outcome inside our scoring
-//! window.
 
 #![allow(dead_code)]
 
@@ -17,14 +12,8 @@ use crate::obnext::{plan_with_profile, PlanProfile};
 use crate::strategy::obnext_candidates;
 use crate::world::WorldState;
 
-pub const REACTIVE_TURNS: i64 = 5;
+pub const REACTIVE_TURNS: i64 = 2;
 pub const BALLISTIC_TURNS: i64 = 20;
-
-/// Multiplier on the opponent's total contribution to the score. Compensates
-/// for the rollout under-modeling opponents compared with real match play.
-/// Applied symmetrically to opponent production and ship terms; ships
-/// themselves use weight 1.0 on both sides.
-const OPPONENT_PESSIMISM: f64 = 1.0;
 
 /// Score a candidate plan by simulating it forward.
 ///
@@ -170,9 +159,7 @@ fn to_move_actions(moves: &[(i64, f64, i64)]) -> Vec<MoveAction> {
 
 /// Production-weighted board control delta from `my_player`'s perspective.
 /// Counts owned-planet production over the remaining game, current ship
-/// inventories on planets, and ships in flight. Opponent contribution is
-/// scaled by `OPPONENT_PESSIMISM` to compensate for opponent-model mismatch in
-/// the rollout search.
+/// inventories on planets, and ships in flight.
 fn score_state(engine: &EngineState, my_player: i64) -> f64 {
     let remaining = (engine.configuration.episode_steps - engine.step).max(0) as f64;
     let mut my_score = 0.0;
@@ -193,5 +180,5 @@ fn score_state(engine: &EngineState, my_player: i64) -> f64 {
             enemy_score += fleet.ships as f64;
         }
     }
-    my_score - OPPONENT_PESSIMISM * enemy_score
+    my_score - enemy_score
 }

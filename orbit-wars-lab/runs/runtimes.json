@@ -1,24 +1,120 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-24T06:52:39.088435+00:00",
+  "last_updated": "2026-05-24T16:30:14.248807+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
-      "total_turns": 793,
-      "total_seconds": 0.13831700000000002,
-      "avg_ms": 0.174422446406053,
-      "last_updated": "2026-05-24T06:52:39.069735+00:00"
+      "total_turns": 2120,
+      "total_seconds": 0.25838800000000006,
+      "avg_ms": 0.12188113207547173,
+      "last_updated": "2026-05-24T16:29:25.418089+00:00"
     },
     "baselines/random": {
-      "total_turns": 294,
-      "total_seconds": 0.009416,
-      "avg_ms": 0.03202721088435374,
-      "last_updated": "2026-05-24T06:51:08.593504+00:00"
+      "total_turns": 1224,
+      "total_seconds": 0.07200899999999999,
+      "avg_ms": 0.05883088235294117,
+      "last_updated": "2026-05-24T16:29:21.429035+00:00"
     },
     "baselines/starter": {
-      "total_turns": 499,
-      "total_seconds": 0.08415,
-      "avg_ms": 0.16863727454909822,
-      "last_updated": "2026-05-24T06:52:39.069794+00:00"
+      "total_turns": 1561,
+      "total_seconds": 0.3454080000000001,
+      "avg_ms": 0.22127354260089693,
+      "last_updated": "2026-05-24T16:28:59.172871+00:00"
+    },
+    "mine/simbot": {
+      "total_turns": 25214,
+      "total_seconds": 5302.248662000001,
+      "avg_ms": 210.2898652336004,
+      "last_updated": "2026-05-24T16:30:14.125978+00:00"
+    },
+    "external/marco-dg": {
+      "total_turns": 1472,
+      "total_seconds": 442.31186399999996,
+      "avg_ms": 300.48360326086953,
+      "last_updated": "2026-05-24T16:29:09.982316+00:00"
+    },
+    "external/heuristic": {
+      "total_turns": 1681,
+      "total_seconds": 2.9470860000000005,
+      "avg_ms": 1.753174301011303,
+      "last_updated": "2026-05-24T16:30:14.126000+00:00"
+    },
+    "external/obnext": {
+      "total_turns": 1539,
+      "total_seconds": 374.959328,
+      "avg_ms": 243.63828979857053,
+      "last_updated": "2026-05-24T16:28:31.065067+00:00"
+    },
+    "external/owproto": {
+      "total_turns": 1627,
+      "total_seconds": 29.203486,
+      "avg_ms": 17.949284572833438,
+      "last_updated": "2026-05-24T16:27:51.344199+00:00"
+    },
+    "external/peaking-bot": {
+      "total_turns": 1376,
+      "total_seconds": 124.079635,
+      "avg_ms": 90.17415334302325,
+      "last_updated": "2026-05-24T16:25:45.582006+00:00"
+    },
+    "external/pilkwang-structured": {
+      "total_turns": 1397,
+      "total_seconds": 312.64322599999997,
+      "avg_ms": 223.79615318539726,
+      "last_updated": "2026-05-24T16:25:48.290490+00:00"
+    },
+    "external/ppo": {
+      "total_turns": 1576,
+      "total_seconds": 226.326202,
+      "avg_ms": 143.6079961928934,
+      "last_updated": "2026-05-24T16:24:56.985187+00:00"
+    },
+    "external/sigmaborov-reinforce": {
+      "total_turns": 1413,
+      "total_seconds": 52.391853,
+      "avg_ms": 37.07845222929936,
+      "last_updated": "2026-05-24T16:24:25.903015+00:00"
+    },
+    "external/smart-baseline": {
+      "total_turns": 1526,
+      "total_seconds": 226.59607699999998,
+      "avg_ms": 148.49022083879422,
+      "last_updated": "2026-05-24T16:23:40.100404+00:00"
+    },
+    "external/sim-search": {
+      "total_turns": 1534,
+      "total_seconds": 451.51840200000004,
+      "avg_ms": 294.34054889178617,
+      "last_updated": "2026-05-24T16:25:08.507487+00:00"
+    },
+    "external/structured-v4": {
+      "total_turns": 1371,
+      "total_seconds": 227.58650300000002,
+      "avg_ms": 166.00036688548505,
+      "last_updated": "2026-05-24T16:23:18.745644+00:00"
+    },
+    "external/tamrazov-starwars": {
+      "total_turns": 2324,
+      "total_seconds": 514.0986350000001,
+      "avg_ms": 221.21283777969023,
+      "last_updated": "2026-05-24T16:28:33.010689+00:00"
+    },
+    "external/ykhnkf-distance-prioritized": {
+      "total_turns": 1442,
+      "total_seconds": 301.281732,
+      "avg_ms": 208.9332399445215,
+      "last_updated": "2026-05-24T16:22:19.127155+00:00"
+    },
+    "external/yuriygreben-architect": {
+      "total_turns": 1360,
+      "total_seconds": 230.002096,
+      "avg_ms": 169.11918823529413,
+      "last_updated": "2026-05-24T16:21:38.911300+00:00"
+    },
+    "mine/simbot_wide": {
+      "total_turns": 1939,
+      "total_seconds": 297.96621700000003,
+      "avg_ms": 153.67004486848893,
+      "last_updated": "2026-05-24T16:23:14.418934+00:00"
     }
   }
 }

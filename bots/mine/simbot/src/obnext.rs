@@ -11,11 +11,20 @@
 //!   3. `WorldModel` — obnext-specific wrapper around `&WorldState`
 //!      (phase flags, indirect-wealth heuristic, solver memoization caches)
 //!   4. Scoring & filter helpers
-//!   5. Policy + Modes builders
+//!   5. Policy builder
 //!   6. `settle_plan` / `settle_reinforce_plan` iterative solvers
 //!   7. Mission builders (snipe, rescue, recapture, reinforce, crash_exploit)
 //!   8. `plan_moves` — the main loop
 //!   9. `plan(...)` — entry point that wraps a `WorldState` and runs the loop
+//!
+//! Scoring is intentionally thin: mission value is `production × turns_profit`
+//! plus a small indirect-wealth term. Mode/phase tilts (is_behind/ahead/
+//! finishing, early/late multipliers, mission-kind multipliers) have been
+//! removed — the rollout in [`crate::strategy`] runs full forward simulations
+//! against opponent variants and picks the winning candidate, so per-mission
+//! scoring only needs to set commit *order* under budget pressure.
+//! [`preferred_send`]'s margin pile is retained: rollout judges plans as a
+//! whole and cannot tune individual send sizes.
 
 #![allow(dead_code)]
 
@@ -31,10 +40,7 @@ use crate::helpers::{self, aim_with_prediction, dist, nearest_distance_to_set, A
 use crate::world::{HoldStatus, WorldState};
 
 // ── 1. Strategy constants ─────────────────────────────────────────────────
-// Mirrors obnext's tunables; tweak together with the Python file if you want
-// behaviour to stay in sync.
 
-const EARLY_TURN_LIMIT: i64 = 40;
 const OPENING_TURN_LIMIT: i64 = 80;
 const LATE_REMAINING_TURNS: i64 = 60;
 const VERY_LATE_REMAINING_TURNS: i64 = 25;
@@ -59,22 +65,6 @@ const INDIRECT_FRIENDLY_WEIGHT: f64 = 0.35;
 const INDIRECT_NEUTRAL_WEIGHT: f64 = 0.9;
 const INDIRECT_ENEMY_WEIGHT: f64 = 1.25;
 
-const STATIC_NEUTRAL_VALUE_MULT: f64 = 1.4;
-const STATIC_HOSTILE_VALUE_MULT: f64 = 1.55;
-const ROTATING_OPENING_VALUE_MULT: f64 = 0.9;
-const HOSTILE_TARGET_VALUE_MULT: f64 = 1.85;
-const OPENING_HOSTILE_TARGET_VALUE_MULT: f64 = 1.45;
-const SAFE_NEUTRAL_VALUE_MULT: f64 = 1.2;
-const CONTESTED_NEUTRAL_VALUE_MULT: f64 = 0.7;
-const EARLY_NEUTRAL_VALUE_MULT: f64 = 1.2;
-const COMET_VALUE_MULT: f64 = 0.65;
-const SNIPE_VALUE_MULT: f64 = 1.12;
-const SWARM_VALUE_MULT: f64 = 1.05;
-const REINFORCE_VALUE_MULT: f64 = 1.35;
-const CRASH_EXPLOIT_VALUE_MULT: f64 = 1.18;
-const FINISHING_HOSTILE_VALUE_MULT: f64 = 1.15;
-const BEHIND_ROTATING_NEUTRAL_VALUE_MULT: f64 = 0.92;
-
 const NEUTRAL_MARGIN_BASE: i64 = 2;
 const NEUTRAL_MARGIN_PROD_WEIGHT: i64 = 2;
 const NEUTRAL_MARGIN_CAP: i64 = 8;
@@ -88,16 +78,6 @@ const LONG_TRAVEL_MARGIN_START: i64 = 18;
 const LONG_TRAVEL_MARGIN_DIVISOR: i64 = 3;
 const LONG_TRAVEL_MARGIN_CAP: i64 = 8;
 const COMET_MARGIN_RELIEF: i64 = 6;
-const FINISHING_HOSTILE_SEND_BONUS: i64 = 3;
-
-const STATIC_TARGET_SCORE_MULT: f64 = 1.18;
-const EARLY_STATIC_NEUTRAL_SCORE_MULT: f64 = 1.25;
-const FOUR_PLAYER_ROTATING_NEUTRAL_SCORE_MULT: f64 = 0.92;
-const DENSE_STATIC_NEUTRAL_COUNT: usize = 4;
-const DENSE_ROTATING_NEUTRAL_SCORE_MULT: f64 = 0.86;
-const SNIPE_SCORE_MULT: f64 = 1.12;
-const SWARM_SCORE_MULT: f64 = 1.06;
-const CRASH_EXPLOIT_SCORE_MULT: f64 = 1.05;
 
 const FOLLOWUP_MIN_SHIPS: i64 = 8;
 const LOW_VALUE_COMET_PRODUCTION: i64 = 1;
@@ -106,7 +86,6 @@ const VERY_LATE_CAPTURE_BUFFER: i64 = 3;
 
 const DEFENSE_LOOKAHEAD_TURNS: i64 = 28;
 const DEFENSE_COST_TURN_WEIGHT: f64 = 0.4;
-const DEFENSE_FRONTIER_SCORE_MULT: f64 = 1.12;
 const DEFENSE_SEND_MARGIN_BASE: i64 = 1;
 const DEFENSE_SEND_MARGIN_PROD_WEIGHT: i64 = 1;
 const DEFENSE_SHIP_VALUE: f64 = 0.55;
@@ -122,8 +101,6 @@ const REINFORCE_COST_TURN_WEIGHT: f64 = 0.35;
 
 const RECAPTURE_LOOKAHEAD_TURNS: i64 = 10;
 const RECAPTURE_COST_TURN_WEIGHT: f64 = 0.52;
-const RECAPTURE_VALUE_MULT: f64 = 0.88;
-const RECAPTURE_FRONTIER_MULT: f64 = 1.08;
 const RECAPTURE_PRODUCTION_WEIGHT: f64 = 0.6;
 const RECAPTURE_IMMEDIATE_WEIGHT: f64 = 0.4;
 
@@ -158,18 +135,6 @@ const CRASH_EXPLOIT_ENABLED: bool = true;
 const CRASH_EXPLOIT_MIN_TOTAL_SHIPS: i64 = 10;
 const CRASH_EXPLOIT_ETA_WINDOW: i64 = 2;
 const CRASH_EXPLOIT_POST_CRASH_DELAY: i64 = 1;
-
-const LATE_IMMEDIATE_SHIP_VALUE: f64 = 0.6;
-const WEAK_ENEMY_THRESHOLD: i64 = 45;
-const ELIMINATION_BONUS: f64 = 18.0;
-
-const BEHIND_DOMINATION: f64 = -0.20;
-const AHEAD_DOMINATION: f64 = 0.18;
-const FINISHING_DOMINATION: f64 = 0.35;
-const FINISHING_PROD_RATIO: f64 = 1.25;
-const AHEAD_ATTACK_MARGIN_BONUS: f64 = 0.08;
-const BEHIND_ATTACK_MARGIN_PENALTY: f64 = 0.05;
-const FINISHING_ATTACK_MARGIN_BONUS: f64 = 0.08;
 
 const DOOMED_EVAC_TURN_LIMIT: i64 = 24;
 const DOOMED_MIN_SHIPS: i64 = 8;
@@ -296,7 +261,6 @@ type BestProbeKey = (
 /// still works as it did before).
 pub struct WorldModel<'a> {
     pub state: &'a WorldState<'a>,
-    pub is_early: bool,
     pub is_opening: bool,
     pub is_late: bool,
     pub is_very_late: bool,
@@ -320,7 +284,6 @@ impl<'a> Deref for WorldModel<'a> {
 
 impl<'a> WorldModel<'a> {
     pub fn build(state: &'a WorldState<'a>) -> Self {
-        let is_early = state.step < EARLY_TURN_LIMIT;
         let is_opening = state.step < OPENING_TURN_LIMIT;
         let is_late = state.remaining_steps < LATE_REMAINING_TURNS;
         let is_very_late = state.remaining_steps < VERY_LATE_REMAINING_TURNS;
@@ -334,7 +297,6 @@ impl<'a> WorldModel<'a> {
 
         Self {
             state,
-            is_early,
             is_opening,
             is_late,
             is_very_late,
@@ -944,12 +906,14 @@ fn opening_filter(
     arrival_turns > ROTATING_OPENING_MAX_TURNS || target.production <= ROTATING_OPENING_LOW_PROD
 }
 
+/// Flat mission value: production over the remaining horizon, plus a small
+/// indirect-wealth contribution. No mode/phase tilts, no mission-kind
+/// multipliers — rollout is the final judge of plan quality; this only sets
+/// commit order under budget pressure.
 fn target_value(
     target: &Planet,
     arrival_turns: i64,
-    mission: MissionKind,
     world: &WorldModel,
-    modes: &Modes,
     policy: &PolicyState,
 ) -> f64 {
     let mut turns_profit = (world.remaining_steps - arrival_turns).max(1);
@@ -968,97 +932,31 @@ fn target_value(
         .copied()
         .unwrap_or(0.0);
     value += indirect * (turns_profit as f64) * INDIRECT_VALUE_SCALE;
-
-    if world.is_static(target.id) {
-        value *= if target.owner == -1 {
-            STATIC_NEUTRAL_VALUE_MULT
-        } else {
-            STATIC_HOSTILE_VALUE_MULT
-        };
-    } else if world.is_opening {
-        value *= ROTATING_OPENING_VALUE_MULT;
-    }
-
-    if target.owner != -1 && target.owner != world.player {
-        value *= if world.is_opening {
-            OPENING_HOSTILE_TARGET_VALUE_MULT
-        } else {
-            HOSTILE_TARGET_VALUE_MULT
-        };
-    }
-
-    if target.owner == -1 {
-        if is_safe_neutral(target, policy) {
-            value *= SAFE_NEUTRAL_VALUE_MULT;
-        } else if is_contested_neutral(target, policy) {
-            value *= CONTESTED_NEUTRAL_VALUE_MULT;
-        }
-        if world.is_early {
-            value *= EARLY_NEUTRAL_VALUE_MULT;
-        }
-    }
-
-    if world.comet_ids.contains(&target.id) {
-        value *= COMET_VALUE_MULT;
-    }
-
-    match mission {
-        MissionKind::Snipe => value *= SNIPE_VALUE_MULT,
-        MissionKind::Swarm => value *= SWARM_VALUE_MULT,
-        MissionKind::Reinforce => value *= REINFORCE_VALUE_MULT,
-        MissionKind::CrashExploit => value *= CRASH_EXPLOIT_VALUE_MULT,
-        _ => {}
-    }
-
-    if world.is_late {
-        value += target.ships.max(0) as f64 * LATE_IMMEDIATE_SHIP_VALUE;
-        if target.owner != -1 && target.owner != world.player {
-            let enemy_strength = *world.owner_strength.get(&target.owner).unwrap_or(&0);
-            if enemy_strength <= WEAK_ENEMY_THRESHOLD {
-                value += ELIMINATION_BONUS;
-            }
-        }
-    }
-
-    if modes.is_finishing && target.owner != -1 && target.owner != world.player {
-        value *= FINISHING_HOSTILE_VALUE_MULT;
-    }
-    if modes.is_behind && target.owner == -1 && !world.is_static(target.id) {
-        value *= BEHIND_ROTATING_NEUTRAL_VALUE_MULT;
-    }
-    if modes.is_behind && target.owner == -1 && is_safe_neutral(target, policy) {
-        value *= 1.08;
-    }
-    if modes.is_dominating && target.owner == -1 && is_contested_neutral(target, policy) {
-        value *= 0.92;
-    }
-
     value
 }
 
 fn reinforce_value(target: &Planet, hold_until: i64, world: &WorldModel, policy: &PolicyState) -> f64 {
     let saved_turns = (world.remaining_steps - hold_until).max(1);
     let mut value = (target.production * saved_turns) as f64 + target.ships.max(0) as f64 * DEFENSE_SHIP_VALUE;
-    if !world.enemy_planets.is_empty()
-        && nearest_distance_to_set(target.x, target.y, &world.enemy_planets) < 22.0
-    {
-        value *= DEFENSE_FRONTIER_SCORE_MULT;
-    }
     let indirect = policy.indirect_wealth_map.get(&target.id).copied().unwrap_or(0.0);
     value += indirect * saved_turns as f64 * INDIRECT_VALUE_SCALE * 0.35;
-    value * REINFORCE_VALUE_MULT
+    value
 }
 
+/// Send-sizing: takes the exact `min_ships_to_own_by` count and adds a
+/// geometric margin pile (base + production-weighted + structural bumps for
+/// static / contested / four-player / long-travel; relief for comets). Rollout
+/// judges whole plans as a unit and cannot tune individual send sizes, so
+/// these margins are the *only* mechanism for robustness against
+/// opponent reactions and timing slop.
 fn preferred_send(
     target: &Planet,
     base_needed: i64,
     arrival_turns: i64,
     src_available: i64,
     world: &WorldModel,
-    modes: &Modes,
     policy: &PolicyState,
 ) -> i64 {
-    let mut send = base_needed.max((base_needed as f64 * modes.attack_margin_mult).ceil() as i64);
     let mut margin: i64 = 0;
     if target.owner == -1 {
         margin += NEUTRAL_MARGIN_CAP.min(NEUTRAL_MARGIN_BASE + target.production * NEUTRAL_MARGIN_PROD_WEIGHT);
@@ -1080,40 +978,10 @@ fn preferred_send(
     if world.comet_ids.contains(&target.id) {
         margin = (margin - COMET_MARGIN_RELIEF).max(0);
     }
-    if modes.is_finishing && target.owner != -1 && target.owner != world.player {
-        margin += FINISHING_HOSTILE_SEND_BONUS;
-    }
-    send = send.saturating_add(margin);
-    send.min(src_available)
+    base_needed.saturating_add(margin).min(src_available)
 }
 
-fn apply_score_modifiers(base_score: f64, target: &Planet, mission: MissionKind, world: &WorldModel) -> f64 {
-    let mut score = base_score;
-    if world.is_static(target.id) {
-        score *= STATIC_TARGET_SCORE_MULT;
-    }
-    if world.is_early && target.owner == -1 && world.is_static(target.id) {
-        score *= EARLY_STATIC_NEUTRAL_SCORE_MULT;
-    }
-    if world.is_four_player && target.owner == -1 && !world.is_static(target.id) {
-        score *= FOUR_PLAYER_ROTATING_NEUTRAL_SCORE_MULT;
-    }
-    if world.static_neutral_planets.len() >= DENSE_STATIC_NEUTRAL_COUNT
-        && target.owner == -1
-        && !world.is_static(target.id)
-    {
-        score *= DENSE_ROTATING_NEUTRAL_SCORE_MULT;
-    }
-    match mission {
-        MissionKind::Snipe => score *= SNIPE_SCORE_MULT,
-        MissionKind::Swarm => score *= SWARM_SCORE_MULT,
-        MissionKind::CrashExploit => score *= CRASH_EXPLOIT_SCORE_MULT,
-        _ => {}
-    }
-    score
-}
-
-// ── 5. Policy + Modes ─────────────────────────────────────────────────────
+// ── 5. Policy ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct PolicyState {
@@ -1121,16 +989,6 @@ pub struct PolicyState {
     pub reserve: HashMap<i64, i64>,
     pub attack_budget: HashMap<i64, i64>,
     pub reaction_time_map: HashMap<i64, (i64, i64)>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Modes {
-    pub domination: f64,
-    pub is_behind: bool,
-    pub is_ahead: bool,
-    pub is_dominating: bool,
-    pub is_finishing: bool,
-    pub attack_margin_mult: f64,
 }
 
 fn build_policy_state(world: &WorldModel) -> PolicyState {
@@ -1188,39 +1046,6 @@ fn build_policy_state(world: &WorldModel) -> PolicyState {
     }
 }
 
-fn build_modes(world: &WorldModel) -> Modes {
-    let denom = (world.my_total + world.enemy_total).max(1);
-    let domination = (world.my_total - world.enemy_total) as f64 / denom as f64;
-    let is_behind = domination < BEHIND_DOMINATION;
-    let is_ahead = domination > AHEAD_DOMINATION;
-    let is_dominating = is_ahead
-        || (world.max_enemy_strength > 0
-            && world.my_total as f64 > world.max_enemy_strength as f64 * 1.25);
-    let is_finishing = domination > FINISHING_DOMINATION
-        && (world.my_prod as f64) > (world.enemy_prod as f64) * FINISHING_PROD_RATIO
-        && world.step > 100;
-
-    let mut attack_margin_mult: f64 = 1.0;
-    if is_ahead {
-        attack_margin_mult += AHEAD_ATTACK_MARGIN_BONUS;
-    }
-    if is_behind {
-        attack_margin_mult -= BEHIND_ATTACK_MARGIN_PENALTY;
-    }
-    if is_finishing {
-        attack_margin_mult += FINISHING_ATTACK_MARGIN_BONUS;
-    }
-
-    Modes {
-        domination,
-        is_behind,
-        is_ahead,
-        is_dominating,
-        is_finishing,
-        attack_margin_mult,
-    }
-}
-
 // ── 6. Settlement solvers ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -1243,7 +1068,6 @@ fn settle_plan(
     src_cap: i64,
     send_guess: i64,
     planned: &PlannedCommitments,
-    modes: &Modes,
     policy: &PolicyState,
     mission: MissionKind,
     eval_turn_fn: impl Fn(i64) -> i64,
@@ -1317,7 +1141,7 @@ fn settle_plan(
                 need.max(safety).min(src_cap)
             }
             _ => {
-                let p = preferred_send(target, need, turns, src_cap, world, modes, policy);
+                let p = preferred_send(target, need, turns, src_cap, world, policy);
                 need.max(p).min(src_cap)
             }
         };
@@ -1595,7 +1419,6 @@ fn settle_single_source_mission(
     src: &Planet,
     target: &Planet,
     state: &PlanState,
-    modes: &Modes,
     policy: &PolicyState,
 ) -> Option<(SettleResult, i64)> {
     let left = if matches!(mission.kind, MissionKind::Reinforce) {
@@ -1631,7 +1454,6 @@ fn settle_single_source_mission(
                 left,
                 send_cap,
                 planned,
-                modes,
                 policy,
                 MissionKind::Rescue,
                 move |_| hold_turn,
@@ -1649,7 +1471,6 @@ fn settle_single_source_mission(
                 left,
                 send_cap,
                 planned,
-                modes,
                 policy,
                 MissionKind::Snipe,
                 move |turns| turns.max(enemy_eta),
@@ -1667,7 +1488,6 @@ fn settle_single_source_mission(
                 left,
                 send_cap,
                 planned,
-                modes,
                 policy,
                 MissionKind::CrashExploit,
                 move |turns| turns.max(desired_arrival),
@@ -1684,7 +1504,6 @@ fn settle_single_source_mission(
             left,
             send_cap,
             planned,
-            modes,
             policy,
             MissionKind::Capture,
             |turns| turns,
@@ -1704,7 +1523,6 @@ fn build_snipe_mission(
     target: &Planet,
     src_available: i64,
     planned: &PlannedCommitments,
-    modes: &Modes,
     policy: &PolicyState,
 ) -> Option<Mission> {
     if target.owner != -1 {
@@ -1753,7 +1571,6 @@ fn build_snipe_mission(
             src_available,
             probe,
             planned,
-            modes,
             policy,
             MissionKind::Snipe,
             |turns| turns.max(enemy_eta),
@@ -1771,16 +1588,11 @@ fn build_snipe_mission(
             }
         }
 
-        let value = target_value(target, plan.eval_turn, MissionKind::Snipe, world, modes, policy);
+        let value = target_value(target, plan.eval_turn, world, policy);
         if value <= 0.0 {
             continue;
         }
-        let score = apply_score_modifiers(
-            value / (plan.send as f64 + plan.eval_turn as f64 * SNIPE_COST_TURN_WEIGHT + 1.0),
-            target,
-            MissionKind::Snipe,
-            world,
-        );
+        let score = value / (plan.send as f64 + plan.eval_turn as f64 * SNIPE_COST_TURN_WEIGHT + 1.0);
         let option = ShotOption {
             score,
             src_id: src.id,
@@ -1810,7 +1622,6 @@ fn build_rescue_missions(
     world: &WorldModel,
     policy: &PolicyState,
     planned: &PlannedCommitments,
-    modes: &Modes,
 ) -> Vec<Mission> {
     let mut missions = Vec::new();
     for target in &world.my_planets {
@@ -1848,7 +1659,6 @@ fn build_rescue_missions(
                 src_available,
                 probe,
                 planned,
-                modes,
                 policy,
                 MissionKind::Rescue,
                 move |_| fall_turn,
@@ -1859,13 +1669,8 @@ fn build_rescue_missions(
                 continue;
             };
             let saved_turns = (world.remaining_steps - fall_turn).max(1);
-            let mut value =
+            let value =
                 (target.production * saved_turns) as f64 + target.ships.max(0) as f64 * DEFENSE_SHIP_VALUE;
-            if !world.enemy_planets.is_empty()
-                && nearest_distance_to_set(target.x, target.y, &world.enemy_planets) < 22.0
-            {
-                value *= DEFENSE_FRONTIER_SCORE_MULT;
-            }
             let score = value / (plan.send as f64 + plan.turns as f64 * DEFENSE_COST_TURN_WEIGHT + 1.0);
             let option = ShotOption {
                 score,
@@ -1894,7 +1699,6 @@ fn build_recapture_missions(
     world: &WorldModel,
     policy: &PolicyState,
     planned: &PlannedCommitments,
-    modes: &Modes,
 ) -> Vec<Mission> {
     let mut missions = Vec::new();
     for target in &world.my_planets {
@@ -1932,7 +1736,6 @@ fn build_recapture_missions(
                 src_available,
                 probe,
                 planned,
-                modes,
                 policy,
                 MissionKind::Capture,
                 |turns| turns,
@@ -1946,14 +1749,8 @@ fn build_recapture_missions(
                 continue;
             }
             let saved_turns = (world.remaining_steps - plan.turns).max(1);
-            let mut value = RECAPTURE_PRODUCTION_WEIGHT * (target.production * saved_turns) as f64
+            let value = RECAPTURE_PRODUCTION_WEIGHT * (target.production * saved_turns) as f64
                 + RECAPTURE_IMMEDIATE_WEIGHT * target.ships.max(0) as f64;
-            if !world.enemy_planets.is_empty()
-                && nearest_distance_to_set(target.x, target.y, &world.enemy_planets) < 22.0
-            {
-                value *= RECAPTURE_FRONTIER_MULT;
-            }
-            value *= RECAPTURE_VALUE_MULT;
             let score = value / (plan.send as f64 + plan.turns as f64 * RECAPTURE_COST_TURN_WEIGHT + 1.0);
             let option = ShotOption {
                 score,
@@ -2065,7 +1862,6 @@ fn build_crash_exploit_missions(
     world: &WorldModel,
     policy: &PolicyState,
     planned: &PlannedCommitments,
-    modes: &Modes,
 ) -> Vec<Mission> {
     if !CRASH_EXPLOIT_ENABLED || !world.is_four_player {
         return Vec::new();
@@ -2102,7 +1898,6 @@ fn build_crash_exploit_missions(
                 src_available,
                 probe,
                 planned,
-                modes,
                 policy,
                 MissionKind::CrashExploit,
                 move |turns| turns.max(desired_arrival),
@@ -2115,16 +1910,11 @@ fn build_crash_exploit_missions(
             if !candidate_time_valid(target, plan.turns, world, LATE_CAPTURE_BUFFER) {
                 continue;
             }
-            let value = target_value(target, plan.turns, MissionKind::CrashExploit, world, modes, policy);
+            let value = target_value(target, plan.turns, world, policy);
             if value <= 0.0 {
                 continue;
             }
-            let score = apply_score_modifiers(
-                value / (plan.send as f64 + plan.turns as f64 * SNIPE_COST_TURN_WEIGHT + 1.0),
-                target,
-                MissionKind::CrashExploit,
-                world,
-            );
+            let score = value / (plan.send as f64 + plan.turns as f64 * SNIPE_COST_TURN_WEIGHT + 1.0);
             let option = ShotOption {
                 score,
                 src_id: src.id,
@@ -2318,7 +2108,7 @@ fn is_offensive_mission(kind: MissionKind) -> bool {
 }
 
 /// Per-WorldModel artifacts shared across candidate plans:
-///   * `modes` and `policy` are pure functions of the WorldModel.
+///   * `policy` is a pure function of the WorldModel.
 ///   * `missions` is the *heavy-superset* mission list. Swarm/CrashExploit
 ///     missions are present even though they used to be gated by
 ///     `profile.heavy`; [`plan_from_artifacts`] filters them out when running
@@ -2332,7 +2122,6 @@ fn is_offensive_mission(kind: MissionKind) -> bool {
 /// world. Per-candidate `plan_from_artifacts` runs its own `PlanState` for
 /// the commit loop.
 pub struct MissionArtifacts {
-    pub modes: Modes,
     pub policy: PolicyState,
     pub missions: Vec<Mission>,
     /// Pre-collected once so candidate commit loops don't rebuild them.
@@ -2341,7 +2130,6 @@ pub struct MissionArtifacts {
 }
 
 pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
-    let modes = build_modes(world);
     let policy = build_policy_state(world);
     let state = PlanState::new();
 
@@ -2361,13 +2149,11 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
         world,
         &policy,
         &state.planned_commitments,
-        &modes,
     ));
     missions.extend(build_recapture_missions(
         world,
         &policy,
         &state.planned_commitments,
-        &modes,
     ));
 
     // Main per-source × per-target sweep.
@@ -2428,7 +2214,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
             // Swarm fragment (heavy-superset — fast candidates drop these in
             // plan_from_artifacts).
             let partial_send_cap = src_available
-                .min(preferred_send(target, global_needed, rough_turns, src_available, world, &modes, &policy));
+                .min(preferred_send(target, global_needed, rough_turns, src_available, world, &policy));
             if partial_send_cap >= PARTIAL_SOURCE_MIN_SHIPS {
                 let partial_hints = [partial_send_cap, global_needed, target.ships + 1];
                 if let Some((_, partial_aim)) = world.best_probe_aim(
@@ -2444,17 +2230,12 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                     let (p_angle, p_turns, _, _) = partial_aim;
                     if time_filters_pass(target, p_turns, global_needed, src_available, world, &policy) {
                         let partial_value =
-                            target_value(target, p_turns, MissionKind::Swarm, world, &modes, &policy);
+                            target_value(target, p_turns, world, &policy);
                         if partial_value > 0.0 {
-                            let partial_score = apply_score_modifiers(
-                                partial_value
-                                    / (partial_send_cap as f64
-                                        + p_turns as f64 * ATTACK_COST_TURN_WEIGHT
-                                        + 1.0),
-                                target,
-                                MissionKind::Swarm,
-                                world,
-                            );
+                            let partial_score = partial_value
+                                / (partial_send_cap as f64
+                                    + p_turns as f64 * ATTACK_COST_TURN_WEIGHT
+                                    + 1.0);
                             source_options_by_target
                                 .entry(target.id)
                                 .or_default()
@@ -2476,7 +2257,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
 
             if global_needed <= src_available {
                 let send_guess =
-                    preferred_send(target, global_needed, rough_turns, src_available, world, &modes, &policy);
+                    preferred_send(target, global_needed, rough_turns, src_available, world, &policy);
                 if let Some(plan) = settle_plan(
                     world,
                     src,
@@ -2484,7 +2265,6 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                     src_available,
                     send_guess,
                     &state.planned_commitments,
-                    &modes,
                     &policy,
                     MissionKind::Capture,
                     |turns| turns,
@@ -2496,17 +2276,12 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                         && plan.send >= 1
                     {
                         let value =
-                            target_value(target, plan.turns, MissionKind::Capture, world, &modes, &policy);
+                            target_value(target, plan.turns, world, &policy);
                         if value > 0.0 {
-                            let score = apply_score_modifiers(
-                                value
-                                    / (plan.send as f64
-                                        + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT
-                                        + 1.0),
-                                target,
-                                MissionKind::Capture,
-                                world,
-                            );
+                            let score = value
+                                / (plan.send as f64
+                                    + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT
+                                    + 1.0);
                             let option = ShotOption {
                                 score,
                                 src_id: src.id,
@@ -2533,7 +2308,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
             }
 
             if let Some(snipe) =
-                build_snipe_mission(world, src, target, src_available, &state.planned_commitments, &modes, &policy)
+                build_snipe_mission(world, src, target, src_available, &state.planned_commitments, &policy)
             {
                 missions.push(snipe);
             }
@@ -2586,16 +2361,13 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                 if total_cap < need {
                     continue;
                 }
-                let value = target_value(target, joint_turn, MissionKind::Swarm, world, &modes, &policy);
+                let value = target_value(target, joint_turn, world, &policy);
                 if value <= 0.0 {
                     continue;
                 }
-                let pair_score = apply_score_modifiers(
-                    value / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0),
-                    target,
-                    MissionKind::Swarm,
-                    world,
-                ) * MULTI_SOURCE_PLAN_PENALTY;
+                let pair_score = value
+                    / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0)
+                    * MULTI_SOURCE_PLAN_PENALTY;
                 missions.push(Mission {
                     kind: MissionKind::Swarm,
                     score: pair_score,
@@ -2651,16 +2423,13 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                             continue;
                         }
                         let value =
-                            target_value(target, joint_turn, MissionKind::Swarm, world, &modes, &policy);
+                            target_value(target, joint_turn, world, &policy);
                         if value <= 0.0 {
                             continue;
                         }
-                        let trio_score = apply_score_modifiers(
-                            value / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0),
-                            target,
-                            MissionKind::Swarm,
-                            world,
-                        ) * THREE_SOURCE_PLAN_PENALTY;
+                        let trio_score = value
+                            / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0)
+                            * THREE_SOURCE_PLAN_PENALTY;
                         missions.push(Mission {
                             kind: MissionKind::Swarm,
                             score: trio_score,
@@ -2680,11 +2449,9 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
         world,
         &policy,
         &state.planned_commitments,
-        &modes,
     ));
 
     MissionArtifacts {
-        modes,
         policy,
         missions,
         my_planet_ids,
@@ -2715,7 +2482,6 @@ pub fn plan_from_artifacts(
     profile: PlanProfile,
     forbidden_targets: &HashSet<i64>,
 ) -> PlanOutput {
-    let modes = artifacts.modes;
     let policy = &artifacts.policy;
     let mut state = PlanState::new();
     let my_planet_ids: &[i64] = &artifacts.my_planet_ids;
@@ -2755,7 +2521,7 @@ pub fn plan_from_artifacts(
                 let option = mission.options[0];
                 let src = world.planet(option.src_id);
                 let Some((plan, left)) = settle_single_source_mission(
-                    world, mission, &option, src, target, &state, &modes, &policy,
+                    world, mission, &option, src, target, &state, &policy,
                 ) else {
                     continue;
                 };
@@ -2955,7 +2721,7 @@ pub fn plan_from_artifacts(
                 if opening_filter(target, est_turns, rough_needed, src_left, world, &policy) {
                     continue;
                 }
-                let send = preferred_send(target, rough_needed, est_turns, src_left, world, &modes, &policy);
+                let send = preferred_send(target, rough_needed, est_turns, src_left, world, &policy);
                 if send < rough_needed {
                     continue;
                 }
@@ -2966,7 +2732,6 @@ pub fn plan_from_artifacts(
                     src_left,
                     send,
                     &state.planned_commitments,
-                    &modes,
                     &policy,
                     MissionKind::Capture,
                     |turns| turns,
@@ -2982,16 +2747,11 @@ pub fn plan_from_artifacts(
                 if plan.send < plan.need {
                     continue;
                 }
-                let value = target_value(target, plan.turns, MissionKind::Capture, world, &modes, &policy);
+                let value = target_value(target, plan.turns, world, &policy);
                 if value <= 0.0 {
                     continue;
                 }
-                let score = apply_score_modifiers(
-                    value / (plan.send as f64 + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT + 1.0),
-                    target,
-                    MissionKind::Capture,
-                    world,
-                );
+                let score = value / (plan.send as f64 + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT + 1.0);
                 if best.as_ref().map_or(true, |b| score > b.0) {
                     best = Some((score, target.id, plan));
                 }
@@ -3009,7 +2769,6 @@ pub fn plan_from_artifacts(
                 src_left,
                 src_left.min(plan.send),
                 &state.planned_commitments,
-                &modes,
                 &policy,
                 MissionKind::Capture,
                 |turns| turns,
@@ -3096,7 +2855,6 @@ pub fn plan_from_artifacts(
                     available_now,
                     available_now.min(need.max(target.ships + 1)),
                     &state.planned_commitments,
-                    &modes,
                     &policy,
                     MissionKind::Capture,
                     |turns| turns,
@@ -3109,7 +2867,7 @@ pub fn plan_from_artifacts(
                 if plan.send < plan.need {
                     continue;
                 }
-                let mut score = target_value(target, plan.turns, MissionKind::Capture, world, &modes, &policy)
+                let mut score = target_value(target, plan.turns, world, &policy)
                     / (plan.send as f64 + plan.turns as f64 + 1.0);
                 if target.owner != -1 && target.owner != world.player {
                     score *= 1.05;
@@ -3182,14 +2940,11 @@ pub fn plan_from_artifacts(
                 })
                 .unwrap()
                 .id;
-            let mut send_ratio = if world.is_four_player {
+            let send_ratio = if world.is_four_player {
                 REAR_SEND_RATIO_FOUR_PLAYER
             } else {
                 REAR_SEND_RATIO_TWO_PLAYER
             };
-            if modes.is_finishing {
-                send_ratio = send_ratio.max(REAR_SEND_RATIO_FOUR_PLAYER);
-            }
             // Sort references rather than cloning the whole Vec<Planet>.
             let mut sorted_rears: Vec<&Planet> = world.my_planets.iter().collect();
             sorted_rears.sort_by(|a, b| {
