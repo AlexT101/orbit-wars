@@ -1,9 +1,12 @@
 """
 Build a Kaggle-ready submission bundle for simbot.
 
-Kaggle runs agents on Linux x86_64 and will not compile Rust, so we cross-build
-the native module in the official manylinux container (via Docker), extract the
-resulting Linux `.so`, and bundle it next to `main.py` in a tar.gz.
+Kaggle runs agents on Linux x86_64 and will not compile Rust, so we build the
+native module *inside Kaggle's own runtime image* (gcr.io/kaggle-images/python)
+to guarantee an exact glibc/libstdc++/ABI match. Earlier versions built in a
+manylinux container; the resulting wheel imported and ran one turn fine, then
+mysteriously stopped being called — a near-textbook symptom of subtle
+runtime-mismatch breakage. Building in the runtime image rules that out.
 
 Usage:
     python bots/simbot/build_submission.py
@@ -21,18 +24,41 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
+# Pin a digest in production for reproducibility; `latest` here keeps the
+# scripts simple while we iterate.
+KAGGLE_IMAGE = "gcr.io/kaggle-images/python:latest"
+
+# Installs Rust + maturin inside the Kaggle image, then builds an abi3 wheel
+# tied to *this* image's libc/libstdc++. `--compatibility off` skips the
+# manylinux audit and emits a `linux_x86_64` wheel — non-portable to other
+# distros, but a perfect match for Kaggle's submission runtime.
+BUILD_SCRIPT = r"""
+set -euo pipefail
+export CARGO_HOME=/io/.cargo-home
+export RUSTUP_HOME=/io/.rustup-home
+export PATH=$CARGO_HOME/bin:$PATH
+if ! command -v cargo >/dev/null; then
+    curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+fi
+pip install --quiet --upgrade maturin
+maturin build --release --compatibility off
+"""
+
 
 def main() -> int:
-    # 1. Cross-build a manylinux abi3 wheel in the official maturin container.
+    # 1. Build the wheel inside Kaggle's runtime image so the .so links against
+    #    the exact libc/libstdc++ that the submission worker will load it with.
     subprocess.run(
         ["docker", "run", "--rm", "-v", f"{HERE}:/io", "-w", "/io",
-         "ghcr.io/pyo3/maturin", "build", "--release"],
+         KAGGLE_IMAGE, "bash", "-c", BUILD_SCRIPT],
         check=True,
     )
 
-    # 2. Pick the newest manylinux wheel maturin produced.
+    # 2. Pick the newest wheel maturin produced. `--compatibility off` emits
+    #    `linux_x86_64`; older manylinux wheels left over from prior builds
+    #    are also matched so a clean target/ isn't required to upgrade.
     wheels = sorted(
-        glob(str(HERE / "target" / "wheels" / "simbot_native-*-abi3-manylinux*.whl")),
+        glob(str(HERE / "target" / "wheels" / "simbot_native-*-abi3-*linux*.whl")),
         key=os.path.getmtime,
     )
     if not wheels:

@@ -44,8 +44,10 @@ python run_match.py simbot random
 ## Submit to Kaggle
 
 Kaggle runs agents on Linux x86_64 and won't compile Rust, so the submission
-must carry a precompiled Linux `.so`. `build_submission.py` cross-builds one in
-the official manylinux Docker image, extracts it, and bundles it with `main.py`:
+must carry a precompiled Linux `.so`. `build_submission.py` builds one *inside
+Kaggle's own runtime image* (`gcr.io/kaggle-images/python`) so the resulting
+wheel links against the exact glibc/libstdc++ that the submission worker will
+load it with. The script then extracts the `.so` and bundles it with `main.py`:
 
 ```powershell
 Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
@@ -53,6 +55,15 @@ python bots/simbot/build_submission.py
 kaggle competitions submit orbit-wars -f bots/simbot/submission.tar.gz -m "simbot v1"
 ```
 
+First build is slow — the container downloads the Rust toolchain. Subsequent
+builds reuse it via `.cargo-home`/`.rustup-home` caches inside the repo.
+
 The bundled `.so` is `abi3` (Python ≥ 3.9), so it doesn't need to match Kaggle's
-exact interpreter version — only the OS/arch. `main.py` adds its own directory to
-`sys.path`, so the bundled module imports regardless of the harness's cwd.
+exact interpreter version. It *is* tied to Kaggle's exact runtime (built with
+`--compatibility off`, emitting a `linux_x86_64` wheel rather than `manylinux`)
+— a deliberate trade: non-portable to other distros, but a perfect match for the
+only machine that matters.
+
+Kaggle loads `main.py` via `exec()`, which leaves `__file__` undefined, so
+`main.py` detects the documented `/kaggle_simulations/agent/` path directly and
+inserts it into `sys.path`. Locally it falls back to `__file__`'s directory.

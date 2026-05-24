@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -80,7 +80,7 @@ pub struct EntityCache {
     /// Per-turn aim cache. `aim_cache[abs_turn]` maps `(src, target, ships)`
     /// to a cached aim result. Indexed by absolute turn because aim geometry
     /// is fully determined by the source/target positions at that turn.
-    aim_cache: RefCell<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
+    aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
 }
 
 impl EntityCache {
@@ -115,7 +115,7 @@ impl EntityCache {
             angular_velocity,
             entities,
             last_comet_spawn_step: 0,
-            aim_cache: RefCell::new(aim_cache),
+            aim_cache: Mutex::new(aim_cache),
         }
     }
 
@@ -172,7 +172,7 @@ impl EntityCache {
         let key = (src, target, ships);
 
         let entry = {
-            let map = self.aim_cache.borrow();
+            let map = self.aim_cache.lock().unwrap();
             match map[slot].get(&key) {
                 None => return AimCacheVerdict::Miss,
                 Some(e) => *e,
@@ -189,19 +189,19 @@ impl EntityCache {
                 let src_radius = match self.get(src) {
                     Some(ent) => ent.radius,
                     None => {
-                        self.aim_cache.borrow_mut()[slot].remove(&key);
+                        self.aim_cache.lock().unwrap()[slot].remove(&key);
                         return AimCacheVerdict::Stale;
                     }
                 };
                 let [sx, sy] = match self.position(src, 0) {
                     Some(p) => p,
                     None => {
-                        self.aim_cache.borrow_mut()[slot].remove(&key);
+                        self.aim_cache.lock().unwrap()[slot].remove(&key);
                         return AimCacheVerdict::Stale;
                     }
                 };
                 if verify_shot_hits(sx, sy, src_radius, angle, turns, ships, target, self) {
-                    self.aim_cache.borrow_mut()[slot].insert(
+                    self.aim_cache.lock().unwrap()[slot].insert(
                         key,
                         CachedAim {
                             result: Some(result),
@@ -210,7 +210,7 @@ impl EntityCache {
                     );
                     AimCacheVerdict::Hit(Some(result))
                 } else {
-                    self.aim_cache.borrow_mut()[slot].remove(&key);
+                    self.aim_cache.lock().unwrap()[slot].remove(&key);
                     AimCacheVerdict::Stale
                 }
             }
@@ -227,7 +227,7 @@ impl EntityCache {
             result,
             comet_state: self.last_comet_spawn_step,
         };
-        self.aim_cache.borrow_mut()[slot as usize].insert((src, target, ships), entry);
+        self.aim_cache.lock().unwrap()[slot as usize].insert((src, target, ships), entry);
     }
 
     /// Drop all cached aim results for `turn`. Called once per bot turn to
@@ -236,7 +236,7 @@ impl EntityCache {
         if turn < 0 || (turn as usize) >= EPISODE_STEPS as usize {
             return;
         }
-        if let Some(slot) = self.aim_cache.get_mut().get_mut(turn as usize) {
+        if let Some(slot) = self.aim_cache.get_mut().unwrap().get_mut(turn as usize) {
             slot.clear();
         }
     }

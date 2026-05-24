@@ -137,7 +137,7 @@ impl Observation {
     }
 }
 
-#[pyclass(unsendable)]
+#[pyclass]
 pub struct Bot {
     current_turn: i64,
     cache: Option<EntityCache>,
