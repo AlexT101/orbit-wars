@@ -76,27 +76,28 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
     (sx + angle.cos() * c, sy + angle.sin() * c)
 }
 
-/// Counts distinct active players: every non-neutral planet owner plus every
-/// fleet owner. Floored at 2 since a match always has at least two players,
-/// even if one is currently wiped off the map but still has a fleet in flight.
+/// Returns the engine's player-slot count: `max_owner + 1` across all
+/// non-neutral planets and fleets, floored at 2. Engine code indexes into
+/// per-player arrays by owner id directly, so the slot count has to be
+/// large enough to hold the *highest* owner id — not just the distinct
+/// count. E.g. in a 4P game where players 1 and 2 have been wiped but a
+/// planet is still owned by player 3, the distinct count is 2 but we need
+/// 4 slots (indices 0..=3).
 ///
-/// Player ids are always in `0..MAX_PLAYERS` (or -1 for neutral), so we use a
-/// fixed-size bitset instead of a HashSet — no allocation, no hashing.
+/// Player ids are always in `0..MAX_PLAYERS` (or -1 for neutral).
 pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
     use crate::constants::MAX_PLAYERS;
-    let mut seen = [false; MAX_PLAYERS];
-    let mark = |owner: i64, seen: &mut [bool; MAX_PLAYERS]| {
-        if owner >= 0 && (owner as usize) < MAX_PLAYERS {
-            seen[owner as usize] = true;
-        }
-    };
+    let mut max_owner: i64 = -1;
     for p in planets {
-        mark(p.owner, &mut seen);
+        if p.owner > max_owner { max_owner = p.owner; }
     }
     for f in fleets {
-        mark(f.owner, &mut seen);
+        if f.owner > max_owner { max_owner = f.owner; }
     }
-    let n = seen.iter().filter(|&&v| v).count();
+    if max_owner < 0 {
+        return 2;
+    }
+    let n = (max_owner as usize + 1).min(MAX_PLAYERS);
     n.max(2)
 }
 
