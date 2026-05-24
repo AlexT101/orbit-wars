@@ -185,3 +185,5 @@ submission.tar.gz
 
 .cargo-home
 .rustup-home
+
+node_modules/
