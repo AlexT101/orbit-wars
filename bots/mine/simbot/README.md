@@ -30,9 +30,9 @@ The native module (`simbot_native`) must be compiled into the active
 environment before `main.py` can import it:
 
 ```powershell
-cd bots/simbot
+cd bots/mine/simbot
 maturin develop --release
-cd ../..
+cd ../../..
 ```
 
 ## Run

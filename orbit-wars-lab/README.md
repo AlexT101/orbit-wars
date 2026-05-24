@@ -8,8 +8,6 @@ Local tournament runner + visualizer for the
 ### Option 1: Docker (recommended)
 
 ```bash
-git clone https://github.com/automatylicza/orbit-wars-lab.git
-cd orbit-wars-lab
 docker compose up
 ```
 
@@ -31,25 +29,6 @@ cp .env.example .env          # shows available overrides
 echo "UID=$(id -u)" > .env    # or just do this one-liner
 echo "GID=$(id -g)" >> .env
 ```
-
-### Option 2: Native dev (faster iteration)
-
-Requires **Python 3.12** + **pnpm** (`npm i -g pnpm`).
-On Windows, use **Git Bash** in VSCode (or standalone Git Bash) rather than
-PowerShell or `C:\Windows\System32\bash.exe`.
-
-```bash
-git clone https://github.com/automatylicza/orbit-wars-lab.git
-cd orbit-wars-lab
-bash scripts/dev.sh
-```
-
-The first run creates `.venv`, installs missing Python/JS deps, and starts
-the backend (:8000) + Vite viewer (:5173) with hot-reload. Open
-<http://localhost:5173>.
-
-If you also want the optional PPO RL agent dependencies (`torch` CPU wheel),
-run `bash scripts/setup.sh --with-rl` once before starting dev mode.
 
 ---
 
