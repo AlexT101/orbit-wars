@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-24T21:00:12.087981+00:00",
+  "last_updated": "2026-05-24T21:14:25.314232+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
-        "mu": 553.5305507824099,
-        "sigma": 74.50465368470205,
-        "games_played": 18
+        "mu": 545.4085396618616,
+        "sigma": 70.76676631558799,
+        "games_played": 23
       },
       "4p": {
         "mu": 557.6935535792377,
@@ -16,9 +16,9 @@
     },
     "baselines/random": {
       "2p": {
-        "mu": 307.8988661918954,
-        "sigma": 92.20476511409527,
-        "games_played": 16
+        "mu": 307.5505004675186,
+        "sigma": 91.99810779108843,
+        "games_played": 21
       },
       "4p": {
         "mu": 557.6713527121924,
@@ -28,9 +28,9 @@
     },
     "baselines/starter": {
       "2p": {
-        "mu": 586.1368864679505,
-        "sigma": 89.68375405847897,
-        "games_played": 12
+        "mu": 568.5850420853242,
+        "sigma": 81.20204746376113,
+        "games_played": 17
       },
       "4p": {
         "mu": 557.6269532201586,
@@ -40,23 +40,23 @@
     },
     "mine/simbot": {
       "2p": {
-        "mu": 890.6831049750267,
-        "sigma": 28.78935320482977,
-        "games_played": 180
+        "mu": 902.4696352983347,
+        "sigma": 27.39319091192068,
+        "games_played": 275
       }
     },
     "external/marco-dg": {
       "2p": {
-        "mu": 660.6443646474739,
-        "sigma": 83.27179913035975,
-        "games_played": 10
+        "mu": 630.9448710529372,
+        "sigma": 72.07241904071873,
+        "games_played": 15
       }
     },
     "external/heuristic": {
       "2p": {
-        "mu": 790.5326548874227,
-        "sigma": 63.13107411722599,
-        "games_played": 10
+        "mu": 812.8722640669937,
+        "sigma": 50.38802860034288,
+        "games_played": 15
       },
       "4p": {
         "mu": 727.0081404884115,
@@ -66,93 +66,100 @@
     },
     "external/obnext": {
       "2p": {
-        "mu": 666.7512543546617,
-        "sigma": 81.5124331209629,
-        "games_played": 10
+        "mu": 637.5029745217208,
+        "sigma": 70.73328585859817,
+        "games_played": 15
       }
     },
     "external/owproto": {
       "2p": {
-        "mu": 764.2199333503504,
-        "sigma": 63.690762167425085,
-        "games_played": 10
+        "mu": 764.5445148037217,
+        "sigma": 52.31248574791378,
+        "games_played": 15
       }
     },
     "external/peaking-bot": {
       "2p": {
-        "mu": 467.39522363773403,
-        "sigma": 119.48913321955347,
-        "games_played": 10
+        "mu": 456.3983389472334,
+        "sigma": 111.5591909256467,
+        "games_played": 15
       }
     },
     "external/pilkwang-structured": {
       "2p": {
-        "mu": 625.6855151465588,
-        "sigma": 79.24706465762223,
-        "games_played": 10
+        "mu": 607.0839969986996,
+        "sigma": 71.6211638850486,
+        "games_played": 15
       }
     },
     "external/ppo": {
       "2p": {
-        "mu": 452.87226086820925,
-        "sigma": 115.5551395672999,
-        "games_played": 10
+        "mu": 445.29993954502146,
+        "sigma": 109.90992266608292,
+        "games_played": 15
       }
     },
     "external/sigmaborov-reinforce": {
       "2p": {
-        "mu": 452.0618979343698,
-        "sigma": 115.04138969423938,
-        "games_played": 10
+        "mu": 444.71143394442515,
+        "sigma": 109.55719600691522,
+        "games_played": 15
       }
     },
     "external/smart-baseline": {
       "2p": {
-        "mu": 453.6668344608154,
-        "sigma": 115.01288859266326,
-        "games_played": 10
+        "mu": 446.3399193519843,
+        "sigma": 109.5477814822616,
+        "games_played": 15
       }
     },
     "external/sim-search": {
       "2p": {
-        "mu": 635.7633239561263,
-        "sigma": 79.55355806484651,
-        "games_played": 10
+        "mu": 616.4646413072621,
+        "sigma": 71.69273141344203,
+        "games_played": 15
       }
     },
     "external/structured-v4": {
       "2p": {
-        "mu": 454.34754387746915,
-        "sigma": 114.34827201746685,
-        "games_played": 10
+        "mu": 447.1830485411781,
+        "sigma": 109.01446144293931,
+        "games_played": 15
       }
     },
     "external/tamrazov-starwars": {
       "2p": {
-        "mu": 706.5682075957874,
-        "sigma": 70.46332842279702,
-        "games_played": 10
+        "mu": 679.0623675882964,
+        "sigma": 61.972937025737664,
+        "games_played": 15
       }
     },
     "external/ykhnkf-distance-prioritized": {
       "2p": {
-        "mu": 453.9198543448478,
-        "sigma": 113.31008817177644,
-        "games_played": 10
+        "mu": 447.3225466722886,
+        "sigma": 108.37867028009191,
+        "games_played": 15
       }
     },
     "external/yuriygreben-architect": {
       "2p": {
-        "mu": 453.97817704894965,
-        "sigma": 113.3502457434315,
-        "games_played": 10
+        "mu": 447.4914820193472,
+        "sigma": 108.48881026210952,
+        "games_played": 15
       }
     },
     "mine/simbot_wide": {
       "2p": {
-        "mu": 825.3179271142184,
-        "sigma": 58.904099423811964,
-        "games_played": 10
+        "mu": 868.5772792993015,
+        "sigma": 47.7657225843362,
+        "games_played": 15
+      }
+    },
+    "mine/simbot-simplified": {
+      "2p": {
+        "mu": 512.204032422516,
+        "sigma": 143.00024192028417,
+        "games_played": 5
       }
     }
   }
