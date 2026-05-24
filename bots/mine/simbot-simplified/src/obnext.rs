@@ -13,7 +13,7 @@
 //!   4. Scoring & filter helpers
 //!   5. Policy builder
 //!   6. `settle_plan` / `settle_reinforce_plan` iterative solvers
-//!   7. Mission builders (snipe, rescue, recapture, reinforce, crash_exploit)
+//!   7. Mission builders (anchored offense, rescue, recapture, reinforce, post-crash offense)
 //!   8. `plan_moves` — the main loop
 //!   9. `plan(...)` — entry point that wraps a `WorldState` and runs the loop
 //!
@@ -48,35 +48,20 @@ const VERY_LATE_REMAINING_TURNS: i64 = 25;
 const SAFE_NEUTRAL_MARGIN: i64 = 2;
 const CONTESTED_NEUTRAL_MARGIN: i64 = 2;
 
-const SAFE_OPENING_PROD_THRESHOLD: i64 = 4;
-const SAFE_OPENING_TURN_LIMIT: i64 = 10;
 const ROTATING_OPENING_MAX_TURNS: i64 = 13;
 const ROTATING_OPENING_LOW_PROD: i64 = 2;
-const FOUR_PLAYER_ROTATING_REACTION_GAP: i64 = 1;
-const FOUR_PLAYER_ROTATING_SEND_RATIO: f64 = 0.72;
-const FOUR_PLAYER_ROTATING_TURN_LIMIT: i64 = 14;
+const CONTESTED_OFFENSE_ETA_TOLERANCE: i64 = 1;
 
 const COMET_MAX_CHASE_TURNS: i64 = 15;
 
-const ATTACK_COST_TURN_WEIGHT: f64 = 0.55;
-const SNIPE_COST_TURN_WEIGHT: f64 = 0.45;
 const INDIRECT_VALUE_SCALE: f64 = 0.15;
 const INDIRECT_FRIENDLY_WEIGHT: f64 = 0.35;
 const INDIRECT_NEUTRAL_WEIGHT: f64 = 0.9;
 const INDIRECT_ENEMY_WEIGHT: f64 = 1.25;
 
-const NEUTRAL_MARGIN_BASE: i64 = 2;
-const NEUTRAL_MARGIN_PROD_WEIGHT: i64 = 2;
-const NEUTRAL_MARGIN_CAP: i64 = 8;
-const HOSTILE_MARGIN_BASE: i64 = 3;
-const HOSTILE_MARGIN_PROD_WEIGHT: i64 = 2;
-const HOSTILE_MARGIN_CAP: i64 = 12;
 const STATIC_TARGET_MARGIN: i64 = 4;
 const CONTESTED_TARGET_MARGIN: i64 = 5;
 const FOUR_PLAYER_TARGET_MARGIN: i64 = 2;
-const LONG_TRAVEL_MARGIN_START: i64 = 18;
-const LONG_TRAVEL_MARGIN_DIVISOR: i64 = 3;
-const LONG_TRAVEL_MARGIN_CAP: i64 = 8;
 const COMET_MARGIN_RELIEF: i64 = 6;
 
 const FOLLOWUP_MIN_SHIPS: i64 = 8;
@@ -139,15 +124,114 @@ const CRASH_EXPLOIT_POST_CRASH_DELAY: i64 = 1;
 const DOOMED_EVAC_TURN_LIMIT: i64 = 24;
 const DOOMED_MIN_SHIPS: i64 = 8;
 
+#[derive(Debug, Clone, Copy)]
+struct OffenseScoreConfig {
+    immediate_turn_weight: f64,
+    anchored_turn_weight: f64,
+}
+
+const OFFENSE_SCORE: OffenseScoreConfig = OffenseScoreConfig {
+    immediate_turn_weight: 0.55,
+    anchored_turn_weight: 0.45,
+};
+
+#[derive(Debug, Clone, Copy)]
+struct LinearMarginRule {
+    base: i64,
+    prod_weight: i64,
+    cap: i64,
+}
+
+impl LinearMarginRule {
+    #[inline]
+    const fn at(self, production: i64) -> i64 {
+        let raw = self.base + production * self.prod_weight;
+        if raw < self.cap { raw } else { self.cap }
+    }
+}
+
+const NEUTRAL_CAPTURE_MARGIN: LinearMarginRule = LinearMarginRule {
+    base: 2,
+    prod_weight: 2,
+    cap: 8,
+};
+
+const HOSTILE_CAPTURE_MARGIN: LinearMarginRule = LinearMarginRule {
+    base: 3,
+    prod_weight: 2,
+    cap: 12,
+};
+
+#[derive(Debug, Clone, Copy)]
+struct TravelMarginRule {
+    start: i64,
+    divisor: i64,
+    cap: i64,
+}
+
+impl TravelMarginRule {
+    #[inline]
+    const fn extra(self, arrival_turns: i64) -> i64 {
+        if arrival_turns > self.start {
+            let raw = arrival_turns / self.divisor;
+            if raw < self.cap { raw } else { self.cap }
+        } else {
+            0
+        }
+    }
+}
+
+const OFFENSE_TRAVEL_MARGIN: TravelMarginRule = TravelMarginRule {
+    start: 18,
+    divisor: 3,
+    cap: 8,
+};
+
+#[derive(Debug, Clone, Copy)]
+struct SafeOpeningNeutralRule {
+    prod_threshold: i64,
+    turn_limit: i64,
+    reaction_gap: i64,
+}
+
+const SAFE_OPENING_NEUTRAL: SafeOpeningNeutralRule = SafeOpeningNeutralRule {
+    prod_threshold: 4,
+    turn_limit: 10,
+    reaction_gap: SAFE_NEUTRAL_MARGIN,
+};
+
+#[derive(Debug, Clone, Copy)]
+struct FourPlayerOpeningRule {
+    reaction_gap: i64,
+    send_ratio: f64,
+    turn_limit: i64,
+}
+
+const FOUR_PLAYER_ROTATING_OPENING: FourPlayerOpeningRule = FourPlayerOpeningRule {
+    reaction_gap: 1,
+    send_ratio: 0.72,
+    turn_limit: 14,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpeningNeutralVerdict {
+    Strong,
+    Viable,
+    TooSlow,
+    TooLowValue,
+    TooExpensive,
+    Unsafe,
+}
+
 // ── 2. PlanProfile ────────────────────────────────────────────────────────
 
 /// Toggles optimization features. Defensive features (reinforce/rescue/
-/// recapture/doomed evac) and core offense (Single + Snipe) are always on.
+/// recapture/doomed evac) and core offense are always on.
 /// `heavy = false` is used by the rollout opponent model to keep per-turn
 /// cost down.
 #[derive(Debug, Clone, Copy)]
 pub struct PlanProfile {
-    /// Enables 2-/3-source swarms, crash exploit, follow-up pass, rear staging.
+    /// Enables 2-/3-source swarms, post-crash offense, follow-up pass, rear staging.
     pub heavy: bool,
 }
 
@@ -174,26 +258,28 @@ impl Default for PlanProfile {
 /// capture wrapped as a mission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MissionKind {
-    Capture,
-    Single,
-    Snipe,
+    Offense(OffenseWindow),
     Swarm,
     Reinforce,
     Rescue,
     Recapture,
-    CrashExploit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OffenseWindow {
+    Immediate,
+    Contest { anchor_turn: i64, tolerance: i64 },
+    PostCrash { anchor_turn: i64, tolerance: i64 },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ShotOption {
     pub score: f64,
     pub src_id: i64,
-    pub target_id: i64,
     pub angle: f64,
     pub turns: i64,
     pub needed: i64,
     pub send_cap: i64,
-    pub mission: MissionKind,
     pub anchor_turn: Option<i64>,
 }
 
@@ -744,14 +830,6 @@ fn policy_reaction_times(target_id: i64, policy: &PolicyState) -> (i64, i64) {
         .unwrap_or((i64::MAX / 4, i64::MAX / 4))
 }
 
-fn is_safe_neutral(target: &Planet, policy: &PolicyState) -> bool {
-    if target.owner != -1 {
-        return false;
-    }
-    let (my_t, enemy_t) = policy_reaction_times(target.id, policy);
-    my_t <= enemy_t - SAFE_NEUTRAL_MARGIN
-}
-
 fn is_contested_neutral(target: &Planet, policy: &PolicyState) -> bool {
     if target.owner != -1 {
         return false;
@@ -771,6 +849,85 @@ fn candidate_time_valid(target: &Planet, turns: i64, world: &WorldModel, remaini
         }
     }
     true
+}
+
+#[inline]
+fn late_capture_buffer(world: &WorldModel) -> i64 {
+    if world.is_very_late {
+        VERY_LATE_CAPTURE_BUFFER
+    } else {
+        LATE_CAPTURE_BUFFER
+    }
+}
+
+#[inline]
+fn offense_margin(target: &Planet, arrival_turns: i64, world: &WorldModel, policy: &PolicyState) -> i64 {
+    let mut margin = if target.owner == -1 {
+        NEUTRAL_CAPTURE_MARGIN.at(target.production)
+    } else {
+        HOSTILE_CAPTURE_MARGIN.at(target.production)
+    };
+    if world.is_static(target.id) {
+        margin += STATIC_TARGET_MARGIN;
+    }
+    if is_contested_neutral(target, policy) {
+        margin += CONTESTED_TARGET_MARGIN;
+    }
+    if world.is_four_player {
+        margin += FOUR_PLAYER_TARGET_MARGIN;
+    }
+    margin += OFFENSE_TRAVEL_MARGIN.extra(arrival_turns);
+    if world.comet_ids.contains(&target.id) {
+        margin = (margin - COMET_MARGIN_RELIEF).max(0);
+    }
+    margin
+}
+
+#[inline]
+fn is_safe_opening_neutral(arrival_turns: i64, reaction_gap: i64, target: &Planet) -> bool {
+    target.production >= SAFE_OPENING_NEUTRAL.prod_threshold
+        && arrival_turns <= SAFE_OPENING_NEUTRAL.turn_limit
+        && reaction_gap >= SAFE_OPENING_NEUTRAL.reaction_gap
+}
+
+#[inline]
+fn four_player_opening_cap(src_available: i64) -> i64 {
+    PARTIAL_SOURCE_MIN_SHIPS
+        .max((src_available as f64 * FOUR_PLAYER_ROTATING_OPENING.send_ratio) as i64)
+}
+
+fn opening_neutral_verdict(
+    target: &Planet,
+    arrival_turns: i64,
+    needed: i64,
+    src_available: i64,
+    reaction_gap: i64,
+    world: &WorldModel,
+) -> OpeningNeutralVerdict {
+    if is_safe_opening_neutral(arrival_turns, reaction_gap, target) {
+        return OpeningNeutralVerdict::Strong;
+    }
+
+    if world.is_four_player {
+        if arrival_turns > FOUR_PLAYER_ROTATING_OPENING.turn_limit {
+            return OpeningNeutralVerdict::TooSlow;
+        }
+        if reaction_gap < FOUR_PLAYER_ROTATING_OPENING.reaction_gap {
+            return OpeningNeutralVerdict::Unsafe;
+        }
+        if needed > four_player_opening_cap(src_available) {
+            return OpeningNeutralVerdict::TooExpensive;
+        }
+        return OpeningNeutralVerdict::Viable;
+    }
+
+    if arrival_turns > ROTATING_OPENING_MAX_TURNS {
+        return OpeningNeutralVerdict::TooSlow;
+    }
+    if target.production <= ROTATING_OPENING_LOW_PROD {
+        return OpeningNeutralVerdict::TooLowValue;
+    }
+    OpeningNeutralVerdict::Viable
 }
 
 fn stacked_enemy_proactive_keep(planet: &Planet, world: &WorldModel) -> i64 {
@@ -883,27 +1040,10 @@ fn opening_filter(
 
     let (my_t, enemy_t) = policy_reaction_times(target.id, policy);
     let reaction_gap = enemy_t - my_t;
-    if target.production >= SAFE_OPENING_PROD_THRESHOLD
-        && arrival_turns <= SAFE_OPENING_TURN_LIMIT
-        && reaction_gap >= SAFE_NEUTRAL_MARGIN
-    {
-        return false;
-    }
-
-    if world.is_four_player {
-        let affordable_cap =
-            PARTIAL_SOURCE_MIN_SHIPS.max((src_available as f64 * FOUR_PLAYER_ROTATING_SEND_RATIO) as i64);
-        let affordable = needed <= affordable_cap;
-        if affordable
-            && arrival_turns <= FOUR_PLAYER_ROTATING_TURN_LIMIT
-            && reaction_gap >= FOUR_PLAYER_ROTATING_REACTION_GAP
-        {
-            return false;
-        }
-        return true;
-    }
-
-    arrival_turns > ROTATING_OPENING_MAX_TURNS || target.production <= ROTATING_OPENING_LOW_PROD
+    !matches!(
+        opening_neutral_verdict(target, arrival_turns, needed, src_available, reaction_gap, world),
+        OpeningNeutralVerdict::Strong | OpeningNeutralVerdict::Viable
+    )
 }
 
 /// Flat mission value: production over the remaining horizon, plus a small
@@ -957,27 +1097,7 @@ fn preferred_send(
     world: &WorldModel,
     policy: &PolicyState,
 ) -> i64 {
-    let mut margin: i64 = 0;
-    if target.owner == -1 {
-        margin += NEUTRAL_MARGIN_CAP.min(NEUTRAL_MARGIN_BASE + target.production * NEUTRAL_MARGIN_PROD_WEIGHT);
-    } else {
-        margin += HOSTILE_MARGIN_CAP.min(HOSTILE_MARGIN_BASE + target.production * HOSTILE_MARGIN_PROD_WEIGHT);
-    }
-    if world.is_static(target.id) {
-        margin += STATIC_TARGET_MARGIN;
-    }
-    if is_contested_neutral(target, policy) {
-        margin += CONTESTED_TARGET_MARGIN;
-    }
-    if world.is_four_player {
-        margin += FOUR_PLAYER_TARGET_MARGIN;
-    }
-    if arrival_turns > LONG_TRAVEL_MARGIN_START {
-        margin += LONG_TRAVEL_MARGIN_CAP.min(arrival_turns / LONG_TRAVEL_MARGIN_DIVISOR);
-    }
-    if world.comet_ids.contains(&target.id) {
-        margin = (margin - COMET_MARGIN_RELIEF).max(0);
-    }
+    let margin = offense_margin(target, arrival_turns, world, policy);
     base_needed.saturating_add(margin).min(src_available)
 }
 
@@ -1057,9 +1177,55 @@ struct SettleResult {
     send: i64,
 }
 
-/// Mirrors obnext's `settle_plan`. `eval_turn_fn` lets snipe/rescue/crash
-/// missions evaluate ownership at a later anchor turn than the actual
-/// arrival.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettlePlanMode {
+    Preferred,
+    Exact,
+    Rescue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvalTurnRule {
+    Arrival,
+    MaxWith(i64),
+    Fixed(i64),
+}
+
+impl EvalTurnRule {
+    #[inline]
+    fn apply(self, turns: i64) -> i64 {
+        match self {
+            Self::Arrival => turns,
+            Self::MaxWith(anchor) => turns.max(anchor),
+            Self::Fixed(turn) => turn,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SingleSourceSettleSpec {
+    mode: SettlePlanMode,
+    eval_rule: EvalTurnRule,
+    anchor_turn: Option<i64>,
+    anchor_tolerance: Option<i64>,
+    prefer_anchor_proximity: bool,
+    require_after_anchor: bool,
+}
+
+#[inline]
+const fn preferred_settle_spec() -> SingleSourceSettleSpec {
+    SingleSourceSettleSpec {
+        mode: SettlePlanMode::Preferred,
+        eval_rule: EvalTurnRule::Arrival,
+        anchor_turn: None,
+        anchor_tolerance: None,
+        prefer_anchor_proximity: false,
+        require_after_anchor: false,
+    }
+}
+
+/// Mirrors obnext's `settle_plan`. `eval_turn_fn` lets anchored or defensive
+/// missions evaluate ownership at a later turn than the actual arrival.
 #[allow(clippy::too_many_arguments)]
 fn settle_plan(
     world: &WorldModel,
@@ -1069,23 +1235,13 @@ fn settle_plan(
     send_guess: i64,
     planned: &PlannedCommitments,
     policy: &PolicyState,
-    mission: MissionKind,
-    eval_turn_fn: impl Fn(i64) -> i64,
-    anchor_turn: Option<i64>,
-    anchor_tolerance: Option<i64>,
+    spec: SingleSourceSettleSpec,
     max_iter: usize,
 ) -> Option<SettleResult> {
     if src_cap < 1 {
         return None;
     }
     let seed_hint = send_guess.clamp(1, src_cap);
-    let anchor_tolerance = anchor_tolerance.or_else(|| {
-        if matches!(mission, MissionKind::Snipe) {
-            Some(1)
-        } else {
-            None
-        }
-    });
 
     // tested.insert(send → Option<EvalRow>). None means "this send doesn't
     // settle for some reason"; Some means "this is a candidate".
@@ -1106,15 +1262,15 @@ fn settle_plan(
             return None;
         };
         let (angle, turns, _, _) = aim;
-        if matches!(mission, MissionKind::CrashExploit) {
-            if let Some(anchor) = anchor_turn {
+        if spec.require_after_anchor {
+            if let Some(anchor) = spec.anchor_turn {
                 if turns < anchor {
                     tested.insert(send, None);
                     return None;
                 }
             }
         }
-        let raw_eval_turn = eval_turn_fn(turns);
+        let raw_eval_turn = spec.eval_rule.apply(turns);
         if raw_eval_turn < turns {
             tested.insert(send, None);
             return None;
@@ -1134,13 +1290,13 @@ fn settle_plan(
             return None;
         }
 
-        let desired = match mission {
-            MissionKind::Snipe | MissionKind::CrashExploit => need,
-            MissionKind::Rescue => {
+        let desired = match spec.mode {
+            SettlePlanMode::Exact => need,
+            SettlePlanMode::Rescue => {
                 let safety = need + DEFENSE_SEND_MARGIN_BASE + target.production * DEFENSE_SEND_MARGIN_PROD_WEIGHT;
                 need.max(safety).min(src_cap)
             }
-            _ => {
+            SettlePlanMode::Preferred => {
                 let p = preferred_send(target, need, turns, src_cap, world, policy);
                 need.max(p).min(src_cap)
             }
@@ -1175,7 +1331,7 @@ fn settle_plan(
         let Some(row) = evaluate(*seed, &mut tested, &mut tested_order) else {
             continue;
         };
-        if let (Some(anchor), Some(tol)) = (anchor_turn, anchor_tolerance) {
+        if let (Some(anchor), Some(tol)) = (spec.anchor_turn, spec.anchor_tolerance) {
             if (row.turns - anchor).abs() > tol {
                 continue;
             }
@@ -1191,12 +1347,12 @@ fn settle_plan(
             None => break,
         };
         if row.desired == row.send {
-            if let (Some(anchor), Some(tol)) = (anchor_turn, anchor_tolerance) {
+            if let (Some(anchor), Some(tol)) = (spec.anchor_turn, spec.anchor_tolerance) {
                 if (row.turns - anchor).abs() > tol {
                     return None;
                 }
             }
-            if matches!(mission, MissionKind::Rescue) && row.turns > row.eval_turn {
+            if spec.mode == SettlePlanMode::Rescue && row.turns > row.eval_turn {
                 return None;
             }
             return Some(SettleResult {
@@ -1220,8 +1376,8 @@ fn settle_plan(
         .filter(|s| tested.get(s).and_then(|v| *v).is_some())
         .copied()
         .collect();
-    let anchor_for_sort = if matches!(mission, MissionKind::Snipe) {
-        anchor_turn
+    let anchor_for_sort = if spec.prefer_anchor_proximity {
+        spec.anchor_turn
     } else {
         None
     };
@@ -1246,12 +1402,12 @@ fn settle_plan(
         if row.send < row.need {
             continue;
         }
-        if let (Some(anchor), Some(tol)) = (anchor_turn, anchor_tolerance) {
+        if let (Some(anchor), Some(tol)) = (spec.anchor_turn, spec.anchor_tolerance) {
             if (row.turns - anchor).abs() > tol {
                 continue;
             }
         }
-        if matches!(mission, MissionKind::Rescue) && row.turns > row.eval_turn {
+        if spec.mode == SettlePlanMode::Rescue && row.turns > row.eval_turn {
             continue;
         }
         return Some(SettleResult {
@@ -1446,7 +1602,6 @@ fn settle_single_source_mission(
             4,
         ),
         MissionKind::Rescue => {
-            let hold_turn = mission.turns;
             settle_plan(
                 world,
                 src,
@@ -1455,15 +1610,19 @@ fn settle_single_source_mission(
                 send_cap,
                 planned,
                 policy,
-                MissionKind::Rescue,
-                move |_| hold_turn,
-                option.anchor_turn,
-                None,
+                SingleSourceSettleSpec {
+                    mode: SettlePlanMode::Rescue,
+                    eval_rule: EvalTurnRule::Fixed(mission.turns),
+                    anchor_turn: option.anchor_turn,
+                    anchor_tolerance: None,
+                    prefer_anchor_proximity: false,
+                    require_after_anchor: false,
+                },
                 4,
             )
         }
-        MissionKind::Snipe => {
-            let enemy_eta = option.anchor_turn.unwrap_or(mission.turns);
+        MissionKind::Offense(window) => {
+            let spec = offense_settle_spec(window);
             settle_plan(
                 world,
                 src,
@@ -1472,32 +1631,11 @@ fn settle_single_source_mission(
                 send_cap,
                 planned,
                 policy,
-                MissionKind::Snipe,
-                move |turns| turns.max(enemy_eta),
-                option.anchor_turn,
-                None,
+                spec,
                 4,
             )
         }
-        MissionKind::CrashExploit => {
-            let desired_arrival = option.anchor_turn.unwrap_or(mission.turns);
-            settle_plan(
-                world,
-                src,
-                target,
-                left,
-                send_cap,
-                planned,
-                policy,
-                MissionKind::CrashExploit,
-                move |turns| turns.max(desired_arrival),
-                option.anchor_turn,
-                Some(CRASH_EXPLOIT_ETA_WINDOW),
-                4,
-            )
-        }
-        // Single / Recapture / fallthrough → plain capture.
-        _ => settle_plan(
+        MissionKind::Recapture => settle_plan(
             world,
             src,
             target,
@@ -1505,19 +1643,109 @@ fn settle_single_source_mission(
             send_cap,
             planned,
             policy,
-            MissionKind::Capture,
-            |turns| turns,
-            None,
-            None,
+            preferred_settle_spec(),
             4,
         ),
+        MissionKind::Swarm => None,
     };
     plan.map(|p| (p, left))
 }
 
+#[inline]
+fn offense_settle_spec(window: OffenseWindow) -> SingleSourceSettleSpec {
+    match window {
+        OffenseWindow::Immediate => SingleSourceSettleSpec {
+            ..preferred_settle_spec()
+        },
+        OffenseWindow::Contest {
+            anchor_turn,
+            tolerance,
+        } => SingleSourceSettleSpec {
+            mode: SettlePlanMode::Exact,
+            eval_rule: EvalTurnRule::MaxWith(anchor_turn),
+            anchor_turn: Some(anchor_turn),
+            anchor_tolerance: Some(tolerance),
+            prefer_anchor_proximity: true,
+            require_after_anchor: false,
+        },
+        OffenseWindow::PostCrash {
+            anchor_turn,
+            tolerance,
+        } => SingleSourceSettleSpec {
+            mode: SettlePlanMode::Exact,
+            eval_rule: EvalTurnRule::MaxWith(anchor_turn),
+            anchor_turn: Some(anchor_turn),
+            anchor_tolerance: Some(tolerance),
+            prefer_anchor_proximity: false,
+            require_after_anchor: true,
+        },
+    }
+}
+
+#[inline]
+fn offense_turn_weight(window: OffenseWindow) -> f64 {
+    match window {
+        OffenseWindow::Immediate => OFFENSE_SCORE.immediate_turn_weight,
+        OffenseWindow::Contest { .. } | OffenseWindow::PostCrash { .. } => {
+            OFFENSE_SCORE.anchored_turn_weight
+        }
+    }
+}
+
+#[inline]
+fn make_shot_option(
+    score: f64,
+    src_id: i64,
+    plan: SettleResult,
+    anchor_turn: Option<i64>,
+) -> ShotOption {
+    ShotOption {
+        score,
+        src_id,
+        angle: plan.angle,
+        turns: plan.turns,
+        needed: plan.need,
+        send_cap: plan.send,
+        anchor_turn,
+    }
+}
+
+fn score_offense_plan(
+    target: &Planet,
+    eval_turn: i64,
+    send: i64,
+    window: OffenseWindow,
+    world: &WorldModel,
+    policy: &PolicyState,
+) -> Option<f64> {
+    let value = target_value(target, eval_turn, world, policy);
+    if value <= 0.0 {
+        return None;
+    }
+    Some(value / (send as f64 + eval_turn as f64 * offense_turn_weight(window) + 1.0))
+}
+
+#[inline]
+fn make_offense_mission(
+    src: &Planet,
+    target: &Planet,
+    plan: SettleResult,
+    score: f64,
+    window: OffenseWindow,
+    anchor_turn: Option<i64>,
+) -> Mission {
+    Mission {
+        kind: MissionKind::Offense(window),
+        score,
+        target_id: target.id,
+        turns: plan.eval_turn,
+        options: vec![make_shot_option(score, src.id, plan, anchor_turn)],
+    }
+}
+
 // ── 7. Mission builders ───────────────────────────────────────────────────
 
-fn build_snipe_mission(
+fn build_contested_offense_mission(
     world: &WorldModel,
     src: &Planet,
     target: &Planet,
@@ -1544,6 +1772,10 @@ fn build_snipe_mission(
     let mut best: Option<Mission> = None;
     for &enemy_eta in enemy_etas.iter().take(3) {
         let hints = [target.ships + 1, target.ships + 8];
+        let window = OffenseWindow::Contest {
+            anchor_turn: enemy_eta,
+            tolerance: CONTESTED_OFFENSE_ETA_TOLERANCE,
+        };
         let Some((probe, rough)) = world.best_probe_aim(
             src.id,
             target.id,
@@ -1552,7 +1784,7 @@ fn build_snipe_mission(
             None,
             None,
             Some(enemy_eta),
-            Some(1),
+            Some(CONTESTED_OFFENSE_ETA_TOLERANCE),
         ) else {
             continue;
         };
@@ -1572,10 +1804,7 @@ fn build_snipe_mission(
             probe,
             planned,
             policy,
-            MissionKind::Snipe,
-            |turns| turns.max(enemy_eta),
-            Some(enemy_eta),
-            None,
+            offense_settle_spec(window),
             4,
         ) else {
             continue;
@@ -1588,29 +1817,17 @@ fn build_snipe_mission(
             }
         }
 
-        let value = target_value(target, plan.eval_turn, world, policy);
-        if value <= 0.0 {
+        let Some(score) = score_offense_plan(
+            target,
+            plan.eval_turn,
+            plan.send,
+            window,
+            world,
+            policy,
+        ) else {
             continue;
-        }
-        let score = value / (plan.send as f64 + plan.eval_turn as f64 * SNIPE_COST_TURN_WEIGHT + 1.0);
-        let option = ShotOption {
-            score,
-            src_id: src.id,
-            target_id: target.id,
-            angle: plan.angle,
-            turns: plan.turns,
-            needed: plan.need,
-            send_cap: plan.send,
-            mission: MissionKind::Snipe,
-            anchor_turn: Some(enemy_eta),
         };
-        let mission = Mission {
-            kind: MissionKind::Snipe,
-            score,
-            target_id: target.id,
-            turns: plan.eval_turn,
-            options: vec![option],
-        };
+        let mission = make_offense_mission(src, target, plan, score, window, Some(enemy_eta));
         if best.as_ref().map_or(true, |b| mission.score > b.score) {
             best = Some(mission);
         }
@@ -1660,10 +1877,14 @@ fn build_rescue_missions(
                 probe,
                 planned,
                 policy,
-                MissionKind::Rescue,
-                move |_| fall_turn,
-                Some(fall_turn),
-                None,
+                SingleSourceSettleSpec {
+                    mode: SettlePlanMode::Rescue,
+                    eval_rule: EvalTurnRule::Fixed(fall_turn),
+                    anchor_turn: Some(fall_turn),
+                    anchor_tolerance: None,
+                    prefer_anchor_proximity: false,
+                    require_after_anchor: false,
+                },
                 4,
             ) else {
                 continue;
@@ -1675,12 +1896,10 @@ fn build_rescue_missions(
             let option = ShotOption {
                 score,
                 src_id: src.id,
-                target_id: target.id,
                 angle: plan.angle,
                 turns: plan.turns,
                 needed: plan.need,
                 send_cap: plan.send,
-                mission: MissionKind::Rescue,
                 anchor_turn: Some(fall_turn),
             };
             missions.push(Mission {
@@ -1737,10 +1956,14 @@ fn build_recapture_missions(
                 probe,
                 planned,
                 policy,
-                MissionKind::Capture,
-                |turns| turns,
-                None,
-                None,
+                SingleSourceSettleSpec {
+                    mode: SettlePlanMode::Preferred,
+                    eval_rule: EvalTurnRule::Arrival,
+                    anchor_turn: None,
+                    anchor_tolerance: None,
+                    prefer_anchor_proximity: false,
+                    require_after_anchor: false,
+                },
                 4,
             ) else {
                 continue;
@@ -1755,12 +1978,10 @@ fn build_recapture_missions(
             let option = ShotOption {
                 score,
                 src_id: src.id,
-                target_id: target.id,
                 angle: plan.angle,
                 turns: plan.turns,
                 needed: plan.need,
                 send_cap: plan.send,
-                mission: MissionKind::Recapture,
                 anchor_turn: Some(fall_turn),
             };
             missions.push(Mission {
@@ -1838,12 +2059,10 @@ fn build_reinforce_missions(
             let option = ShotOption {
                 score,
                 src_id: src.id,
-                target_id: target.id,
                 angle: plan.angle,
                 turns: plan.turns,
                 needed: plan.need,
                 send_cap: plan.send,
-                mission: MissionKind::Reinforce,
                 anchor_turn: Some(hold_until),
             };
             missions.push(Mission {
@@ -1858,7 +2077,7 @@ fn build_reinforce_missions(
     missions
 }
 
-fn build_crash_exploit_missions(
+fn build_post_crash_offense_missions(
     world: &WorldModel,
     policy: &PolicyState,
     planned: &PlannedCommitments,
@@ -1872,7 +2091,11 @@ fn build_crash_exploit_missions(
         if target.owner == world.player {
             continue;
         }
-        let desired_arrival = crash.crash_turn + CRASH_EXPLOIT_POST_CRASH_DELAY;
+            let desired_arrival = crash.crash_turn + CRASH_EXPLOIT_POST_CRASH_DELAY;
+        let window = OffenseWindow::PostCrash {
+            anchor_turn: desired_arrival,
+            tolerance: CRASH_EXPLOIT_ETA_WINDOW,
+        };
         for src in &world.my_planets {
             let src_available = policy.attack_budget.get(&src.id).copied().unwrap_or(0);
             if src_available < PARTIAL_SOURCE_MIN_SHIPS {
@@ -1899,10 +2122,7 @@ fn build_crash_exploit_missions(
                 probe,
                 planned,
                 policy,
-                MissionKind::CrashExploit,
-                move |turns| turns.max(desired_arrival),
-                Some(desired_arrival),
-                Some(CRASH_EXPLOIT_ETA_WINDOW),
+                offense_settle_spec(window),
                 4,
             ) else {
                 continue;
@@ -1910,29 +2130,24 @@ fn build_crash_exploit_missions(
             if !candidate_time_valid(target, plan.turns, world, LATE_CAPTURE_BUFFER) {
                 continue;
             }
-            let value = target_value(target, plan.turns, world, policy);
-            if value <= 0.0 {
+            let Some(score) = score_offense_plan(
+                target,
+                plan.turns,
+                plan.send,
+                window,
+                world,
+                policy,
+            ) else {
                 continue;
-            }
-            let score = value / (plan.send as f64 + plan.turns as f64 * SNIPE_COST_TURN_WEIGHT + 1.0);
-            let option = ShotOption {
-                score,
-                src_id: src.id,
-                target_id: target.id,
-                angle: plan.angle,
-                turns: plan.turns,
-                needed: plan.need,
-                send_cap: plan.send,
-                mission: MissionKind::CrashExploit,
-                anchor_turn: Some(desired_arrival),
             };
-            missions.push(Mission {
-                kind: MissionKind::CrashExploit,
+            missions.push(make_offense_mission(
+                src,
+                target,
+                plan,
                 score,
-                target_id: target.id,
-                turns: plan.turns,
-                options: vec![option],
-            });
+                window,
+                Some(desired_arrival),
+            ));
         }
     }
     missions
@@ -2063,11 +2278,7 @@ fn time_filters_pass(
     world: &WorldModel,
     policy: &PolicyState,
 ) -> bool {
-    let buf = if world.is_very_late {
-        VERY_LATE_CAPTURE_BUFFER
-    } else {
-        LATE_CAPTURE_BUFFER
-    };
+    let buf = late_capture_buffer(world);
     if !candidate_time_valid(target, turns, world, buf) {
         return false;
     }
@@ -2082,41 +2293,40 @@ pub fn plan_moves(world: &WorldModel) -> Vec<(i64, f64, i64)> {
 }
 
 pub fn plan_moves_with_profile(world: &WorldModel, profile: PlanProfile) -> Vec<(i64, f64, i64)> {
-    plan_moves_full(world, profile, &HashSet::default()).moves
+    let constraints = PlanConstraints::default();
+    plan_moves_full(world, profile, &constraints).moves
 }
 
-/// Per-plan output. `offensive_targets` is the score-descending unique list of
-/// targets among offensive missions (Capture/Single/Snipe/Swarm/CrashExploit);
-/// the caller uses it to drive forbid-prefix / only-target beam variants.
-/// `top_offensive_target` is the head of that list, kept for older callers.
+#[derive(Debug, Clone, Default)]
+pub struct PlanConstraints {
+    pub forbidden_targets: HashSet<i64>,
+    pub blocked_offense: HashSet<usize>,
+    pub allowed_offense: Option<HashSet<usize>>,
+}
+
+/// Per-plan output. `accepted_offense` records which offensive missions the
+/// greedy commit loop actually kept, in commit order, so the rollout search
+/// can perturb the accepted bundle directly.
 pub struct PlanOutput {
     pub moves: Vec<(i64, f64, i64)>,
-    pub top_offensive_target: Option<i64>,
-    pub offensive_targets: Vec<i64>,
+    pub accepted_offense: Vec<usize>,
 }
 
 #[inline]
 fn is_offensive_mission(kind: MissionKind) -> bool {
-    matches!(
-        kind,
-        MissionKind::Capture
-            | MissionKind::Single
-            | MissionKind::Snipe
-            | MissionKind::Swarm
-            | MissionKind::CrashExploit
-    )
+    matches!(kind, MissionKind::Offense(_) | MissionKind::Swarm)
 }
 
 /// Per-WorldModel artifacts shared across candidate plans:
 ///   * `policy` is a pure function of the WorldModel.
-///   * `missions` is the *heavy-superset* mission list. Swarm/CrashExploit
-///     missions are present even though they used to be gated by
+///   * `missions` is the *heavy-superset* mission list. Swarm and post-crash
+///     offense missions are present even though they used to be gated by
 ///     `profile.heavy`; [`plan_from_artifacts`] filters them out when running
 ///     a fast-profile candidate. Building one list lets 25 candidates share
 ///     the expensive O(my × all) sweep + multi-source swarm pairing instead
 ///     of repeating it per candidate.
 ///
-/// The reinforce/rescue/recapture/crash-exploit builders and the offensive
+/// The reinforce/rescue/recapture/post-crash builders and the offensive
 /// sweep here all read `state.planned_commitments` / `state.spent_total` —
 /// which are empty at this stage — so mission scores reflect the pre-commit
 /// world. Per-candidate `plan_from_artifacts` runs its own `PlanState` for
@@ -2188,11 +2398,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                 continue;
             };
             let rough_turns = rough_aim.1;
-            let buf = if world.is_very_late {
-                VERY_LATE_CAPTURE_BUFFER
-            } else {
-                LATE_CAPTURE_BUFFER
-            };
+            let buf = late_capture_buffer(world);
             if !candidate_time_valid(target, rough_turns, world, buf) {
                 continue;
             }
@@ -2234,7 +2440,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                         if partial_value > 0.0 {
                             let partial_score = partial_value
                                 / (partial_send_cap as f64
-                                    + p_turns as f64 * ATTACK_COST_TURN_WEIGHT
+                                    + p_turns as f64 * offense_turn_weight(OffenseWindow::Immediate)
                                     + 1.0);
                             source_options_by_target
                                 .entry(target.id)
@@ -2242,12 +2448,10 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                                 .push(ShotOption {
                                     score: partial_score,
                                     src_id: src.id,
-                                    target_id: target.id,
                                     angle: p_angle,
                                     turns: p_turns,
                                     needed: global_needed,
                                     send_cap: partial_send_cap,
-                                    mission: MissionKind::Swarm,
                                     anchor_turn: None,
                                 });
                         }
@@ -2266,51 +2470,45 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                     send_guess,
                     &state.planned_commitments,
                     &policy,
-                    MissionKind::Capture,
-                    |turns| turns,
-                    None,
-                    None,
+                    preferred_settle_spec(),
                     4,
                 ) {
                     if time_filters_pass(target, plan.turns, plan.need, src_available, world, &policy)
                         && plan.send >= 1
                     {
-                        let value =
-                            target_value(target, plan.turns, world, &policy);
-                        if value > 0.0 {
-                            let score = value
-                                / (plan.send as f64
-                                    + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT
-                                    + 1.0);
-                            let option = ShotOption {
-                                score,
-                                src_id: src.id,
-                                target_id: target.id,
-                                angle: plan.angle,
-                                turns: plan.turns,
-                                needed: plan.need,
-                                send_cap: plan.send,
-                                mission: MissionKind::Capture,
-                                anchor_turn: None,
-                            };
+                        if let Some(score) = score_offense_plan(
+                            target,
+                            plan.turns,
+                            plan.send,
+                            OffenseWindow::Immediate,
+                            world,
+                            &policy,
+                        ) {
                             if plan.send >= plan.need {
-                                missions.push(Mission {
-                                    kind: MissionKind::Single,
+                                missions.push(make_offense_mission(
+                                    src,
+                                    target,
+                                    plan,
                                     score,
-                                    target_id: target.id,
-                                    turns: plan.turns,
-                                    options: vec![option],
-                                });
+                                    OffenseWindow::Immediate,
+                                    None,
+                                ));
                             }
                         }
                     }
                 }
             }
 
-            if let Some(snipe) =
-                build_snipe_mission(world, src, target, src_available, &state.planned_commitments, &policy)
+            if let Some(anchored) = build_contested_offense_mission(
+                world,
+                src,
+                target,
+                src_available,
+                &state.planned_commitments,
+                &policy,
+            )
             {
-                missions.push(snipe);
+                missions.push(anchored);
             }
         }
     }
@@ -2366,7 +2564,7 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                     continue;
                 }
                 let pair_score = value
-                    / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0)
+                    / (need as f64 + joint_turn as f64 * offense_turn_weight(OffenseWindow::Immediate) + 1.0)
                     * MULTI_SOURCE_PLAN_PENALTY;
                 missions.push(Mission {
                     kind: MissionKind::Swarm,
@@ -2428,7 +2626,9 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
                             continue;
                         }
                         let trio_score = value
-                            / (need as f64 + joint_turn as f64 * ATTACK_COST_TURN_WEIGHT + 1.0)
+                            / (need as f64
+                                + joint_turn as f64 * offense_turn_weight(OffenseWindow::Immediate)
+                                + 1.0)
                             * THREE_SOURCE_PLAN_PENALTY;
                         missions.push(Mission {
                             kind: MissionKind::Swarm,
@@ -2443,9 +2643,9 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
         }
     }
 
-    // Crash exploit (heavy-superset; build_crash_exploit_missions itself
+    // Post-crash offense (heavy-superset; builder itself
     // gates on CRASH_EXPLOIT_ENABLED + 4-player mode).
-    missions.extend(build_crash_exploit_missions(
+    missions.extend(build_post_crash_offense_missions(
         world,
         &policy,
         &state.planned_commitments,
@@ -2465,59 +2665,74 @@ pub fn build_mission_artifacts(world: &WorldModel) -> MissionArtifacts {
 pub fn plan_moves_full(
     world: &WorldModel,
     profile: PlanProfile,
-    forbidden_targets: &HashSet<i64>,
+    constraints: &PlanConstraints,
 ) -> PlanOutput {
     let artifacts = build_mission_artifacts(world);
-    plan_from_artifacts(world, &artifacts, profile, forbidden_targets)
+    plan_from_artifacts(world, &artifacts, profile, constraints)
 }
 
 /// Per-candidate commit pass over a shared `MissionArtifacts`. Filters the
-/// heavy-superset mission list by `forbidden_targets` (and drops Swarm/
-/// CrashExploit when `profile.heavy` is false), then runs the same commit /
+/// heavy-superset mission list by the supplied constraints (and drops Swarm/
+/// post-crash offense when `profile.heavy` is false), then runs the same commit /
 /// followup / doomed-evac / rear-staging pipeline that used to live inside
 /// `plan_moves_full`.
 pub fn plan_from_artifacts(
     world: &WorldModel,
     artifacts: &MissionArtifacts,
     profile: PlanProfile,
-    forbidden_targets: &HashSet<i64>,
+    constraints: &PlanConstraints,
 ) -> PlanOutput {
     let policy = &artifacts.policy;
     let mut state = PlanState::new();
     let my_planet_ids: &[i64] = &artifacts.my_planet_ids;
     let all_planet_ids: &[i64] = &artifacts.all_planet_ids;
 
-    // Heavy-superset filter: drop Swarm + CrashExploit for fast profile.
-    // Iterate by reference (no Mission clones, no PolicyState clone).
-    let mut missions: Vec<&Mission> = artifacts
+    // Heavy-superset filter: drop Swarm + post-crash offense for fast profile.
+    // Keep stable mission indices so the search layer can block or keep
+    // specific accepted offensive missions by id.
+    let mut missions: Vec<(usize, &Mission)> = artifacts
         .missions
         .iter()
+        .enumerate()
         .filter(|m| {
-            !forbidden_targets.contains(&m.target_id)
-                && (profile.heavy
-                    || !matches!(m.kind, MissionKind::Swarm | MissionKind::CrashExploit))
+            let (mission_idx, mission) = m;
+            if constraints.forbidden_targets.contains(&mission.target_id) {
+                return false;
+            }
+            if !profile.heavy
+                && matches!(
+                    mission.kind,
+                    MissionKind::Swarm | MissionKind::Offense(OffenseWindow::PostCrash { .. })
+                )
+            {
+                return false;
+            }
+            if is_offensive_mission(mission.kind) {
+                if constraints.blocked_offense.contains(mission_idx) {
+                    return false;
+                }
+                if let Some(allowed) = &constraints.allowed_offense {
+                    if !allowed.contains(mission_idx) {
+                        return false;
+                    }
+                }
+            }
+            true
         })
         .collect();
-    missions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    missions.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut seen_offensive: HashSet<i64> = HashSet::default();
-    let offensive_targets: Vec<i64> = missions
-        .iter()
-        .filter(|m| is_offensive_mission(m.kind))
-        .filter_map(|m| seen_offensive.insert(m.target_id).then_some(m.target_id))
-        .collect();
-    let top_offensive_target = offensive_targets.first().copied();
+    let mut accepted_offense: Vec<usize> = Vec::new();
 
-    for mission in &missions {
+    for (mission_idx, mission) in &missions {
+        let mission_idx = *mission_idx;
         let mission: &Mission = *mission;
         let target = world.planet(mission.target_id);
         match mission.kind {
-            MissionKind::Single
-            | MissionKind::Snipe
+            MissionKind::Offense(_)
             | MissionKind::Rescue
             | MissionKind::Recapture
-            | MissionKind::Reinforce
-            | MissionKind::CrashExploit => {
+            | MissionKind::Reinforce => {
                 let option = mission.options[0];
                 let src = world.planet(option.src_id);
                 let Some((plan, left)) = settle_single_source_mission(
@@ -2541,6 +2756,9 @@ pub fn plan_from_artifacts(
                         owner: world.player,
                         ships: sent,
                     });
+                if is_offensive_mission(mission.kind) {
+                    accepted_offense.push(mission_idx);
+                }
             }
             MissionKind::Swarm => {
                 // Per-source effective send cap given current spent_total.
@@ -2655,11 +2873,7 @@ pub fn plan_from_artifacts(
                     .entry(target.id)
                     .or_default()
                     .extend(committed);
-            }
-            MissionKind::Capture => {
-                // Plain Capture mission shouldn't appear at top-level — sweeps
-                // promote it to Single. Ignore defensively.
-                continue;
+                accepted_offense.push(mission_idx);
             }
         }
     }
@@ -2733,10 +2947,7 @@ pub fn plan_from_artifacts(
                     send,
                     &state.planned_commitments,
                     &policy,
-                    MissionKind::Capture,
-                    |turns| turns,
-                    None,
-                    None,
+                    preferred_settle_spec(),
                     4,
                 ) else {
                     continue;
@@ -2751,7 +2962,10 @@ pub fn plan_from_artifacts(
                 if value <= 0.0 {
                     continue;
                 }
-                let score = value / (plan.send as f64 + plan.turns as f64 * ATTACK_COST_TURN_WEIGHT + 1.0);
+                let score = value
+                    / (plan.send as f64
+                        + plan.turns as f64 * offense_turn_weight(OffenseWindow::Immediate)
+                        + 1.0);
                 if best.as_ref().map_or(true, |b| score > b.0) {
                     best = Some((score, target.id, plan));
                 }
@@ -2770,10 +2984,7 @@ pub fn plan_from_artifacts(
                 src_left.min(plan.send),
                 &state.planned_commitments,
                 &policy,
-                MissionKind::Capture,
-                |turns| turns,
-                None,
-                None,
+                preferred_settle_spec(),
                 4,
             ) else {
                 continue;
@@ -2856,10 +3067,7 @@ pub fn plan_from_artifacts(
                     available_now.min(need.max(target.ships + 1)),
                     &state.planned_commitments,
                     &policy,
-                    MissionKind::Capture,
-                    |turns| turns,
-                    None,
-                    None,
+                    preferred_settle_spec(),
                     4,
                 ) else {
                     continue;
@@ -3027,8 +3235,7 @@ pub fn plan_from_artifacts(
 
     PlanOutput {
         moves: state.finalize_moves(world),
-        top_offensive_target,
-        offensive_targets,
+        accepted_offense,
     }
 }
 
@@ -3049,8 +3256,8 @@ pub fn plan_from_artifacts(
 ///      reaches the target with `1 + travel' < today_eval`, i.e. the shorter
 ///      travel more than compensates for the one-turn launch delay.
 ///
-/// Snipe / CrashExploit / Rescue / Recapture / Reinforce are skipped: their
-/// scheduling is anchored to opponent or own-falling timing, so a one-turn
+/// Anchored offense windows plus Rescue / Recapture / Reinforce are skipped:
+/// their scheduling depends on opponent or own-falling timing, so a one-turn
 /// delay risks missing the window entirely.
 pub fn patient_targets(world: &WorldModel, artifacts: &MissionArtifacts) -> HashSet<i64> {
     let mut wait_set: HashSet<i64> = HashSet::default();
@@ -3067,11 +3274,13 @@ pub fn patient_targets(world: &WorldModel, artifacts: &MissionArtifacts) -> Hash
             continue;
         }
         // The top-scoring mission for this target is what the planner will
-        // commit. If it isn't a Single/Swarm (Snipe/CrashExploit/Reinforce/
-        // Rescue/Recapture), deferring risks missing its timing window — so
-        // skip patience for this target entirely rather than re-evaluating
-        // against a lower-score Single/Swarm we'd never actually choose.
-        if !matches!(mission.kind, MissionKind::Single | MissionKind::Swarm) {
+        // commit. Only immediate offense and swarms are patience-eligible;
+        // anchored windows and defensive missions are timing-sensitive, so
+        // deferring risks missing the window entirely.
+        if !matches!(
+            mission.kind,
+            MissionKind::Swarm | MissionKind::Offense(OffenseWindow::Immediate)
+        ) {
             continue;
         }
         if delaying_dominates(world, mission, &planned) {
