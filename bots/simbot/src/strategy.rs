@@ -15,8 +15,15 @@ use crate::obnext::{
 use crate::rollout::{opponent_turn0_variants, rollout_score};
 use crate::world::WorldState;
 
-/// Compile-time gate for the rollout-search patience filter.
-const ENABLE_PATIENCE: bool = false;
+const EAGER_FORBID_PREFIX_CAP: usize = 8;
+const EAGER_ONLY_ONE_CAP: usize = 8;
+const EAGER_ONLY_PAIR_POOL: usize = 6;
+const EAGER_ONLY_TRIPLE_POOL: usize = 5;
+const EAGER_SKIP_CAP: usize = 5;
+
+const PATIENT_FORBID_PREFIX_CAP: usize = 3;
+const PATIENT_ONLY_ONE_CAP: usize = 3;
+const PATIENT_ONLY_PAIR_POOL: usize = 3;
 
 /// Nearest-sniper baseline: for each owned planet, send `garrison + 1` ships
 /// at the closest non-owned planet when affordable.
@@ -72,9 +79,9 @@ pub fn pick_plan_by_rollout(
     if candidates.is_empty() {
         return Vec::new();
     }
-    // In 2-player we score each of our candidates against up to 5 distinct
-    // opponent turn-0 plans (greedy, forbid-top1, only-top1, defense-only,
-    // no-op) and pick the candidate with the best worst-case score (minimax).
+    // In 2-player we score each of our candidates against a wider roster of
+    // opponent turn-0 plans and pick the candidate with the best worst-case
+    // score (minimax).
     // In 4-player `opponent_turn0_variants` returns a single greedy variant
     // for every opponent — same behavior as the prior shared turn-0 path.
     let opp_variants = opponent_turn0_variants(initial_state, my_player, cache);
@@ -97,28 +104,16 @@ pub fn pick_plan_by_rollout(
     candidates.into_iter().nth(best_idx).unwrap_or_default()
 }
 
-/// Build a diverse candidate set (~25) for the rollout to score.
+/// Build a wide full-search candidate set for the rollout to score.
 ///
-/// One Plan A pass over the full mission list exposes a score-ranked list of
-/// offensive targets `T = [t1, t2, …]`; every other candidate is just a
-/// `(profile, forbidden_targets)` permutation expressed in terms of that list.
-/// All candidates share one `WorldModel` AND one `MissionArtifacts` — the
-/// heavy mission generation (modes, policy, the O(my × all) sweep, multi-source
-/// swarm pairing, crash exploits) runs exactly once; each candidate is then
-/// just a filter + sort + commit-loop + followup + doomed + rear pass.
+/// We emit two branches from one shared artifact build:
+///   * an eager branch with a wider structural roster
+///   * a patience-gated branch with a smaller roster
 ///
-/// Candidate roster (`T_k` = first k elements of T, `opposing` = all planets
-/// with owner != us, `\` = set difference):
-///   * Forbid-prefix:    {}, {t1}, {t1,t2}, {t1,t2,t3}, {t1,t2,t3,t4}        (5)
-///   * Only-one:         opposing\{tk} for k in 1..=5                        (5)
-///   * Only-pair:        opposing\{tk,tj} for chosen (k,j) ∈ {(1,2),(1,3),
-///                       (2,3),(1,4),(1,5)}                                  (5)
-///   * Owner partition:  forbid neutrals, forbid hostiles, defense-only
-///                       (forbid all opposing)                               (3)
-///   * Skip-second:      {t2}                                                (1)
-///   * No-op:            empty moves                                         (1)
-///   * Fast profile:     greedy, forbid {t1}, only-t1, defense-only,
-///                       only-{t1,t2}                                        (5)
+/// Both branches use `PlanProfile::full()`. All candidates still share one
+/// `WorldModel` AND one `MissionArtifacts`, so widening the roster mostly pays
+/// for extra commit/filter passes and rollout scoring rather than repeating the
+/// expensive mission sweep.
 pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
     if world.my_planets.is_empty() {
         return vec![Vec::new()];
@@ -129,23 +124,14 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
     // here, not per candidate.
     let artifacts = build_mission_artifacts(&model);
 
-    // Force-gated patience: targets where deferring one turn yields a
-    // strictly better mission (swarm → single, or shorter travel that beats
-    // the one-turn delay tax). Unioned into every candidate's forbid set so
-    // the eager-on-T variant is never offered to the rollout — patience is
-    // decided structurally, not under rollout variance.
-    let wait_set = if ENABLE_PATIENCE {
-        patient_targets(&model, &artifacts)
-    } else {
-        HashSet::default()
-    };
+    let wait_set = patient_targets(&model, &artifacts);
 
-    // Plan A: full profile with patience-gating applied. All `offensive_targets`
-    // below are drawn from this plan, so forbid-prefix / only-* indices
-    // naturally never land on a wait_set member.
-    let plan_a = plan_from_artifacts(&model, &artifacts, PlanProfile::full(), &wait_set);
-    let targets = &plan_a.offensive_targets;
-    let take = |k: usize| -> Option<i64> { targets.get(k).copied() };
+    let eager_forbid: HashSet<i64> = HashSet::default();
+    let eager_plan = plan_from_artifacts(&model, &artifacts, PlanProfile::full(), &eager_forbid);
+    let eager_targets = eager_plan.offensive_targets.clone();
+
+    let patient_plan = plan_from_artifacts(&model, &artifacts, PlanProfile::full(), &wait_set);
+    let patient_targets = patient_plan.offensive_targets.clone();
 
     let opposing: HashSet<i64> = world
         .planets
@@ -166,77 +152,269 @@ pub fn obnext_candidates(world: &WorldState) -> Vec<Vec<(i64, f64, i64)>> {
         .map(|p| p.id)
         .collect();
 
-    // Every forbid set unions with wait_set. `only` and `opposing` already
-    // contain wait_set members by construction (wait_set ⊆ opposing); the
-    // others are unioned explicitly via `with_wait`.
-    let with_wait = |mut base: HashSet<i64>| -> HashSet<i64> {
-        base.extend(wait_set.iter().copied());
-        base
-    };
-    let forbid_prefix = |k: usize| -> HashSet<i64> {
-        with_wait(targets.iter().take(k).copied().collect())
-    };
-    let only = |ids: &[i64]| -> HashSet<i64> {
-        let mut f = opposing.clone();
-        for id in ids {
-            f.remove(id);
-        }
-        f
-    };
+    let mut emitter = CandidateEmitter::new(eager_plan.moves);
 
-    let mut emitter = CandidateEmitter::new(plan_a.moves);
+    emit_candidate_branch(
+        &mut emitter,
+        &model,
+        &artifacts,
+        &eager_targets,
+        &eager_forbid,
+        &opposing,
+        &neutrals,
+        &hostiles,
+        CandidateBranchSpec {
+            prefix_cap: EAGER_FORBID_PREFIX_CAP,
+            only_one_cap: EAGER_ONLY_ONE_CAP,
+            only_pair_pool: EAGER_ONLY_PAIR_POOL,
+            only_triple_pool: EAGER_ONLY_TRIPLE_POOL,
+            skip_cap: EAGER_SKIP_CAP,
+            include_owner_partitions: true,
+            include_noop: true,
+        },
+    );
 
-    // Forbid-prefix: 1..=4 (k=0 is Plan A, already emitted).
-    for k in 1..=4 {
-        emitter.run(&model, &artifacts, PlanProfile::full(), &forbid_prefix(k));
-    }
-
-    // Only-one: focus all offense on a single top target.
-    for k in 0..5 {
-        if let Some(t) = take(k) {
-            emitter.run(&model, &artifacts, PlanProfile::full(), &only(&[t]));
-        }
-    }
-
-    // Only-pair: two-target focus across a few useful combinations.
-    let pairs: [(usize, usize); 5] = [(0, 1), (0, 2), (1, 2), (0, 3), (0, 4)];
-    for (i, j) in pairs {
-        if let (Some(ti), Some(tj)) = (take(i), take(j)) {
-            emitter.run(&model, &artifacts, PlanProfile::full(), &only(&[ti, tj]));
-        }
-    }
-
-    // Owner-type partition. `neutrals` and `hostiles` may be subsets of
-    // `opposing`; emitting all three still exercises distinct strategies.
-    emitter.run(&model, &artifacts, PlanProfile::full(), &with_wait(neutrals.clone()));
-    emitter.run(&model, &artifacts, PlanProfile::full(), &with_wait(hostiles.clone()));
-    emitter.run(&model, &artifacts, PlanProfile::full(), &opposing);
-
-    // Skip-second: keep t1 but force a different runner-up. Distinct from
-    // forbid-prefix variants because t1 remains the top attack.
-    if let Some(t2) = take(1) {
-        let mut f = HashSet::default();
-        f.insert(t2);
-        emitter.run(&model, &artifacts, PlanProfile::full(), &with_wait(f));
-    }
-
-    // No-op: hold all ships.
-    emitter.push_raw(Vec::new());
-
-    // Fast-profile variants on the most useful structural choices.
-    emitter.run(&model, &artifacts, PlanProfile::fast(), &wait_set);
-    if let Some(t1) = take(0) {
-        let mut f = HashSet::default();
-        f.insert(t1);
-        emitter.run(&model, &artifacts, PlanProfile::fast(), &with_wait(f));
-        emitter.run(&model, &artifacts, PlanProfile::fast(), &only(&[t1]));
-    }
-    emitter.run(&model, &artifacts, PlanProfile::fast(), &opposing);
-    if let (Some(t1), Some(t2)) = (take(0), take(1)) {
-        emitter.run(&model, &artifacts, PlanProfile::fast(), &only(&[t1, t2]));
-    }
+    emitter.push_raw(patient_plan.moves);
+    emit_candidate_branch(
+        &mut emitter,
+        &model,
+        &artifacts,
+        &patient_targets,
+        &wait_set,
+        &opposing,
+        &neutrals,
+        &hostiles,
+        CandidateBranchSpec {
+            prefix_cap: PATIENT_FORBID_PREFIX_CAP,
+            only_one_cap: PATIENT_ONLY_ONE_CAP,
+            only_pair_pool: PATIENT_ONLY_PAIR_POOL,
+            only_triple_pool: 0,
+            skip_cap: 0,
+            include_owner_partitions: false,
+            include_noop: false,
+        },
+    );
 
     emitter.into_candidates()
+}
+
+#[derive(Clone, Copy)]
+struct CandidateBranchSpec {
+    prefix_cap: usize,
+    only_one_cap: usize,
+    only_pair_pool: usize,
+    only_triple_pool: usize,
+    skip_cap: usize,
+    include_owner_partitions: bool,
+    include_noop: bool,
+}
+
+fn emit_candidate_branch(
+    emitter: &mut CandidateEmitter,
+    model: &WorldModel,
+    artifacts: &MissionArtifacts,
+    targets: &[i64],
+    base_forbid: &HashSet<i64>,
+    opposing: &HashSet<i64>,
+    neutrals: &HashSet<i64>,
+    hostiles: &HashSet<i64>,
+    spec: CandidateBranchSpec,
+) {
+    emit_forbid_prefix(
+        emitter,
+        model,
+        artifacts,
+        PlanProfile::full(),
+        targets,
+        base_forbid,
+        spec.prefix_cap,
+    );
+    emit_only_k_variants(
+        emitter,
+        model,
+        artifacts,
+        PlanProfile::full(),
+        targets,
+        base_forbid,
+        opposing,
+        1,
+        spec.only_one_cap,
+    );
+    emit_only_k_variants(
+        emitter,
+        model,
+        artifacts,
+        PlanProfile::full(),
+        targets,
+        base_forbid,
+        opposing,
+        2,
+        spec.only_pair_pool,
+    );
+    emit_only_k_variants(
+        emitter,
+        model,
+        artifacts,
+        PlanProfile::full(),
+        targets,
+        base_forbid,
+        opposing,
+        3,
+        spec.only_triple_pool,
+    );
+    emit_skip_variants(
+        emitter,
+        model,
+        artifacts,
+        PlanProfile::full(),
+        targets,
+        base_forbid,
+        spec.skip_cap,
+    );
+
+    if spec.include_owner_partitions {
+        emitter.run(
+            model,
+            artifacts,
+            PlanProfile::full(),
+            &merged_forbid(base_forbid, neutrals.iter().copied()),
+        );
+        emitter.run(
+            model,
+            artifacts,
+            PlanProfile::full(),
+            &merged_forbid(base_forbid, hostiles.iter().copied()),
+        );
+        emitter.run(model, artifacts, PlanProfile::full(), opposing);
+    }
+
+    if spec.include_noop {
+        emitter.push_raw(Vec::new());
+    }
+}
+
+fn emit_forbid_prefix(
+    emitter: &mut CandidateEmitter,
+    model: &WorldModel,
+    artifacts: &MissionArtifacts,
+    profile: PlanProfile,
+    targets: &[i64],
+    base_forbid: &HashSet<i64>,
+    cap: usize,
+) {
+    for k in 1..=cap.min(targets.len()) {
+        emitter.run(
+            model,
+            artifacts,
+            profile,
+            &merged_forbid(base_forbid, targets.iter().take(k).copied()),
+        );
+    }
+}
+
+fn emit_only_k_variants(
+    emitter: &mut CandidateEmitter,
+    model: &WorldModel,
+    artifacts: &MissionArtifacts,
+    profile: PlanProfile,
+    targets: &[i64],
+    base_forbid: &HashSet<i64>,
+    opposing: &HashSet<i64>,
+    keep_count: usize,
+    pool: usize,
+) {
+    if keep_count == 0 || pool < keep_count {
+        return;
+    }
+    let limited_targets = &targets[..targets.len().min(pool)];
+    match keep_count {
+        1 => {
+            for &t in limited_targets {
+                emitter.run(
+                    model,
+                    artifacts,
+                    profile,
+                    &forbid_all_except(base_forbid, opposing, &[t]),
+                );
+            }
+        }
+        2 => {
+            for i in 0..limited_targets.len() {
+                for j in (i + 1)..limited_targets.len() {
+                    emitter.run(
+                        model,
+                        artifacts,
+                        profile,
+                        &forbid_all_except(base_forbid, opposing, &[limited_targets[i], limited_targets[j]]),
+                    );
+                }
+            }
+        }
+        3 => {
+            for i in 0..limited_targets.len() {
+                for j in (i + 1)..limited_targets.len() {
+                    for k in (j + 1)..limited_targets.len() {
+                        emitter.run(
+                            model,
+                            artifacts,
+                            profile,
+                            &forbid_all_except(
+                                base_forbid,
+                                opposing,
+                                &[limited_targets[i], limited_targets[j], limited_targets[k]],
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn emit_skip_variants(
+    emitter: &mut CandidateEmitter,
+    model: &WorldModel,
+    artifacts: &MissionArtifacts,
+    profile: PlanProfile,
+    targets: &[i64],
+    base_forbid: &HashSet<i64>,
+    skip_cap: usize,
+) {
+    if targets.len() <= 1 || skip_cap == 0 {
+        return;
+    }
+    let upper = targets.len().min(skip_cap.saturating_add(1));
+    for &target_id in &targets[1..upper] {
+        emitter.run(
+            model,
+            artifacts,
+            profile,
+            &merged_forbid(base_forbid, std::iter::once(target_id)),
+        );
+    }
+}
+
+fn merged_forbid<I>(base_forbid: &HashSet<i64>, extra: I) -> HashSet<i64>
+where
+    I: IntoIterator<Item = i64>,
+{
+    let mut forbid = base_forbid.clone();
+    forbid.extend(extra);
+    forbid
+}
+
+fn forbid_all_except(
+    base_forbid: &HashSet<i64>,
+    opposing: &HashSet<i64>,
+    keep: &[i64],
+) -> HashSet<i64> {
+    let mut forbid = opposing.clone();
+    forbid.extend(base_forbid.iter().copied());
+    for &id in keep {
+        forbid.remove(&id);
+    }
+    forbid
 }
 
 /// Accumulates candidate plans while dropping move-list duplicates. Two

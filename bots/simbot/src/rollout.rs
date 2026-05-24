@@ -1,7 +1,7 @@
 //! Opponent-modeled rollout for scoring candidate plans.
 //!
-//! Structure: 4 turns of full simulation where every player plans with the
-//! fast obnext profile, then 20 turns of "ballistic" stepping with no new
+//! Structure: 5 turns of full simulation where every player replans with the
+//! full obnext profile, then 20 turns of "ballistic" stepping with no new
 //! launches (in-flight fleets keep moving, combat resolves, planets produce).
 //!
 //! This catches the failure mode where a plan looks good against a no-op
@@ -11,22 +11,18 @@
 
 #![allow(dead_code)]
 
-use rustc_hash::FxHashSet as HashSet;
-
 use crate::engine::{EngineState, MoveAction};
 use crate::entity_cache::EntityCache;
-use crate::obnext::{
-    build_mission_artifacts, plan_from_artifacts, plan_with_profile, PlanProfile, WorldModel,
-};
+use crate::obnext::{plan_with_profile, PlanProfile};
+use crate::strategy::obnext_candidates;
 use crate::world::WorldState;
 
 pub const REACTIVE_TURNS: i64 = 5;
 pub const BALLISTIC_TURNS: i64 = 20;
 
 /// Multiplier on the opponent's total contribution to the score. Compensates
-/// for the rollout using stripped obnext (`PlanProfile::fast`) for opponents
-/// rather than the full planner — real opponents play stronger than our
-/// model. Applied symmetrically to opponent production and ship terms; ships
+/// for the rollout under-modeling opponents compared with real match play.
+/// Applied symmetrically to opponent production and ship terms; ships
 /// themselves use weight 1.0 on both sides.
 const OPPONENT_PESSIMISM: f64 = 1.0;
 
@@ -39,9 +35,9 @@ const OPPONENT_PESSIMISM: f64 = 1.0;
 /// `turn0_opponents` is the per-player opponent action list for the very
 /// first rollout step. The initial engine state is identical across every
 /// candidate, so opponent turn-0 plans don't depend on `my_moves` — the
-/// caller (`pick_plan_by_rollout`) computes them once via
-/// [`opponent_turn0_actions`] and reuses them, skipping ~N-1 obnext-full
-/// plans per candidate. The slot for `my_player` is ignored.
+/// caller (`pick_plan_by_rollout`) computes the variant roster once via
+/// [`opponent_turn0_variants`] and reuses it across all candidates. The slot
+/// for `my_player` is ignored.
 pub fn rollout_score(
     initial_state: &EngineState,
     my_player: i64,
@@ -118,13 +114,11 @@ pub fn opponent_turn0_actions(
 }
 
 /// Build up to K distinct opponent turn-0 action sets for minimax-style
-/// scoring. In 2-player games we generate ~5 opp plan variants from the
-/// opponent's POV (greedy, forbid-top1, only-top1, defense-only, no-op),
-/// dedup by move-list, and return one per-player action layout per variant.
-/// In games with more players we fall back to a single variant (the greedy
-/// plan for every opponent) — varying multiple opponents jointly explodes
-/// combinatorially. The caller minimaxes our candidates against the returned
-/// variants. `cache.current_turn` is restored before returning.
+/// scoring. In 2-player games we reuse the same full-search candidate builder
+/// as our own side, evaluated from the opponent's POV, and return one
+/// per-player action layout per variant. In games with more players we skip
+/// the combinatorial opponent options and fall back to a single greedy variant
+/// for every opponent. `cache.current_turn` is restored before returning.
 pub fn opponent_turn0_variants(
     initial_state: &EngineState,
     my_player: i64,
@@ -149,51 +143,7 @@ pub fn opponent_turn0_variants(
         single[opp_player as usize] = Vec::new();
         return vec![single];
     }
-
-    let opp_model = WorldModel::build(&opp_ws);
-    let opp_artifacts = build_mission_artifacts(&opp_model);
-
-    let plan_greedy =
-        plan_from_artifacts(&opp_model, &opp_artifacts, PlanProfile::full(), &HashSet::default());
-    let opp_targets = plan_greedy.offensive_targets.clone();
-    let opposing: HashSet<i64> = opp_ws
-        .planets
-        .iter()
-        .filter(|p| p.owner != opp_player)
-        .map(|p| p.id)
-        .collect();
-
-    let mut seen: HashSet<Vec<(i64, u64, i64)>> = HashSet::default();
-    let mut variants: Vec<Vec<(i64, f64, i64)>> = Vec::new();
-    let push = |moves: Vec<(i64, f64, i64)>,
-                    seen: &mut HashSet<Vec<(i64, u64, i64)>>,
-                    variants: &mut Vec<Vec<(i64, f64, i64)>>| {
-        let mut key: Vec<(i64, u64, i64)> = moves
-            .iter()
-            .map(|&(src, angle, ships)| (src, angle.to_bits(), ships))
-            .collect();
-        key.sort_unstable();
-        if seen.insert(key) {
-            variants.push(moves);
-        }
-    };
-
-    push(plan_greedy.moves, &mut seen, &mut variants);
-    if let Some(t1) = opp_targets.first().copied() {
-        let mut forbid_t1 = HashSet::default();
-        forbid_t1.insert(t1);
-        let p = plan_from_artifacts(&opp_model, &opp_artifacts, PlanProfile::full(), &forbid_t1);
-        push(p.moves, &mut seen, &mut variants);
-
-        let mut only_t1 = opposing.clone();
-        only_t1.remove(&t1);
-        let p = plan_from_artifacts(&opp_model, &opp_artifacts, PlanProfile::full(), &only_t1);
-        push(p.moves, &mut seen, &mut variants);
-    }
-    let defense_only =
-        plan_from_artifacts(&opp_model, &opp_artifacts, PlanProfile::full(), &opposing);
-    push(defense_only.moves, &mut seen, &mut variants);
-    push(Vec::new(), &mut seen, &mut variants);
+    let variants = obnext_candidates(&opp_ws);
 
     cache.set_current_turn(saved_turn);
 
@@ -221,8 +171,8 @@ fn to_move_actions(moves: &[(i64, f64, i64)]) -> Vec<MoveAction> {
 /// Production-weighted board control delta from `my_player`'s perspective.
 /// Counts owned-planet production over the remaining game, current ship
 /// inventories on planets, and ships in flight. Opponent contribution is
-/// scaled by `OPPONENT_PESSIMISM` to compensate for under-modeling them with
-/// stripped obnext.
+/// scaled by `OPPONENT_PESSIMISM` to compensate for opponent-model mismatch in
+/// the rollout search.
 fn score_state(engine: &EngineState, my_player: i64) -> f64 {
     let remaining = (engine.configuration.episode_steps - engine.step).max(0) as f64;
     let mut my_score = 0.0;

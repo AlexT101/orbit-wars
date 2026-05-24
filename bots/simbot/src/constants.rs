@@ -31,7 +31,7 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450];   // Game step
 // ── SIMULATION CONSTANTS ────────────────────────────────────────────────────────
 // These are assumptions made by `helpers.rs` for simulating in-game actions. Can be tuned, but note that these affect runtime.
 
-pub const HORIZON: i64 = 40;                                        // Maximum turns to look into the future.
+pub const HORIZON: i64 = 30;                                        // Maximum turns to look into the future.
 pub const FWD_ITER_MAX: usize = 16;                                 // Max convergence iterations for the iterative aiming solver.
 pub const INTERCEPT_TOLERANCE: i64 = 1;                             // Max |turn delta| between successive aim iterations to declare convergence.
 pub const EDGE_AIM_FRACS: [f64; 4] = [0.25, 0.50, 0.75, 0.95];      // Fractional offsets used for arc aim-point sampling around a target disk.
