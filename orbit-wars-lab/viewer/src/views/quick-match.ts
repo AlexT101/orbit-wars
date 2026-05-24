@@ -18,6 +18,8 @@ import {
   planetCard,
   resetPanel,
 } from "../components/sidebar-cards";
+import { mountGraphs, GraphsHandle } from "../components/sidebar-graphs";
+import { computeReplaySeries } from "../renderer/series";
 import { api } from "../api";
 import { escapeHtml } from "../utils/escape";
 
@@ -83,6 +85,10 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
           <details class="qm-acc" data-sec="logs" id="qm-acc-logs" hidden>
             <summary class="qm-acc-head"><span class="qm-acc-caret">▾</span><span id="qm-logs-header">Logs</span></summary>
             <div id="qm-view-logs" class="qm-view-empty">Open to fetch agent stderr.</div>
+          </details>
+          <details class="qm-acc" data-sec="graphs">
+            <summary class="qm-acc-head"><span class="qm-acc-caret">▾</span>Graphs</summary>
+            <div id="qm-view-graphs"></div>
           </details>
           <details class="qm-acc" data-sec="display" open>
             <summary class="qm-acc-head"><span class="qm-acc-caret">▾</span>Display</summary>
@@ -315,16 +321,33 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
   }
 
   renderSelectedPanel();
+
+  // Graphs panel — series is published by the iframe renderer to
+  // localStorage["ow-series"]; step cursor comes from "ow-live-match".
+  const graphsHost = document.getElementById("qm-view-graphs")!;
+  const graphs: GraphsHandle = mountGraphs(graphsHost);
+  graphs.render();
+  const graphsAcc = root.querySelector<HTMLDetailsElement>('.qm-acc[data-sec="graphs"]')!;
+  graphsAcc.addEventListener("toggle", () => {
+    if (graphsAcc.open) graphs.render();
+  });
+  window.addEventListener("resize", () => {
+    if (graphsAcc.open) graphs.render();
+  });
+
   window.addEventListener("storage", (e) => {
     if (e.key === "ow-selected-data" || e.key === null) renderSelectedPanel();
     if (e.key === "ow-live-match" || e.key === null) renderMatchPanel();
+    if (e.key === "ow-series" || e.key === "ow-live-match" || e.key === null) {
+      if (graphsAcc.open) graphs.render();
+    }
   });
 
   // Accordion: persist each section's open state in localStorage.
   // Key format: ow-acc-<section>.  Default: match + display open, planet/fleet
   // closed (they're empty until user clicks something).
   const ACC_DEFAULTS: Record<string, boolean> = {
-    match: true, planet: false, fleet: false, display: true,
+    match: true, planet: false, fleet: false, graphs: false, display: true,
   };
   root.querySelectorAll<HTMLDetailsElement>(".qm-acc").forEach((d) => {
     const sec = d.dataset.sec!;
@@ -526,6 +549,10 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
 
   async function loadReplayAndPopulate(detail: ReplayHandoff): Promise<void> {
     setSidebarMode("view");
+    // Stale series from a previous replay would briefly mis-paint the graphs;
+    // wipe it now and let the new fetch (or the iframe) repopulate.
+    localStorage.removeItem("ow-series");
+    if (graphsAcc.open) graphs.render();
     try {
       if (detail.kind === "local") {
         setKaggleCtx(null);
@@ -543,6 +570,10 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
             `${m.turns}t · ${(m.duration_s || 0).toFixed(1)}s`,
           );
         }
+        // Compute series directly — independent of the iframe, so the
+        // Graphs accordion populates even if the iframe is on a stale
+        // cached bundle or hasn't fired its first render yet.
+        void publishLocalSeries(detail.runId, detail.matchId, m?.agent_ids?.length);
       } else {
         setKaggleCtx({ sub: detail.submissionId, ep: detail.episodeId });
         activeReplay.playKaggle(detail.submissionId, detail.episodeId);
@@ -562,9 +593,53 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
           null,
           `episode ${detail.episodeId}`,
         );
+        void publishKaggleSeries(detail.submissionId, detail.episodeId);
       }
     } catch {
       viewMatchEl.innerHTML = `<div class="qm-view-empty">Replay loaded.</div>`;
+    }
+  }
+
+  async function publishLocalSeries(
+    runId: string,
+    matchId: string,
+    numAgentsHint?: number,
+  ): Promise<void> {
+    try {
+      const replay = await api.getReplay(runId, matchId);
+      const series = computeReplaySeries(replay, numAgentsHint);
+      if (series) {
+        localStorage.setItem("ow-series", JSON.stringify(series));
+        if (graphsAcc.open) graphs.render();
+      }
+    } catch {
+      /* graph panel just stays empty */
+    }
+  }
+
+  async function publishKaggleSeries(
+    submissionId: number,
+    episodeId: number,
+  ): Promise<void> {
+    try {
+      const r = await fetch(`/api/kaggle-replays/${submissionId}/${episodeId}`);
+      if (!r.ok) return;
+      const raw = await r.json();
+      // Kaggle EpisodeService wraps the replay in various shapes; the
+      // iframe's kaggle-replay view does the same probing. Match it.
+      const replay =
+        raw?.replay?.steps ? raw.replay :
+        raw?.environment?.steps ? raw.environment :
+        raw?.steps ? raw :
+        null;
+      if (!replay) return;
+      const series = computeReplaySeries(replay);
+      if (series) {
+        localStorage.setItem("ow-series", JSON.stringify(series));
+        if (graphsAcc.open) graphs.render();
+      }
+    } catch {
+      /* graph panel just stays empty */
     }
   }
 
@@ -723,6 +798,11 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
           first.scores,
           `${first.turns}t · ${(first.duration_s || 0).toFixed(1)}s`,
         );
+        // Repopulate the Graphs accordion for the new match — the previous
+        // run's series was wiped on Play. Without this, after Picker → Play
+        // the View tab would briefly show data from whatever was loaded last
+        // (or stay empty) until the iframe got around to publishing.
+        void publishLocalSeries(runId, first.match_id, first.agent_ids?.length);
         setSidebarMode("view");
       } else {
         activeReplay.showError("No matches completed.");
@@ -747,6 +827,16 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     // Reset right panel to fresh replay wrapper
     rightPanel.innerHTML = "";
     activeReplay = mountEmbeddedReplay(rightPanel);
+
+    // Stale state from the previous match would otherwise paint into the
+    // View tab the moment we switch to it (graphs, selection, match panel).
+    localStorage.removeItem("ow-series");
+    localStorage.removeItem("ow-selected-data");
+    localStorage.removeItem("ow-live-match");
+    matchMeta = null;
+    renderMatchPanel();
+    renderSelectedPanel();
+    if (graphsAcc.open) graphs.render();
 
     // Date.now() % 2**31 has tiny entropy — sequential Play clicks in the
     // same ms produce identical seeds. crypto.getRandomValues fixes that.

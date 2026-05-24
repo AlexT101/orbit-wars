@@ -1,24 +1,24 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-24T16:30:14.248807+00:00",
+  "last_updated": "2026-05-24T21:00:12.110790+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
-      "total_turns": 2120,
-      "total_seconds": 0.25838800000000006,
-      "avg_ms": 0.12188113207547173,
-      "last_updated": "2026-05-24T16:29:25.418089+00:00"
+      "total_turns": 3469,
+      "total_seconds": 0.376607,
+      "avg_ms": 0.10856356298645142,
+      "last_updated": "2026-05-24T21:00:12.084831+00:00"
     },
     "baselines/random": {
-      "total_turns": 1224,
-      "total_seconds": 0.07200899999999999,
-      "avg_ms": 0.05883088235294117,
-      "last_updated": "2026-05-24T16:29:21.429035+00:00"
+      "total_turns": 2188,
+      "total_seconds": 0.09751499999999998,
+      "avg_ms": 0.0445680987202925,
+      "last_updated": "2026-05-24T21:00:12.084815+00:00"
     },
     "baselines/starter": {
-      "total_turns": 1561,
-      "total_seconds": 0.3454080000000001,
-      "avg_ms": 0.22127354260089693,
-      "last_updated": "2026-05-24T16:28:59.172871+00:00"
+      "total_turns": 2051,
+      "total_seconds": 0.3864750000000001,
+      "avg_ms": 0.18843247196489524,
+      "last_updated": "2026-05-24T21:00:12.084793+00:00"
     },
     "mine/simbot": {
       "total_turns": 25214,
@@ -33,10 +33,10 @@
       "last_updated": "2026-05-24T16:29:09.982316+00:00"
     },
     "external/heuristic": {
-      "total_turns": 1681,
-      "total_seconds": 2.9470860000000005,
-      "avg_ms": 1.753174301011303,
-      "last_updated": "2026-05-24T16:30:14.126000+00:00"
+      "total_turns": 1786,
+      "total_seconds": 3.0897690000000004,
+      "avg_ms": 1.7299938409854425,
+      "last_updated": "2026-05-24T21:00:12.084824+00:00"
     },
     "external/obnext": {
       "total_turns": 1539,

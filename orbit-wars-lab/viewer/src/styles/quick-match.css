@@ -323,6 +323,43 @@
   font-size: 0.9rem;
 }
 
+/* Graphs accordion: 4 stacked mini-charts (Ships / Production / Planets / Δ). */
+.qm-graphs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qm-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+
+.qm-graph-title {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-family: var(--font-sans);
+}
+
+.qm-graph canvas {
+  display: block;
+  width: 100%;
+  height: 88px;
+}
+
+.qm-graphs-empty {
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
 .qm-display-pills {
   display: flex;
   flex-direction: column;

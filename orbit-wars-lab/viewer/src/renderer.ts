@@ -7,6 +7,7 @@ import {
   TEXT_SIZES,
   trajectoryColor,
 } from './renderer/palette';
+import { computeReplaySeries } from './renderer/series';
 import {
   Fleet,
   Planet,
@@ -72,6 +73,22 @@ if (typeof window !== 'undefined' && !(window as any).__owStorageBound) {
       try { renderer(_lastOptions); } catch { /* stale options */ }
     }
   });
+}
+
+// Cache the most recently published per-step series so we only walk all steps
+// once per replay. The parent frame's Graphs sidebar reads `ow-series` and
+// redraws on step changes (via the live-match storage event).
+let _seriesReplay: unknown = null;
+function publishSeries(replay: any, numAgents: number) {
+  if (replay === _seriesReplay) return;
+  const series = computeReplaySeries(replay, numAgents);
+  if (!series) return;
+  try {
+    localStorage.setItem('ow-series', JSON.stringify(series));
+    _seriesReplay = replay;
+  } catch {
+    // Quota or serialization failure — leave the previous value (if any) in place.
+  }
 }
 
 export function renderer(options: RendererOptions) {
@@ -408,6 +425,7 @@ export function renderer(options: RendererOptions) {
       isGameOver,
       winnerIndices,
     }));
+    publishSeries(replay, numAgents);
   }
 
   // --- Draw game board on canvas ---
