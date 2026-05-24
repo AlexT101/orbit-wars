@@ -1,0 +1,26 @@
+# Orbit Wars Lab — launched from the outer repo root.
+# Usage:  docker compose up        (then open http://localhost:6001)
+
+services:
+  app:
+    build:
+      context: ./orbit-wars-lab
+      additional_contexts:
+        agents: ./bots
+    image: orbit-wars-lab:latest
+    container_name: orbit-wars-lab
+    # Drop to the host user so files written to volumes are owned by you,
+    # not root. Defaults to UID 1000 (typical Linux); macOS users can set
+    # UID=$(id -u) GID=$(id -g) in a .env file next to this compose file.
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "${PORT:-6001}:8000"
+    volumes:
+      - ./bots:/app/agents
+      - ./orbit-wars-lab/runs:/app/runs
+      # - ~/.kaggle:/home/app/.kaggle            # reuse host's existing token
+      # - ./.kaggle-data:/home/app/.kaggle       # keep a per-project token
+    environment:
+      # Point the Kaggle SDK at the non-root home so `user:` mapping works.
+      HOME: /home/app
+    restart: unless-stopped

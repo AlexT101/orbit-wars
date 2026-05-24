@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "last_updated": "2026-05-24T06:52:39.088435+00:00",
+  "runtimes": {
+    "baselines/nearest-sniper": {
+      "total_turns": 793,
+      "total_seconds": 0.13831700000000002,
+      "avg_ms": 0.174422446406053,
+      "last_updated": "2026-05-24T06:52:39.069735+00:00"
+    },
+    "baselines/random": {
+      "total_turns": 294,
+      "total_seconds": 0.009416,
+      "avg_ms": 0.03202721088435374,
+      "last_updated": "2026-05-24T06:51:08.593504+00:00"
+    },
+    "baselines/starter": {
+      "total_turns": 499,
+      "total_seconds": 0.08415,
+      "avg_ms": 0.16863727454909822,
+      "last_updated": "2026-05-24T06:52:39.069794+00:00"
+    }
+  }
+}

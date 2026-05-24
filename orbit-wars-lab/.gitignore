@@ -1,0 +1,42 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+viewer/dist/
+
+# Credentials (NEVER commit — Settings tab can create ~/.kaggle/kaggle.json
+# and docker-compose.yml offers an opt-in ./.kaggle-data bind mount).
+.env
+.env.*
+!.env.example
+.envrc
+kaggle.json
+.kaggle/
+.kaggle-data/
+
+# Tournament artifacts (leaderboard snapshot is intentionally tracked as seed).
+# YYYY-NNN run dirs — broad glob future-proofs past 2026.
+runs/[0-9]*-*/
+runs/trueskill.bak-*.json
+runs/latest
+
+# Viewer transient
+viewer/replays/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.claude/
+
+# Docker
+docker-compose.override.yml
+
+# Cached tarball extracts for Kaggle-style submission.tar.gz agents
+agents/*/*/.extracted/

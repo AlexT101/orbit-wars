@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "last_updated": "2026-05-24T06:52:39.072242+00:00",
+  "ratings": {
+    "baselines/nearest-sniper": {
+      "2p": {
+        "mu": 669.0236433818692,
+        "sigma": 140.99704627880777,
+        "games_played": 2
+      }
+    },
+    "baselines/random": {
+      "2p": {
+        "mu": 496.79956848783945,
+        "sigma": 172.39418037783432,
+        "games_played": 1
+      }
+    },
+    "baselines/starter": {
+      "2p": {
+        "mu": 645.9971596679161,
+        "sigma": 148.90915469996207,
+        "games_played": 1
+      }
+    }
+  }
+}
