@@ -370,6 +370,7 @@ def agent(obs):
     global fleet_trajectories
     global reinforcement_trajectories
     moves = []
+    angular_velocity = obs.get("angular_velocity", 0.0)
 
     if steps < 2:
         steps += 1
@@ -382,7 +383,12 @@ def agent(obs):
     update_fleet_trajectories(lobs.get("fleets", []))
     update_reinforcement_trajectories(lobs.get("planets", []))
     comet_planet_ids = obs.get("comet_planet_ids", [])    
-    under_attack = get_planets_under_attack(lobs.get("mine", []), lobs.get("fleets", []), lobs.get("player", -2), obs.angular_velocity)
+    under_attack = get_planets_under_attack(
+        lobs.get("mine", []),
+        lobs.get("fleets", []),
+        lobs.get("player", -2),
+        angular_velocity,
+    )
     exhausted_planets_id = set()
 
     if not lobs.get("targets", []):
@@ -440,7 +446,9 @@ def agent(obs):
                     continue
 
             else:
-                angle_np, arrive_tick = find_angle_to_moving_planet(p_np, p, sent_reinforcements, obs.angular_velocity)
+                angle_np, arrive_tick = find_angle_to_moving_planet(
+                    p_np, p, sent_reinforcements, angular_velocity
+                )
 
             if angle_np is None or arrive_tick is None:
                 continue
@@ -538,7 +546,9 @@ def agent(obs):
                     total_ships = base_ships
 
                     for _ in range(3):
-                        angle, arrive_tick = find_angle_to_moving_planet(m, t, total_ships, obs.angular_velocity)
+                        angle, arrive_tick = find_angle_to_moving_planet(
+                            m, t, total_ships, angular_velocity
+                        )
 
                         if angle is None:
                             break
@@ -717,7 +727,7 @@ def agent(obs):
                             break
 
                     else: # coop moving planet
-                        planet_trajectories = get_planet_trajectories(t, obs.angular_velocity)
+                        planet_trajectories = get_planet_trajectories(t, angular_velocity)
                         if t.owner == -1: # coop moving unowned
                             remainder = base_ships
                             planned = []
@@ -731,7 +741,9 @@ def agent(obs):
                                 if p_ships <= 0:
                                     continue
 
-                                angle, arrive_tick = find_angle_to_moving_planet(p, t, p_ships, obs.angular_velocity)
+                                angle, arrive_tick = find_angle_to_moving_planet(
+                                    p, t, p_ships, angular_velocity
+                                )
 
                                 if angle is None or arrive_tick is None:
                                     continue
@@ -758,7 +770,9 @@ def agent(obs):
                             break
 
                         else: # coop moving owned
-                            required_ships = calculate_req_ships_moving(attacking_planets, t, base_ships, obs.angular_velocity)
+                            required_ships = calculate_req_ships_moving(
+                                attacking_planets, t, base_ships, angular_velocity
+                            )
                             remainder = required_ships
                             planned = []
 
@@ -777,7 +791,9 @@ def agent(obs):
 
                                 fleet_speed = 1.0 + (MAX_SPEED - 1.0) * (math.log(max(1, p_ships)) / math.log(1000)) ** 1.5
 
-                                angle, arrive_tick = find_angle_to_moving_planet(p, t, p_ships, obs.angular_velocity)
+                                angle, arrive_tick = find_angle_to_moving_planet(
+                                    p, t, p_ships, angular_velocity
+                                )
 
                                 if angle is None or arrive_tick is None:
                                     continue

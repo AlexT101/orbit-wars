@@ -18,7 +18,7 @@ import sys
 import tempfile
 from typing import Any
 
-from parity.engine import JointAction, PlayerObs, Snapshot
+from engine_parity_checker.engine import JointAction, PlayerObs, Snapshot
 
 
 def _make_player_obs(raw: dict[str, Any]) -> PlayerObs:

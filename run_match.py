@@ -81,7 +81,7 @@ def load_agent(main_path: Path, mod_name: str):
 def run_rust_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> int:
     print(f"Match (rust engine): {bot_names[0]} vs {bot_names[1]}")
 
-    from parity.candidates.rust import RustEngine
+    from engine_parity_checker.candidates.rust import RustEngine
 
     agents = [load_agent(path, f"bot_{i}_main") for i, path in enumerate(bot_paths)]
     engine = RustEngine()
