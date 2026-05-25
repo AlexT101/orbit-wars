@@ -127,6 +127,7 @@ export const api = {
     parallel?: number;
     save_replays?: boolean;
     seed_base?: number;
+    seed_mode?: "fixed" | "random";
     is_quick_match?: boolean;
     shape?: "round-robin" | "gauntlet";
     challenger_id?: string | null;
@@ -135,6 +136,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(cfg),
       headers: { "Content-Type": "application/json" },
+    }),
+  cancelTournament: (runId: string) =>
+    j<{ run_id: string; status: string }>(`/tournaments/${runId}/cancel`, {
+      method: "POST",
     }),
   deleteLocalReplay: (runId: string, matchId: string) =>
     j<{ deleted: boolean }>(`/replays/${runId}/${matchId}`, { method: "DELETE" }),

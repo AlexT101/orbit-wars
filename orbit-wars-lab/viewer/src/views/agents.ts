@@ -114,7 +114,7 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
       .map((a) => {
         const tags = (a.tags || []).slice(0, 4).map(escapeHtml).join(" · ");
         const desc = a.description ? escapeHtml(a.description.slice(0, 160)) : "";
-        const errBadge = a.last_error
+        const errBadge = a.last_error?.trim()
           ? `<span class="replay-source" style="color: var(--error); background: rgba(255,138,138,0.08);">error</span>`
           : "";
         const disabledBadge = a.disabled

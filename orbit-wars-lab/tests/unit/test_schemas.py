@@ -76,6 +76,14 @@ def test_tournament_config_accepts_is_quick_match_true():
     assert cfg.is_quick_match is True
 
 
+def test_tournament_config_accepts_random_seed_mode():
+    cfg = TournamentConfig(
+        agents=["baselines/random", "baselines/starter"],
+        seed_mode="random",
+    )
+    assert cfg.seed_mode == "random"
+
+
 def test_run_summary_has_is_quick_match_default_false():
     rs = RunSummary(id="2026-04-21-001", started_at="2026-04-21T12:00:00Z")
     assert rs.is_quick_match is False

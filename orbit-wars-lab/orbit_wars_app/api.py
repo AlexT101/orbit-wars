@@ -645,12 +645,16 @@ def clear_kaggle_auth() -> KaggleAuthStatus:
 # Single-tournament lock + tracking state
 _tournament_lock = threading.Lock()
 _current_run_id: str | None = None
+_current_cancel_event: threading.Event | None = None
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 
 @router.post("/tournaments")
 async def start_tournament(cfg: TournamentConfig) -> dict:
-    global _current_run_id
+    global _current_run_id, _current_cancel_event
+    zoo_root = _zoo_root()
+    runs_root = _runs_root()
+    runs_root.mkdir(parents=True, exist_ok=True)
     with _tournament_lock:
         if _current_run_id is not None:
             raise HTTPException(
@@ -660,55 +664,73 @@ async def start_tournament(cfg: TournamentConfig) -> dict:
                     "current_run_id": _current_run_id,
                 },
             )
-        # Reserve the slot with a sentinel so concurrent POSTs see the lock
-        _current_run_id = "<starting>"
-
-    zoo_root = _zoo_root()
-    runs_root = _runs_root()
-    runs_root.mkdir(parents=True, exist_ok=True)
-    t = Tournament(config=cfg, runs_root=runs_root, zoo_root=zoo_root)
+        # Reserve the exact run id up front so the caller polls the match we
+        # just launched, not some older abandoned run.json still marked running.
+        cancel_event = threading.Event()
+        t = Tournament(
+            config=cfg,
+            runs_root=runs_root,
+            zoo_root=zoo_root,
+            cancel_event=cancel_event,
+        )
+        run_id = t.next_run_id()
+        _current_run_id = run_id
+        _current_cancel_event = cancel_event
 
     # Launch in background thread so POST returns promptly
     def _run_and_clear() -> None:
-        global _current_run_id
+        global _current_run_id, _current_cancel_event
         try:
-            t.run()
+            t.run(run_id=run_id)
         finally:
             with _tournament_lock:
                 _current_run_id = None
+                _current_cancel_event = None
 
-    _executor.submit(_run_and_clear)
+    try:
+        _executor.submit(_run_and_clear)
+    except BaseException:
+        with _tournament_lock:
+            _current_run_id = None
+            _current_cancel_event = None
+        raise
 
-    # Poll runs_root for newly-created run.json (≤5 s)
+    # Poll only the reserved run dir for newly-created run.json (≤5 s).
     deadline = time.monotonic() + 5.0
-    run_id: str | None = None
+    run_json = runs_root / run_id / "run.json"
     while time.monotonic() < deadline:
-        for p in sorted(runs_root.iterdir(), reverse=True):
-            if not p.is_dir() or p.name == "latest":
-                continue
-            run_json = p / "run.json"
-            if run_json.is_file():
-                try:
-                    data = json.loads(run_json.read_text())
-                except json.JSONDecodeError:
-                    continue
-                if data.get("status") == "running":
-                    run_id = data["id"]
-                    break
-        if run_id is not None:
-            break
+        if run_json.is_file():
+            try:
+                data = json.loads(run_json.read_text())
+            except json.JSONDecodeError:
+                data = None
+            if data and data.get("id") == run_id:
+                break
         await asyncio.sleep(0.05)
-
-    if run_id is None:
+    else:
         # Release lock — Tournament.run might be stuck or crashed early
         with _tournament_lock:
             _current_run_id = None
+            _current_cancel_event = None
         raise HTTPException(
             status_code=500,
             detail="Tournament started but run.json never appeared",
         )
 
-    with _tournament_lock:
-        _current_run_id = run_id
-
     return {"run_id": run_id, "status": "starting"}
+
+
+@router.post("/tournaments/{run_id}/cancel")
+def cancel_tournament(run_id: str) -> dict:
+    global _current_run_id, _current_cancel_event
+    with _tournament_lock:
+        if _current_run_id != run_id or _current_cancel_event is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "tournament_not_running",
+                    "current_run_id": _current_run_id,
+                },
+            )
+        _current_cancel_event.set()
+    return {"run_id": run_id, "status": "cancelling"}

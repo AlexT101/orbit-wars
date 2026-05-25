@@ -4,7 +4,7 @@
  * (games_per_pair, mode, format), Start button.
  */
 
-import { api, AgentInfo, RunSummary } from "../api";
+import { api, AgentInfo, Rating, RunSummary } from "../api";
 import { installHeaderNav } from "../components/header-nav";
 import { navigate } from "../router";
 
@@ -46,12 +46,13 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
               </label>
               <label>
                 <span>Games per pair</span>
-                <select id="cfg-games">
-                  <option value="1">1</option>
-                  <option value="3" selected>3</option>
-                  <option value="5">5</option>
-                  <option value="10">10</option>
-                </select>
+                <div class="seg-group" id="cfg-games">
+                  <button class="config-pill" data-v="1">1</button>
+                  <button class="config-pill on" data-v="3">3</button>
+                  <button class="config-pill" data-v="5">5</button>
+                  <button class="config-pill" data-v="10">10</button>
+                  <button class="config-pill" data-v="20">20</button>
+                </div>
               </label>
               <label>
                 <span>Mode</span>
@@ -69,21 +70,27 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
               </label>
               <label>
                 <span>Seed</span>
-                <input id="cfg-seed" type="number" value="42" style="width: 100px;">
+                <div class="create-seed-controls">
+                  <div class="seg-group" id="cfg-seed-mode">
+                    <button class="config-pill on" data-v="random">random</button>
+                    <button class="config-pill" data-v="custom">custom</button>
+                  </div>
+                  <input id="cfg-seed" class="seed-input" type="number" value="42" inputmode="numeric" disabled>
+                </div>
               </label>
               <label title="ProcessPoolExecutor workers (fast mode only). 1 = sequential. Higher = faster but uses more RAM.">
                 <span>Parallel workers</span>
                 <select id="cfg-parallel">
-                  <option value="1" selected>1 (sequential)</option>
+                  <option value="1">1 (sequential)</option>
                   <option value="2">2</option>
                   <option value="4">4</option>
                   <option value="6">6</option>
-                  <option value="8">8</option>
+                  <option value="8" selected>8</option>
                 </select>
               </label>
-              <label title="Skip writing per-match replay JSON files (5-10MB each). Ratings are still computed.">
-                <span>Save replays</span>
+              <label class="create-config-checkbox" title="Skip writing per-match replay JSON files (5-10MB each). Ratings are still computed.">
                 <input id="cfg-save-replays" type="checkbox" checked>
+                <span>Save replays</span>
               </label>
               <div id="cfg-total-matches" class="cfg-total-matches"></div>
               <div class="create-actions">
@@ -107,11 +114,25 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   // =========================================================
   const selected = new Set<string>();
   let agents: AgentInfo[] = [];
+  let ratingsByAgent = new Map<string, number>();
   let bucketFilter: "all" | "baselines" | "external" | "mine" = "all";
   let searchTerm = "";
 
+  function currentFormat(): "2p" | "4p" {
+    return getFormat() as "2p" | "4p";
+  }
+
+  async function loadRatings(format: "2p" | "4p" = currentFormat()) {
+    const ratings = await api.getRatings(format);
+    ratingsByAgent = new Map(ratings.map((r: Rating) => [r.agent_id, r.mu]));
+  }
+
   async function loadAgents() {
-    agents = await api.listAgents();
+    const [freshAgents] = await Promise.all([
+      api.listAgents(),
+      loadRatings(),
+    ]);
+    agents = freshAgents;
     renderAgentList();
   }
 
@@ -126,20 +147,34 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
           return false;
       }
       return true;
+    }).sort((a, b) => {
+      const aMu = ratingsByAgent.get(a.id);
+      const bMu = ratingsByAgent.get(b.id);
+      const aKnown = aMu !== undefined;
+      const bKnown = bMu !== undefined;
+      if (aKnown !== bKnown) return aKnown ? 1 : -1;
+      if (!aKnown && !bKnown) return a.name.localeCompare(b.name);
+      if (aMu !== bMu) return (bMu ?? 0) - (aMu ?? 0);
+      return a.name.localeCompare(b.name);
     });
     if (filtered.length === 0) {
       listEl.innerHTML = `<li class="picker-empty">No agents match this filter.</li>`;
     } else {
       listEl.innerHTML = filtered
-        .map(
-          (a) => `
+        .map((a) => {
+          const mu = ratingsByAgent.get(a.id);
+          const muStr = mu !== undefined ? `${mu.toFixed(0)} elo` : "unknown elo";
+          return `
           <li class="create-agent ${selected.has(a.id) ? "picked" : ""}" data-id="${a.id}">
             <span class="create-check">${selected.has(a.id) ? "✓" : ""}</span>
-            <span class="agent-name">${a.name}</span>
-            <span class="agent-bucket">${a.bucket}</span>
+            <span class="agent-name-wrap">
+              <span class="agent-name">${a.name}</span>
+              <span class="agent-bucket">(${a.bucket})</span>
+            </span>
+            <span class="agent-elo">${muStr}</span>
           </li>
-        `,
-        )
+        `;
+        })
         .join("");
     }
     listEl.querySelectorAll<HTMLElement>(".create-agent").forEach((el) => {
@@ -190,13 +225,24 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   const getMode = wireSegGroup("cfg-mode");
   const getFormat = wireSegGroup("cfg-format");
   const getShape = wireSegGroup("cfg-shape");
+  const getGamesValue = wireSegGroup("cfg-games");
+  const getSeedMode = wireSegGroup("cfg-seed-mode");
 
   const challengerWrap = document.getElementById("cfg-challenger-wrap")!;
   const challengerSel = document.getElementById("cfg-challenger") as HTMLSelectElement;
   const totalMatchesEl = document.getElementById("cfg-total-matches")!;
+  const seedInput = document.getElementById("cfg-seed") as HTMLInputElement;
 
   function getGames(): number {
-    return parseInt((document.getElementById("cfg-games") as HTMLSelectElement).value, 10);
+    return parseInt(getGamesValue(), 10);
+  }
+
+  function randomSeedBase(): number {
+    return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff;
+  }
+
+  function refreshSeedInput() {
+    seedInput.disabled = getSeedMode() === "random";
   }
 
   function refreshChallengerDropdown() {
@@ -265,9 +311,19 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     }));
   document.getElementById("cfg-format")!
     .querySelectorAll<HTMLButtonElement>(".config-pill")
-    .forEach((btn) => btn.addEventListener("click", () => setTimeout(updateTotalMatches, 0)));
+    .forEach((btn) => btn.addEventListener("click", () => {
+      setTimeout(updateTotalMatches, 0);
+      void loadRatings(currentFormat()).then(() => renderAgentList()).catch(() => {
+        ratingsByAgent.clear();
+        renderAgentList();
+      });
+    }));
   document.getElementById("cfg-games")!
-    .addEventListener("change", updateTotalMatches);
+    .querySelectorAll<HTMLButtonElement>(".config-pill")
+    .forEach((btn) => btn.addEventListener("click", () => setTimeout(updateTotalMatches, 0)));
+  document.getElementById("cfg-seed-mode")!
+    .querySelectorAll<HTMLButtonElement>(".config-pill")
+    .forEach((btn) => btn.addEventListener("click", () => setTimeout(refreshSeedInput, 0)));
 
   // Start tournament
   document.getElementById("create-start")!.addEventListener("click", async () => {
@@ -287,16 +343,11 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
         return;
       }
     }
-    const games = parseInt(
-      (document.getElementById("cfg-games") as HTMLSelectElement).value,
-      10,
-    );
+    const games = getGames();
     const mode = getMode();
     const format = getFormat();
-    const seed = parseInt(
-      (document.getElementById("cfg-seed") as HTMLInputElement).value,
-      10,
-    );
+    const useRandomSeed = getSeedMode() === "random";
+    const seed = parseInt(seedInput.value, 10);
     const parallel = parseInt(
       (document.getElementById("cfg-parallel") as HTMLSelectElement).value,
       10,
@@ -312,7 +363,8 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
         format,
         parallel: isNaN(parallel) ? 1 : parallel,
         save_replays: saveReplays,
-        seed_base: isNaN(seed) ? 42 : seed,
+        seed_base: useRandomSeed ? randomSeedBase() : (isNaN(seed) ? 42 : seed),
+        seed_mode: useRandomSeed ? "random" : "fixed",
         is_quick_match: false,
         shape: shape as "round-robin" | "gauntlet",
         challenger_id: challengerId,
@@ -385,6 +437,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   await loadAgents();
   await loadRuns();
   onShapeChange(); // initial: hide challenger + compute totals
+  refreshSeedInput();
 
   if (pollInterval !== null) window.clearInterval(pollInterval);
   pollInterval = window.setInterval(() => {

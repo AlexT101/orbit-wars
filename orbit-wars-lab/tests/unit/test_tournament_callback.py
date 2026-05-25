@@ -57,3 +57,28 @@ def test_tournament_on_match_done_called_per_match(tmp_path: Path):
     # done counter should go 1..6, total constant 6
     assert [s[0] for s in seen] == [1, 2, 3, 4, 5, 6]
     assert all(s[1] == 6 for s in seen)
+
+
+def test_tournament_config_json_persists_rerun_relevant_fields(tmp_path: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    cfg = TournamentConfig(
+        agents=["baselines/random", "baselines/starter", "baselines/nearest-sniper"],
+        games_per_pair=2,
+        mode="fast",
+        format="2p",
+        parallel=4,
+        seed_base=123,
+        seed_mode="random",
+        save_replays=False,
+        shape="gauntlet",
+        challenger_id="baselines/random",
+    )
+    t = Tournament(config=cfg, runs_root=runs, zoo_root=PROJECT_ROOT / "agents")
+
+    run_id = t.run()
+    data = json.loads((runs / run_id / "config.json").read_text())
+    assert data["seed_mode"] == "random"
+    assert data["save_replays"] is False
+    assert data["shape"] == "gauntlet"
+    assert data["challenger_id"] == "baselines/random"

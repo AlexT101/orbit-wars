@@ -7,6 +7,7 @@ import json
 import os
 import random
 import sys
+import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -19,6 +20,10 @@ from .replay_store import save_replay
 from .runtime_store import RuntimeStore
 from .schemas import AgentInfo, MatchResult, RunStatus, TournamentConfig
 from .trueskill_store import TrueSkillStore
+
+
+class TournamentCancelled(Exception):
+    """Raised when the caller requests a graceful tournament stop."""
 
 
 # ============================================================
@@ -158,14 +163,17 @@ class Tournament:
         *,
         runs_root: Path,
         zoo_root: Path,
+        cancel_event: Optional[threading.Event] = None,
     ):
         self.config = config
         self.runs_root = runs_root
         self.zoo_root = zoo_root
+        self.cancel_event = cancel_event
 
     def run(
         self,
         on_match_done: Optional[Callable[["MatchResult", int, int], None]] = None,
+        run_id: Optional[str] = None,
     ) -> str:
         """Execute tournament. Return run_id (directory name).
 
@@ -179,7 +187,7 @@ class Tournament:
         pairs = self._generate_pairs(agents)
         total_matches = len(pairs) * self.config.games_per_pair
 
-        run_id = self._new_run_id()
+        run_id = run_id or self._new_run_id()
         run_dir = self.runs_root / run_id
         run_dir.mkdir(parents=True)
         replays_dir = run_dir / "replays"
@@ -227,6 +235,7 @@ class Tournament:
                 # nesting ProcessPoolExecutor on top would multiply RAM and
                 # lose the per-match HTTP retry isolation.
                 for mc, aids, apaths, seed in jobs:
+                    self._check_cancel()
                     outcome = run_match(
                         agent_ids=aids,
                         agent_paths=apaths,
@@ -251,28 +260,35 @@ class Tournament:
                         on_match_done=on_match_done,
                     )
             else:
-                # Parallel path (fast mode only). ProcessPoolExecutor amortizes
-                # the kaggle-environments import cost across N matches: each
-                # worker re-uses its loaded `make("orbit_wars")` between
-                # successive matches, so the ~3s spawn overhead pays once per
-                # worker (not once per match). M-series Mac with parallel=8
-                # gives ~6-8x wallclock speedup on this round-robin shape.
-                with ProcessPoolExecutor(
+                # Parallel path keeps at most `parallel` matches in flight so a
+                # cancel request can stop launching new work promptly, then wait
+                # only for currently-running matches to finish.
+                ex = ProcessPoolExecutor(
                     max_workers=self.config.parallel,
                     initializer=_quiet_kaggle_environments,
-                ) as ex:
-                    futs = {
-                        ex.submit(
+                )
+                try:
+                    job_iter = iter(jobs)
+                    futs: dict[object, tuple[int, list[str], list[Path], int]] = {}
+
+                    def submit_job(job: tuple[int, list[str], list[Path], int]) -> None:
+                        mc, aids, apaths, seed = job
+                        futs[ex.submit(
                             _run_match_in_worker,
                             mc, aids, [str(p) for p in apaths],
                             self.config.mode, seed,
                             str(replays_dir) if self.config.save_replays else None,
                             self.config.save_replays,
                             str(logs_dir),
-                        ): (mc, aids, apaths, seed)
-                        for mc, aids, apaths, seed in jobs
-                    }
-                    for fut in as_completed(futs):
+                        )] = (mc, aids, apaths, seed)
+
+                    self._check_cancel()
+                    for _ in range(min(self.config.parallel, len(jobs))):
+                        submit_job(next(job_iter))
+
+                    cancelling = False
+                    while futs:
+                        fut = next(as_completed(futs))
                         try:
                             wr = fut.result()
                         except BaseException as e:
@@ -292,10 +308,11 @@ class Tournament:
                                 status="crashed", replay_path="",
                                 worker_pid=0,
                             )
-                            # Record the failure on the run for postmortem.
                             (run_dir / f"worker-error-{mc:03d}.txt").write_text(
                                 f"{type(e).__name__}: {e}\n"
                             )
+                        finally:
+                            futs.pop(fut, None)
                         completed_count += 1
                         self._handle_match_outcome(
                             matches, store, runtime_store, run_dir, run_id, started_at,
@@ -307,6 +324,19 @@ class Tournament:
                             progress_count=completed_count,
                             on_match_done=on_match_done,
                         )
+                        if self._cancel_requested():
+                            cancelling = True
+                        if not cancelling:
+                            try:
+                                submit_job(next(job_iter))
+                            except StopIteration:
+                                pass
+                    if cancelling:
+                        raise TournamentCancelled()
+                finally:
+                    ex.shutdown(wait=True, cancel_futures=True)
+        except TournamentCancelled:
+            status = "aborted"
         except BaseException:
             status = "aborted"
             raise
@@ -329,7 +359,12 @@ class Tournament:
                 "games_per_pair": self.config.games_per_pair,
                 "agents": self.config.agents,
                 "seed_base": self.config.seed_base,
+                "seed_mode": self.config.seed_mode,
                 "parallel": self.config.parallel,
+                "save_replays": self.config.save_replays,
+                "shape": self.config.shape,
+                "challenger_id": self.config.challenger_id,
+                "is_quick_match": self.config.is_quick_match,
                 "started_at": started_at,
             }, indent=2))
 
@@ -357,6 +392,17 @@ class Tournament:
                 (self.runs_root / "latest.txt").write_text(run_id)
 
         return run_id
+
+    def next_run_id(self) -> str:
+        """Return the next collision-safe run id without creating the directory."""
+        return self._new_run_id()
+
+    def _cancel_requested(self) -> bool:
+        return self.cancel_event.is_set() if self.cancel_event is not None else False
+
+    def _check_cancel(self) -> None:
+        if self._cancel_requested():
+            raise TournamentCancelled()
 
     def _handle_match_outcome(
         self,

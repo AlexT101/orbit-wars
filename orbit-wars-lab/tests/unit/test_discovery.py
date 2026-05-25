@@ -200,3 +200,63 @@ def test_scan_zoo_baseline_without_kernel_slug_ok(tmp_path: Path):
     assert a.kernel_slug is None
     assert a.kernel_version is None
     assert a.license is None
+
+
+def test_scan_zoo_blank_optional_metadata_does_not_set_error(tmp_path: Path):
+    """Blank optional metadata should be treated as missing, not invalid."""
+    zoo = tmp_path / "agents"
+    _write_agent(zoo, "external", "blank-meta", {
+        "name": "Blank Meta",
+        "description": "",
+        "author": " ",
+        "kernel_slug": "",
+        "kernel_version": "",
+        "date_fetched": " ",
+        "license": "",
+        "author_claimed_lb_score": "",
+        "source_url": "",
+        "version": " ",
+    })
+
+    agents = scan_zoo(zoo)
+
+    assert len(agents) == 1
+    a = agents[0]
+    assert a.last_error is None
+    assert a.description is None
+    assert a.author is None
+    assert a.kernel_slug is None
+    assert a.kernel_version is None
+    assert a.date_fetched is None
+    assert a.license is None
+    assert a.author_claimed_lb_score is None
+    assert a.source_url is None
+    assert a.version is None
+
+
+def test_scan_zoo_unknown_optional_metadata_does_not_set_error(tmp_path: Path):
+    """Common placeholder strings like 'unknown' should behave like missing."""
+    zoo = tmp_path / "agents"
+    _write_agent(zoo, "external", "unknown-meta", {
+        "name": "Unknown Meta",
+        "author": "unknown",
+        "kernel_slug": "unknown",
+        "kernel_version": "unknown",
+        "license": "unknown",
+        "source_url": "N/A",
+        "version": "-",
+        "author_claimed_lb_score": "none",
+    })
+
+    agents = scan_zoo(zoo)
+
+    assert len(agents) == 1
+    a = agents[0]
+    assert a.last_error is None
+    assert a.author is None
+    assert a.kernel_slug is None
+    assert a.kernel_version is None
+    assert a.license is None
+    assert a.source_url is None
+    assert a.version is None
+    assert a.author_claimed_lb_score is None

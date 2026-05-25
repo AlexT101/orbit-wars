@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-25T19:21:32.591601+00:00",
+  "last_updated": "2026-05-25T20:42:05.920957+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 4700,
@@ -39,10 +39,10 @@
       "last_updated": "2026-05-24T21:57:24.358516+00:00"
     },
     "external/owproto": {
-      "total_turns": 4309,
-      "total_seconds": 75.562924,
-      "avg_ms": 17.53606962172198,
-      "last_updated": "2026-05-25T02:01:50.229989+00:00"
+      "total_turns": 4845,
+      "total_seconds": 86.002026,
+      "avg_ms": 17.750676160990714,
+      "last_updated": "2026-05-25T20:42:05.827152+00:00"
     },
     "external/peaking-bot": {
       "total_turns": 2765,
@@ -123,10 +123,10 @@
       "last_updated": "2026-05-25T19:21:32.562760+00:00"
     },
     "external/hellburner": {
-      "total_turns": 161,
-      "total_seconds": 2.76461,
-      "avg_ms": 17.171490683229813,
-      "last_updated": "2026-05-25T19:21:32.562794+00:00"
+      "total_turns": 697,
+      "total_seconds": 11.354474,
+      "avg_ms": 16.290493543758966,
+      "last_updated": "2026-05-25T20:42:05.827136+00:00"
     }
   }
 }

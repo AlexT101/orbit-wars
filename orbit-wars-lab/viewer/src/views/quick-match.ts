@@ -478,6 +478,10 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
   let pollFailures = 0;
   let activeReplay: EmbeddedReplayHandle = mountEmbeddedReplay(rightPanel);
 
+  function randomSeedBase(): number {
+    return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff;
+  }
+
   // ===== Logs accordion (visible for Kaggle replays only) =====
   let currentKaggleCtx: { sub: number; ep: number } | null = null;
   let logsLoadedKey: string | null = null;
@@ -841,16 +845,15 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     // Date.now() % 2**31 has tiny entropy — sequential Play clicks in the
     // same ms produce identical seeds. crypto.getRandomValues fixes that.
     // The 42 short-circuit stays for deterministic-seed power-users.
-    const seedBase =
-      config.seed === 42
-        ? 42
-        : (crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff);
+    const seedBase = config.seed === "random" ? randomSeedBase() : config.seed;
+    const seedMode: "fixed" | "random" = config.seed === "random" ? "random" : "fixed";
     const payload = {
       agents: agentsList,
       games_per_pair: config.games,
       mode: config.mode,
       format: config.format,
       seed_base: seedBase,
+      seed_mode: seedMode,
       is_quick_match: true,
     };
 

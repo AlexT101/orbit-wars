@@ -211,6 +211,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .replay-item:last-child {
@@ -222,7 +223,29 @@
   border-left-color: var(--accent-strong);
 }
 
-.replay-item:hover .replay-delete {
+.replay-item::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 112px;
+  background: var(--surface-2);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+  transition: opacity 120ms;
+  -webkit-mask-image: linear-gradient(to left, black 58%, transparent);
+  mask-image: linear-gradient(to left, black 58%, transparent);
+}
+
+.replay-item:hover::after,
+.replay-item:focus-within::after {
+  opacity: 1;
+}
+
+.replay-item:hover .replay-delete,
+.replay-item:focus-within .replay-delete {
   opacity: 1;
 }
 
@@ -306,6 +329,7 @@
   transition: opacity 120ms, color 120ms, border-color 120ms;
   padding: 0;
   line-height: 1;
+  z-index: 2;
 }
 
 .replay-delete:hover {

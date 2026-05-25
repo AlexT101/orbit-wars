@@ -114,9 +114,32 @@ ul.runs > li {
   transition: background-color 120ms;
   align-items: center;
   position: relative;
+  overflow: hidden;
 }
 
-ul.runs > li:hover .replay-delete {
+ul.runs > li::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 84px;
+  background: var(--surface-2);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+  transition: opacity 120ms;
+  -webkit-mask-image: linear-gradient(to left, black 58%, transparent);
+  mask-image: linear-gradient(to left, black 58%, transparent);
+}
+
+ul.runs > li:hover::after,
+ul.runs > li:focus-within::after {
+  opacity: 1;
+}
+
+ul.runs > li:hover .replay-delete,
+ul.runs > li:focus-within .replay-delete {
   opacity: 1;
 }
 

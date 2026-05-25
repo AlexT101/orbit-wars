@@ -10,6 +10,7 @@ Bucket = Literal["baselines", "external", "mine"]
 Format = Literal["2p", "4p"]
 Mode = Literal["fast", "faithful"]
 TournamentShape = Literal["round-robin", "gauntlet"]
+SeedMode = Literal["fixed", "random"]
 MatchStatus = Literal[
     "ok", "timeout", "crashed", "agent_failed_to_start", "invalid_action", "draw"
 ]
@@ -101,6 +102,7 @@ class TournamentConfig(BaseModel):
     # well before 16 on round-robin shapes.
     parallel: int = Field(default=1, ge=1, le=16)
     seed_base: int = 42
+    seed_mode: SeedMode = "fixed"
     # set False for seed-only runs to skip 5-10MB JSON writes per match
     save_replays: bool = True
     is_quick_match: bool = False  # True when launched from the Quick Match UI (filtered out by /api/runs?exclude_quick_match=true)

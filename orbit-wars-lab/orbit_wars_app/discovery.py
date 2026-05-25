@@ -17,6 +17,15 @@ _DEPRECATED_FIELDS = ("source_url", "version")
 VALID_BUCKETS = set(get_args(Bucket))  # {"baselines", "external", "mine"}
 
 
+_MISSING_STRINGS = {"", "-", "—", "unknown", "n/a", "na", "none", "null"}
+
+
+def _none_if_blank(value):
+    if isinstance(value, str) and value.strip().lower() in _MISSING_STRINGS:
+        return None
+    return value
+
+
 def scan_zoo(zoo_dir: Path) -> list[AgentInfo]:
     """Return sorted list of agents found under zoo_dir/{bucket}/<name>/.
 
@@ -90,7 +99,7 @@ def _build_agent_info(bucket: str, agent_dir: Path, zoo_dir: Path) -> AgentInfo:
             )
 
     # Parse kernel_version as int if present
-    kv = yaml_data.get("kernel_version")
+    kv = _none_if_blank(yaml_data.get("kernel_version"))
     kernel_version: int | None = None
     if kv is not None:
         try:
@@ -100,7 +109,7 @@ def _build_agent_info(bucket: str, agent_dir: Path, zoo_dir: Path) -> AgentInfo:
                 last_error = f"kernel_version is not int (got {type(kv).__name__}: {kv!r})"
 
     # Parse author_claimed_lb_score as float if present
-    alb = yaml_data.get("author_claimed_lb_score")
+    alb = _none_if_blank(yaml_data.get("author_claimed_lb_score"))
     author_claimed_lb_score: float | None = None
     if alb is not None:
         try:
@@ -113,20 +122,20 @@ def _build_agent_info(bucket: str, agent_dir: Path, zoo_dir: Path) -> AgentInfo:
         id=agent_id,
         name=yaml_data.get("name") or folder_name,
         bucket=bucket,  # type: ignore[arg-type]
-        description=yaml_data.get("description"),
-        author=yaml_data.get("author"),
+        description=_none_if_blank(yaml_data.get("description")),
+        author=_none_if_blank(yaml_data.get("author")),
         tags=tags,
         disabled=bool(yaml_data.get("disabled", False)),
         has_yaml=has_yaml,
         path=rel_path,
         last_error=last_error,
         # New fields
-        kernel_slug=yaml_data.get("kernel_slug"),
+        kernel_slug=_none_if_blank(yaml_data.get("kernel_slug")),
         kernel_version=kernel_version,
-        date_fetched=str(yaml_data["date_fetched"]) if "date_fetched" in yaml_data else None,
-        license=yaml_data.get("license"),
+        date_fetched=str(yaml_data["date_fetched"]) if _none_if_blank(yaml_data.get("date_fetched")) is not None else None,
+        license=_none_if_blank(yaml_data.get("license")),
         author_claimed_lb_score=author_claimed_lb_score,
         # Deprecated fields (backward compat)
-        source_url=yaml_data.get("source_url"),
-        version=str(yaml_data["version"]) if "version" in yaml_data else None,
+        source_url=_none_if_blank(yaml_data.get("source_url")),
+        version=str(yaml_data["version"]) if _none_if_blank(yaml_data.get("version")) is not None else None,
     )

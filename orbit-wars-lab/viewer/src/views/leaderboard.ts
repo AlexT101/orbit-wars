@@ -7,7 +7,7 @@ let pollInterval: number | null = null;
 const TITLES: Record<RatingsFormat, string> = {
   "2p": "TrueSkill ratings — 2p",
   "4p": "TrueSkill ratings — 4p",
-  all: "TrueSkill ratings — wszystko",
+  all: "TrueSkill ratings — both",
 };
 
 export async function renderLeaderboard(root: HTMLElement): Promise<void> {
@@ -21,7 +21,7 @@ export async function renderLeaderboard(root: HTMLElement): Promise<void> {
           <div class="lb-format-pills">
             <button class="settings-pill" data-format="2p">2p</button>
             <button class="settings-pill" data-format="4p">4p</button>
-            <button class="settings-pill" data-format="all">wszystko</button>
+            <button class="settings-pill" data-format="all">Both</button>
           </div>
           <button id="reset-lb" class="scrape-btn cancel">Reset leaderboard</button>
         </div>

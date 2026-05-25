@@ -6,7 +6,7 @@
 export interface MatchConfig {
   games: number;
   mode: "fast" | "faithful";
-  seed: "random" | 42;
+  seed: "random" | number;
   format: "2p" | "4p";
 }
 
@@ -24,6 +24,7 @@ export function mountMatchConfigBar(
     seed: "random",
     format: "2p",
   };
+  let customSeed = 42;
 
   function render() {
     root.innerHTML = `
@@ -35,7 +36,7 @@ export function mountMatchConfigBar(
         </div>
         <div class="config-group">
           <span class="config-label">games</span>
-          ${[1, 3, 5]
+          ${[1, 3, 5, 10, 20]
             .map(
               (n) =>
                 `<button class="config-pill ${config.games === n ? "on" : ""}" data-k="games" data-v="${n}">${n}</button>`,
@@ -50,7 +51,15 @@ export function mountMatchConfigBar(
         <div class="config-group">
           <span class="config-label">seed</span>
           <button class="config-pill ${config.seed === "random" ? "on" : ""}" data-k="seed" data-v="random">random</button>
-          <button class="config-pill ${config.seed === 42 ? "on" : ""}" data-k="seed" data-v="42">42</button>
+          <button class="config-pill ${config.seed !== "random" ? "on" : ""}" data-k="seed" data-v="custom">custom</button>
+          <input
+            id="config-custom-seed"
+            class="config-input"
+            type="number"
+            inputmode="numeric"
+            value="${customSeed}"
+            ${config.seed === "random" ? "disabled" : ""}
+          >
         </div>
       </div>
     `;
@@ -61,11 +70,21 @@ export function mountMatchConfigBar(
         const v = el.dataset.v!;
         if (k === "games") config.games = parseInt(v, 10);
         else if (k === "mode") config.mode = v as "fast" | "faithful";
-        else if (k === "seed") config.seed = v === "42" ? 42 : "random";
+        else if (k === "seed") config.seed = v === "random" ? "random" : customSeed;
         else if (k === "format") config.format = v as "2p" | "4p";
         onChange({ ...config });
         render();
       });
+    });
+
+    root.querySelector<HTMLInputElement>("#config-custom-seed")?.addEventListener("input", (e) => {
+      const next = parseInt((e.target as HTMLInputElement).value, 10);
+      if (Number.isNaN(next)) return;
+      customSeed = next;
+      if (config.seed !== "random") {
+        config.seed = customSeed;
+        onChange({ ...config });
+      }
     });
   }
 
