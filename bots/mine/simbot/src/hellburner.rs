@@ -17,13 +17,15 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::{CENTER, MAX_SHIP_SPEED};
 use crate::engine::{distance, fleet_speed, Planet};
-use crate::entity_cache::Entity;
+use crate::entity_cache::{AimCacheVerdict, Entity};
 use crate::helpers::{
-    aim_with_prediction, simulate_planet_timeline, ArrivalEvent, PlanetTimeline,
+    aim_with_prediction, simulate_planet_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
 
@@ -146,6 +148,13 @@ pub struct HellburnerModel<'a> {
     pub inbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub outbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub reinforcement_target: HashMap<i64, i64>,
+    /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
+    /// memoization of `(src, target, ships) → aim`. Avoids repeated traffic
+    /// to the L2 `EntityCache::aim_cache` inside the inner loops of
+    /// `evaluate_frontline_strategy`, `evaluate_move_orders` (where the same
+    /// shot can be re-queried several times across the main loop and the
+    /// worst-case sub-rollout), and `run_early_game`'s DFS.
+    shot_cache: RefCell<HashMap<(i64, i64, i64), Option<AimResult>>>,
 }
 
 impl<'a> HellburnerModel<'a> {
@@ -210,7 +219,36 @@ impl<'a> HellburnerModel<'a> {
             inbound_edges,
             outbound_edges,
             reinforcement_target,
+            shot_cache: RefCell::new(HashMap::default()),
         }
+    }
+
+    /// Cached `aim_with_prediction`. Two-level cache (mirrors the obnext
+    /// `WorldModel::plan_shot` pattern):
+    ///   * L1 — per-`HellburnerModel` `shot_cache`: avoids repeated traffic
+    ///     to the L2 `RefCell` inside hot evaluation loops.
+    ///   * L2 — `EntityCache::aim_cache`: shares results across every
+    ///     `HellburnerModel` built during the same bot turn (rollout
+    ///     candidates / opponent rebuilds) and across turns when geometry
+    ///     is still valid. Stale entries (post-comet-spawn) are re-verified
+    ///     or evicted lazily inside `aim_cache_lookup`.
+    pub fn plan_shot(&self, src_id: i64, target_id: i64, ships: i64) -> Option<AimResult> {
+        let ships = ships.max(1);
+        let key = (src_id, target_id, ships);
+        if let Some(&cached) = self.shot_cache.borrow().get(&key) {
+            return cached;
+        }
+        let cache = self.state.entity_cache;
+        let result = match cache.aim_cache_lookup(src_id, target_id, ships) {
+            AimCacheVerdict::Hit(r) => r,
+            AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
+                let r = aim_with_prediction(cache, src_id, target_id, ships);
+                cache.aim_cache_store(src_id, target_id, ships, r);
+                r
+            }
+        };
+        self.shot_cache.borrow_mut().insert(key, result);
+        result
     }
 }
 
@@ -421,7 +459,7 @@ fn neighbor_holds_under_worst_case(
         }
         let half_ships = (attacker.ships / 2).max(1);
         let Some((_, turns, _, _, _)) =
-            aim_with_prediction(world.entity_cache, *attacker_id, neighbor.id, attacker.ships)
+            model.plan_shot(*attacker_id, neighbor.id, attacker.ships)
         else {
             continue;
         };
@@ -526,7 +564,7 @@ fn evaluate_frontline_strategy(
         }
 
         let Some((angle, turns, _, _, _)) =
-            aim_with_prediction(world.entity_cache, src_id, target.id, ships_to_send)
+            model.plan_shot(src_id, target.id, ships_to_send)
         else {
             continue;
         };
@@ -579,7 +617,7 @@ fn evaluate_frontline_strategy(
                 let trimmed = (ships_to_send - keep).max(TRIM_MIN_SHIPS);
                 if trimmed < ships_to_send {
                     if let Some((t_angle, t_turns, _, _, _)) =
-                        aim_with_prediction(world.entity_cache, src_id, target.id, trimmed)
+                        model.plan_shot(src_id, target.id, trimmed)
                     {
                         let last_t = trial.len() - 1;
                         let saved = trial[last_t];
@@ -701,7 +739,7 @@ fn send_reinforcements(
         }
         let ships = available - GARRISON_SIZE;
         let Some((angle, _turns, _, _, _)) =
-            aim_with_prediction(world.entity_cache, p.id, target_id, ships)
+            model.plan_shot(p.id, target_id, ships)
         else {
             continue;
         };
@@ -1069,7 +1107,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
             continue;
         }
         let Some((angle, _turns, _, _, _)) =
-            aim_with_prediction(world.entity_cache, *source_id, target_planet.id, *fleet_size)
+            model.plan_shot(*source_id, target_planet.id, *fleet_size)
         else {
             continue;
         };
