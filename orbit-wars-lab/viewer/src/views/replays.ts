@@ -151,6 +151,8 @@ export async function renderReplays(
 
   let currentSource: Source = restored.source;
   let currentSort: "newest" | "oldest" | "turns-desc" | "turns-asc" = restored.sort;
+  let hasLoadedList = false;
+  let listRequestId = 0;
 
   // Apply restored state to toolbar controls.
   root.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((b) =>
@@ -211,13 +213,18 @@ export async function renderReplays(
     return copy;
   }
 
-  async function loadList() {
+  async function loadList(options?: { showLoading?: boolean }) {
     const listEl = document.getElementById("replays-list")!;
-    listEl.innerHTML = `<div class="loading">Loading…</div>`;
+    const requestId = ++listRequestId;
+    const showLoading = options?.showLoading ?? !hasLoadedList;
+    if (showLoading) {
+      listEl.innerHTML = `<div class="loading">Loading…</div>`;
+    }
     try {
       const r = await fetch(`/api/replays?source=${currentSource}`);
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       let items: Replay[] = await r.json();
+      if (requestId !== listRequestId) return;
       if (subFilter) {
         const sub = Number(subFilter);
         items = items.filter(
@@ -225,8 +232,12 @@ export async function renderReplays(
         );
       }
       renderList(sortItems(items));
+      hasLoadedList = true;
     } catch (e) {
-      listEl.innerHTML = `<div class="loading">Error: ${(e as Error).message}</div>`;
+      if (requestId !== listRequestId) return;
+      if (!hasLoadedList) {
+        listEl.innerHTML = `<div class="loading">Error: ${(e as Error).message}</div>`;
+      }
     }
   }
 
@@ -383,7 +394,7 @@ export async function renderReplays(
     }
   });
 
-  await loadList();
+  await loadList({ showLoading: true });
 
   // Soft refresh every 10 s while user is on page
   if (pollInterval !== null) window.clearInterval(pollInterval);

@@ -69,6 +69,8 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
 
   let bucketFilter: AgentsFilter["bucket"] = restored.bucket;
   let searchTerm = restored.search;
+  let hasLoadedList = false;
+  let listRequestId = 0;
 
   // Apply restored filter state to the just-rendered toolbar.
   root.querySelectorAll<HTMLButtonElement>("[data-bucket]").forEach((b) => {
@@ -76,9 +78,13 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
   });
   (document.getElementById("agents-search") as HTMLInputElement).value = searchTerm;
 
-  async function loadList() {
+  async function loadList(options?: { showLoading?: boolean }) {
     const listEl = document.getElementById("agents-list")!;
-    listEl.innerHTML = `<div class="loading">Loading…</div>`;
+    const requestId = ++listRequestId;
+    const showLoading = options?.showLoading ?? !hasLoadedList;
+    if (showLoading) {
+      listEl.innerHTML = `<div class="loading">Loading…</div>`;
+    }
     try {
       // Runtimes failure must not blank the agents tab — fall back to an
       // empty map and render the list with '—' in the runtime column.
@@ -86,10 +92,15 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
         api.listAgents(),
         api.listRuntimes().catch(() => [] as AgentRuntime[]),
       ]);
+      if (requestId !== listRequestId) return;
       const runtimeByAgent = new Map(runtimes.map((r) => [r.agent_id, r]));
       renderList(agents, runtimeByAgent);
+      hasLoadedList = true;
     } catch (e) {
-      listEl.innerHTML = `<div class="loading">Error: ${(e as Error).message}</div>`;
+      if (requestId !== listRequestId) return;
+      if (!hasLoadedList) {
+        listEl.innerHTML = `<div class="loading">Error: ${(e as Error).message}</div>`;
+      }
     }
   }
 
@@ -222,7 +233,7 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
     },
   );
 
-  await loadList();
+  await loadList({ showLoading: true });
 
   if (pollInterval !== null) window.clearInterval(pollInterval);
   pollInterval = window.setInterval(() => {

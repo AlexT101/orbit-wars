@@ -7,18 +7,22 @@ export async function mountRatingsTable(
   el: HTMLElement,
   format: RatingsFormat = "2p",
 ): Promise<void> {
+  const requestId = String((Number(el.dataset.requestId ?? "0") || 0) + 1);
+  el.dataset.requestId = requestId;
   if (format === "all") {
-    await renderCombined(el);
+    await renderCombined(el, requestId);
     return;
   }
-  await renderSingle(el, format);
+  await renderSingle(el, format, requestId);
 }
 
 async function renderSingle(
   el: HTMLElement,
   format: "2p" | "4p",
+  requestId: string,
 ): Promise<void> {
   const ratings = await api.getRatings(format);
+  if (el.dataset.requestId !== requestId) return;
   el.innerHTML = `
     <table class="ratings">
       <thead>
@@ -46,11 +50,12 @@ async function renderSingle(
   wireRowClicks(el);
 }
 
-async function renderCombined(el: HTMLElement): Promise<void> {
+async function renderCombined(el: HTMLElement, requestId: string): Promise<void> {
   const [r2p, r4p] = await Promise.all([
     api.getRatings("2p"),
     api.getRatings("4p"),
   ]);
+  if (el.dataset.requestId !== requestId) return;
 
   interface Row {
     agentId: string;

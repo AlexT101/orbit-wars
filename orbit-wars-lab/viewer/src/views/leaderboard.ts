@@ -12,6 +12,7 @@ const TITLES: Record<RatingsFormat, string> = {
 
 export async function renderLeaderboard(root: HTMLElement): Promise<void> {
   let currentFormat: RatingsFormat = "2p";
+  let hasLoadedRatings = false;
 
   root.innerHTML = `
     <main class="dashboard">
@@ -40,11 +41,21 @@ export async function renderLeaderboard(root: HTMLElement): Promise<void> {
     });
   }
 
-  async function refresh() {
+  async function refresh(options?: { showLoading?: boolean }) {
     if (document.hidden) return;
     titleEl.textContent = TITLES[currentFormat];
     updatePillState();
-    await mountRatingsTable(ratingsEl, currentFormat);
+    if (options?.showLoading ?? !hasLoadedRatings) {
+      ratingsEl.innerHTML = `<div class="loading">Loading...</div>`;
+    }
+    try {
+      await mountRatingsTable(ratingsEl, currentFormat);
+      hasLoadedRatings = true;
+    } catch (e) {
+      if (!hasLoadedRatings) {
+        ratingsEl.innerHTML = `<div class="loading">Error: ${(e as Error).message}</div>`;
+      }
+    }
   }
 
   root.querySelectorAll<HTMLButtonElement>(".lb-format-pills .settings-pill").forEach((b) => {
@@ -56,7 +67,7 @@ export async function renderLeaderboard(root: HTMLElement): Promise<void> {
     });
   });
 
-  await refresh();
+  await refresh({ showLoading: true });
 
   document.getElementById("reset-lb")!.addEventListener("click", async () => {
     const target = currentFormat;
