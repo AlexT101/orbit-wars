@@ -370,12 +370,17 @@ pub fn lead_target(
         return None;
     }
 
-    // Seed: ceil-flight-time at the target's launch-turn position is a lower
-    // bound for the earliest feasible arrival turn — the fleet can't possibly
-    // arrive sooner than it would against a stationary target at that range.
-    let [seed_x, seed_y] = cache.position(target_id, launch_turn_offset)?;
-    let seed_d = (seed_x - lx).hypot(seed_y - ly);
-    let start = (((seed_d - tr - launch_offset).max(0.0) / v).ceil() as i64).max(1);
+    // Seed: lower bound on the earliest feasible arrival turn. The stationary
+    // assumption (`seed_d / v`) is only valid if the target isn't *closing* on
+    // the shooter — but an orbiting target at ROTATION_LIMIT (~50) with max
+    // ω (0.05) can approach at up to ω·r ≈ 2.5 units/turn, on top of the
+    // fleet's own outward speed. Using just `v` as the closing rate skips
+    // past the actual intercept turn for slow fleets vs approaching orbiters
+    // — a real bug that caused valid shots to be silently rejected (None
+    // returned, no fleet fired). max_lookahead is bounded by HORIZON=30, so
+    // it's cheap to just start at turn 1.
+    let start: i64 = 1;
+    let [_seed_x, _seed_y] = cache.position(target_id, launch_turn_offset)?;
 
     let inv_samples = 1.0 / (LEAD_SAMPLES - 1) as f64;
 
@@ -430,9 +435,18 @@ pub fn aim_with_prediction(
     target_id: i64,
     ships: i64,
 ) -> Option<AimResult> {
-    let v = bucket_to_speed(speed_bucket(ships));
+    // Lead the target at the **exact** engine speed so the (angle, turns) we
+    // emit lands on the actual orbital intercept point — quantizing here was
+    // a real bug: a ~2.5% speed mismatch is enough for the planet to rotate
+    // out from under our predicted hit point on long shots.
+    let v_true = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
     let (angle, turns, tx, ty, flight_time) =
-        lead_target(cache, shooter_id, target_id, 0, v)?;
+        lead_target(cache, shooter_id, target_id, 0, v_true)?;
+    // The blocker table is still keyed by the quantized bucket so different
+    // ship counts that round to the same speed share a cached table; the
+    // angle/flight_time we query it with come from the precise lead solve,
+    // which is the conservative direction (slight over-rejection at the
+    // boundary, never under-rejection).
     let table = cache.blocker_table(shooter_id, 0, ships);
     if is_blocked(&table, target_id, angle, flight_time) {
         return None;

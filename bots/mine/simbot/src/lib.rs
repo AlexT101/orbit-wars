@@ -6,6 +6,7 @@ mod constants;
 mod engine;
 mod entity_cache;
 mod helpers;
+mod hellburner;
 mod obnext;
 mod rollout;
 mod sim_probe;
@@ -178,7 +179,7 @@ impl Bot {
             cache,
         );
 
-        let moves = crate::obnext::plan(&world);
+        let moves = crate::hellburner::plan(&world);
         self.current_turn += 1;
         Ok(moves)
     }
@@ -216,7 +217,7 @@ impl Bot {
         let candidates = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
             let world = WorldState::from_engine(player, &initial_state, cache_ref);
-            crate::obnext::search_candidates(&world)
+            crate::hellburner::search_candidates(&world)
         };
 
         let cache_mut = self.cache.as_mut().expect("entity cache populated above");
@@ -224,8 +225,8 @@ impl Bot {
             &initial_state,
             player,
             candidates,
-            crate::obnext::plan,
-            crate::obnext::search_candidates,
+            crate::hellburner::plan,
+            crate::hellburner::search_candidates,
             cache_mut,
         );
         self.current_turn += 1;
