@@ -4,13 +4,13 @@
 
 #![allow(dead_code)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::constants::{CENTER, COMET_RADIUS, EPISODE_STEPS, ROTATION_LIMIT};
+use crate::blockers::{self, BlockerTable};
+use crate::constants::{CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, ROTATION_LIMIT};
 use crate::engine::{CometGroup, Planet};
-use crate::helpers::verify_shot_hits;
 
 /// Aim solver result tuple: `(angle, turns, target_x, target_y)`.
 pub type AimResult = (f64, i64, f64, f64);
@@ -18,12 +18,11 @@ pub type AimResult = (f64, i64, f64, f64);
 #[derive(Clone, Copy)]
 struct CachedAim {
     result: Option<AimResult>,
-    /// Value of `last_comet_spawn_step` when this entry was stored. Mismatch
-    /// against the cache's current value means a comet group has spawned (or
-    /// expired) since, so a `Some` result must be re-verified before reuse.
-    /// `None` results never need re-verification — new comets can only block
-    /// paths, never enable them.
-    comet_state: i64,
+    /// Absolute game turn at which this entry was stored. Used to decide
+    /// whether a [`COMET_SPAWN_STEPS`] event has occurred since (in which
+    /// case `Some` results need re-verification — new comets can only block
+    /// paths, never enable them, so `None` entries are valid forever).
+    stored_at_turn: i64,
 }
 
 /// Verdict from [`EntityCache::aim_cache_lookup`]. `Stale` means an entry
@@ -73,14 +72,17 @@ pub struct EntityCache {
     pub current_turn: i64,
     pub angular_velocity: f64,
     pub entities: HashMap<i64, Entity>,
-    /// Most recent absolute turn at which `refresh_comets` ran. Aim entries
-    /// stored with a different value of this field may reference a path now
-    /// blocked by a fresh comet and must be re-verified on lookup.
-    last_comet_spawn_step: i64,
     /// Per-turn aim cache. `aim_cache[abs_turn]` maps `(src, target, ships)`
     /// to a cached aim result. Indexed by absolute turn because aim geometry
     /// is fully determined by the source/target positions at that turn.
     aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
+    /// Lazily-built [`BlockerTable`]s keyed by
+    /// `(shooter_id, absolute_launch_turn, speed_bucket)`. Two different
+    /// `ships` counts that round to the same speed bucket share a table —
+    /// see [`blockers::speed_bucket`]. Cleared on comet spawn; orbiter
+    /// geometry is permanent but a fresh comet may have introduced entries
+    /// not in the cached table.
+    blocker_tables: Mutex<HashMap<(i64, i64, i64), Arc<BlockerTable>>>,
 }
 
 impl EntityCache {
@@ -114,12 +116,14 @@ impl EntityCache {
             current_turn: current_step,
             angular_velocity,
             entities,
-            last_comet_spawn_step: 0,
             aim_cache: Mutex::new(aim_cache),
+            blocker_tables: Mutex::new(HashMap::default()),
         }
     }
 
-    /// Drop expired comet entries and add newly-spawned ones
+    /// Drop expired comet entries and add newly-spawned ones. Also clears the
+    /// blocker-table cache: orbiter geometry is permanent but cached tables
+    /// may have been built without the freshly-spawned comets.
     pub fn refresh_comets(
         &mut self,
         comets: &[CometGroup],
@@ -139,10 +143,7 @@ impl EntityCache {
             }
         }
 
-        // A new comet may now block paths cached on prior turns. Bumping
-        // `last_comet_spawn_step` invalidates the comet_state stamp on every
-        // existing `Some` entry, so they get lazily re-verified on next lookup.
-        self.last_comet_spawn_step = current_step;
+        self.blocker_tables.get_mut().unwrap().clear();
     }
 
     #[inline]
@@ -155,14 +156,45 @@ impl EntityCache {
         self.entities.get(&id)
     }
 
+    /// Cached blocker table for `(shooter_id, launch_turn_offset, ships)`.
+    /// Keyed internally by the *absolute* launch turn so the same entry is
+    /// reused across `set_current_turn` calls during rollout forward-sim,
+    /// and by the *speed bucket* so different `ships` counts that round to
+    /// the same fleet speed share one table.
+    pub fn blocker_table(
+        &self,
+        shooter_id: i64,
+        launch_turn_offset: i64,
+        ships: i64,
+    ) -> Arc<BlockerTable> {
+        let bucket = blockers::speed_bucket(ships);
+        let abs_launch = self.current_turn + launch_turn_offset;
+        let key = (shooter_id, abs_launch, bucket);
+        if let Some(t) = self.blocker_tables.lock().unwrap().get(&key) {
+            return t.clone();
+        }
+        let v = blockers::bucket_to_speed(bucket);
+        let table = Arc::new(blockers::build_blocker_table(
+            self,
+            shooter_id,
+            launch_turn_offset,
+            v,
+        ));
+        self.blocker_tables
+            .lock()
+            .unwrap()
+            .insert(key, table.clone());
+        table
+    }
+
     /// Look up a cached aim result keyed at the current absolute turn.
     ///
-    /// `Some` entries stored before the most recent comet spawn are
+    /// `Some` entries stored across a [`COMET_SPAWN_STEPS`] boundary are
     /// re-verified against the current obstacle set: passing entries are
-    /// returned (with `turn_stored` refreshed so the next lookup is free);
-    /// failing entries are evicted and reported as `Stale` so the caller
-    /// recomputes. `None` (no-shot) entries are valid forever — a new comet
-    /// can only block paths, never enable them.
+    /// returned (with `stored_at_turn` refreshed so the next lookup is free);
+    /// failing entries are evicted and reported as `Stale`. `None` entries
+    /// never need re-verification — a fresh comet can only block paths,
+    /// never enable them.
     pub fn aim_cache_lookup(&self, src: i64, target: i64, ships: i64) -> AimCacheVerdict {
         let slot = self.current_turn;
         if slot < 0 || (slot as usize) >= EPISODE_STEPS as usize {
@@ -181,31 +213,17 @@ impl EntityCache {
 
         match entry.result {
             None => AimCacheVerdict::Hit(None),
-            Some(result) if entry.comet_state == self.last_comet_spawn_step => {
-                AimCacheVerdict::Hit(Some(result))
-            }
             Some(result) => {
+                if !comet_spawn_crossed(entry.stored_at_turn, self.current_turn) {
+                    return AimCacheVerdict::Hit(Some(result));
+                }
                 let (angle, turns, _, _) = result;
-                let src_radius = match self.get(src) {
-                    Some(ent) => ent.radius,
-                    None => {
-                        self.aim_cache.lock().unwrap()[slot].remove(&key);
-                        return AimCacheVerdict::Stale;
-                    }
-                };
-                let [sx, sy] = match self.position(src, 0) {
-                    Some(p) => p,
-                    None => {
-                        self.aim_cache.lock().unwrap()[slot].remove(&key);
-                        return AimCacheVerdict::Stale;
-                    }
-                };
-                if verify_shot_hits(sx, sy, src_radius, angle, turns, ships, target, self) {
+                if blockers::shot_still_clear(self, src, target, ships, angle, turns) {
                     self.aim_cache.lock().unwrap()[slot].insert(
                         key,
                         CachedAim {
                             result: Some(result),
-                            comet_state: self.last_comet_spawn_step,
+                            stored_at_turn: self.current_turn,
                         },
                     );
                     AimCacheVerdict::Hit(Some(result))
@@ -225,7 +243,7 @@ impl EntityCache {
         }
         let entry = CachedAim {
             result,
-            comet_state: self.last_comet_spawn_step,
+            stored_at_turn: self.current_turn,
         };
         self.aim_cache.lock().unwrap()[slot as usize].insert((src, target, ships), entry);
     }
@@ -269,6 +287,19 @@ impl EntityCache {
         }
         (EPISODE_STEPS - self.current_turn).max(0)
     }
+}
+
+/// `true` iff any [`COMET_SPAWN_STEPS`] tick falls in `(stored, current]`.
+/// Comets always spawn on these fixed game steps, so this is the exact
+/// criterion for "the obstacle set may have grown since the cache write."
+#[inline]
+fn comet_spawn_crossed(stored: i64, current: i64) -> bool {
+    if current <= stored {
+        return false;
+    }
+    COMET_SPAWN_STEPS
+        .iter()
+        .any(|&s| s > stored && s <= current)
 }
 
 fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {

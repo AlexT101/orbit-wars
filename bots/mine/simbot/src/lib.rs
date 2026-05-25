@@ -1,6 +1,7 @@
 //! The Python wrapper (`main.py`) instantiates one [`Bot`] at import time and
 //! forwards every observation through `Bot::compute_moves`.
 
+mod blockers;
 mod constants;
 mod engine;
 mod entity_cache;

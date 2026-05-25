@@ -2,12 +2,11 @@
 
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::constants::{
-    CENTER, EDGE_AIM_FRACS, HORIZON, FWD_ITER_MAX, INTERCEPT_TOLERANCE, LAUNCH_CLEARANCE,
-    MAX_SHIP_SPEED, SUN_RADIUS,
-};
+use crate::constants::{CENTER, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS};
 
-use crate::engine::{Planet, Fleet, EngineState, swept_pair_hit};
+use crate::blockers;
+pub use crate::blockers::AimResult;
+use crate::engine::{EngineState, Fleet, Planet};
 use crate::entity_cache::EntityCache;
 use crate::sim_probe::SimProbe;
 pub use crate::sim_probe::ArrivalEvent;
@@ -76,27 +75,42 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
     (sx + angle.cos() * c, sy + angle.sin() * c)
 }
 
-/// Counts distinct active players: every non-neutral planet owner plus every
-/// fleet owner. Floored at 2 since a match always has at least two players,
-/// even if one is currently wiped off the map but still has a fleet in flight.
+/// Public aim entry point. Delegates to the parametric blocker pipeline in
+/// [`crate::blockers`]: lead the target with Newton iteration, then reject
+/// the shot if any blocker (sun, static planet, orbiter, comet) covers the
+/// resulting `(angle, flight_time)` pair.
+#[inline]
+pub fn aim_with_prediction(
+    cache: &EntityCache,
+    shooter_id: i64,
+    target_id: i64,
+    ships: i64,
+) -> Option<AimResult> {
+    blockers::aim_with_prediction(cache, shooter_id, target_id, ships)
+}
+
+/// Returns the engine's player-slot count: `max_owner + 1` across all
+/// non-neutral planets and fleets, floored at 2. Engine code indexes into
+/// per-player arrays by owner id directly, so the slot count has to be
+/// large enough to hold the *highest* owner id — not just the distinct
+/// count. E.g. in a 4P game where players 1 and 2 have been wiped but a
+/// planet is still owned by player 3, the distinct count is 2 but we need
+/// 4 slots (indices 0..=3).
 ///
-/// Player ids are always in `0..MAX_PLAYERS` (or -1 for neutral), so we use a
-/// fixed-size bitset instead of a HashSet — no allocation, no hashing.
+/// Player ids are always in `0..MAX_PLAYERS` (or -1 for neutral).
 pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
     use crate::constants::MAX_PLAYERS;
-    let mut seen = [false; MAX_PLAYERS];
-    let mark = |owner: i64, seen: &mut [bool; MAX_PLAYERS]| {
-        if owner >= 0 && (owner as usize) < MAX_PLAYERS {
-            seen[owner as usize] = true;
-        }
-    };
+    let mut max_owner: i64 = -1;
     for p in planets {
-        mark(p.owner, &mut seen);
+        if p.owner > max_owner { max_owner = p.owner; }
     }
     for f in fleets {
-        mark(f.owner, &mut seen);
+        if f.owner > max_owner { max_owner = f.owner; }
     }
-    let n = seen.iter().filter(|&&v| v).count();
+    if max_owner < 0 {
+        return 2;
+    }
+    let n = (max_owner as usize + 1).min(MAX_PLAYERS);
     n.max(2)
 }
 
@@ -122,317 +136,13 @@ pub fn sorted_by_distance_to(
 }
 
 
-// ── Aiming Helpers ────────────────────────────────────────────────────────────
-// Solve for a shot that hits a (possibly moving) target.
-// Layered approach: distance estimators → sun-bypass sampling → verification → solvers.
+// ── Aiming Helpers (moved to crate::blockers) ───────────────────────────────
+// The old multi-stage aim chain (`safe_angle_and_distance`,
+// `estimate_arrival*`, `arc_safe_angle`, `aim_raw`, `verify_shot_hits`,
+// `search_safe_intercept`) was replaced by [`crate::blockers`]'s parametric
+// (aim, flight_time) band test. The public entry point lives at
+// [`aim_with_prediction`] above.
 
-/// Calculates angle and travel distance between points
-/// Returns `None` if direct path blocked by sun
-pub fn safe_angle_and_distance(
-    sx: f64, sy: f64, sr: f64,
-    tx: f64, ty: f64, tr: f64,
-) -> Option<(f64, f64)> {
-    let angle = (ty - sy).atan2(tx - sx);
-    let (lx, ly) = launch_point(sx, sy, sr, angle);
-    let hit_dist = (dist(sx, sy, tx, ty) - sr - LAUNCH_CLEARANCE - tr).max(0.0);
-    let ex = lx + angle.cos() * hit_dist;
-    let ey = ly + angle.sin() * hit_dist;
-    if segment_hits_sun(lx, ly, ex, ey) {
-        return None;
-    }
-    Some((angle, hit_dist))
-}
-
-/// Calculate turns to travel distance at given fleet size, without rounding
-#[inline]
-fn fractional_turns(total_d: f64, ships: i64) -> f64 {
-    total_d / fleet_speed(ships)
-}
-
-/// Fractional turn count used for convergence comparisons
-#[inline]
-pub fn estimate_arrival_frac(
-    sx: f64, sy: f64, sr: f64,
-    tx: f64, ty: f64, tr: f64,
-    ships: i64,
-) -> Option<(f64, f64)> {
-    let (angle, total_d) = safe_angle_and_distance(sx, sy, sr, tx, ty, tr)?;
-    let turns = fractional_turns(total_d, ships).max(1.0);
-    Some((angle, turns))
-}
-
-/// Integer-turn turn count
-#[inline]
-pub fn estimate_arrival(
-    sx: f64, sy: f64, sr: f64,
-    tx: f64, ty: f64, tr: f64,
-    ships: i64,
-) -> Option<(f64, i64)> {
-    let (angle, frac_turns) =
-        estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships)?;
-    let turns = (frac_turns.ceil() as i64).max(1);
-    Some((angle, turns))
-}
-
-/// Sun-bypass chord sampling. Samples aim-points across the target's disk
-/// (center plus `EDGE_AIM_FRACS` mirrored offsets) and returns the one with
-/// the shortest clear path. A chord aimed at the edge of a disk can clear
-/// the sun when a center-aimed shot can't.
-pub fn arc_safe_angle(
-    sx: f64, sy: f64, sr: f64,
-    tx: f64, ty: f64, tr: f64,
-    ships: i64,
-) -> Option<(f64, i64)> {
-    let dx = tx - sx;
-    let dy = ty - sy;
-    let d = dx.hypot(dy);
-    if d < 1e-9 {
-        return None;
-    }
-    let ux = dx / d;
-    let uy = dy / d;
-    let nx = -uy;
-    let ny = ux;
-
-    // 1 center + 2 mirrored offsets per fraction → 1 + 2 * N candidate aims.
-    let mut aim_points: Vec<(f64, f64)> = Vec::with_capacity(1 + 2 * EDGE_AIM_FRACS.len());
-    aim_points.push((tx, ty));
-    for &frac in EDGE_AIM_FRACS.iter() {
-        let off = tr * frac;
-        aim_points.push((tx + nx * off, ty + ny * off));
-        aim_points.push((tx - nx * off, ty - ny * off));
-    }
-
-    // Score is (turns, entry_dist) — fewer turns first, then shortest dist.
-    let mut best: Option<((i64, f64), f64, i64)> = None;
-    for (ax, ay) in aim_points {
-        let angle = (ay - sy).atan2(ax - sx);
-        let (lx, ly) = launch_point(sx, sy, sr, angle);
-        let rvx = angle.cos();
-        let rvy = angle.sin();
-        let cx = tx - lx;
-        let cy = ty - ly;
-        let proj = cx * rvx + cy * rvy;
-        let closest_sq = cx * cx + cy * cy - proj * proj;
-        if proj <= 0.0 || closest_sq > tr * tr {
-            continue;
-        }
-        let entry_dist = (proj - (tr * tr - closest_sq).max(0.0).sqrt()).max(0.0);
-        let ex = lx + rvx * entry_dist;
-        let ey = ly + rvy * entry_dist;
-        if segment_hits_sun(lx, ly, ex, ey) {
-            continue;
-        }
-        let turns = (fractional_turns(entry_dist, ships).ceil() as i64).max(1);
-        let score = (turns, entry_dist);
-        let better = match &best {
-            None => true,
-            Some((cur, _, _)) => score.0 < cur.0 || (score.0 == cur.0 && score.1 < cur.1),
-        };
-        if better {
-            best = Some((score, angle, turns));
-        }
-    }
-    best.map(|(_, angle, turns)| (angle, turns))
-}
-
-/// Forward-sim scan window — `max(8, turns / 2)`, wide enough for slow
-/// fleets on long intercepts to still confirm the hit.
-#[inline]
-pub fn fwd_window(turns: i64) -> i64 {
-    (turns / 2).max(8)
-}
-
-/// Ground-truth forward-sim. Returns `true` only if the fleet physically hits
-/// the target within the scan window. Mandatory gate before any intercept is
-/// accepted.
-pub fn verify_shot_hits(
-    sx: f64, sy: f64, sr: f64,
-    angle: f64, turns: i64, ships: i64,
-    target_id: i64,
-    cache: &EntityCache,
-) -> bool {
-    let Some(target) = cache.get(target_id) else {
-        return false;
-    };
-    let tr = target.radius;
-    let speed = fleet_speed(ships);
-    let (mut fx, mut fy) = launch_point(sx, sy, sr, angle);
-    let vx = angle.cos() * speed;
-    let vy = angle.sin() * speed;
-    let window = fwd_window(turns);
-
-    // Target sweeps from position(t-1) → position(t) during step t, matching
-    // the engine's swept_pair_hit. Hoist prev_pos so we only do one cache
-    // lookup per iteration.
-    let mut prev_pos = cache.position(target_id, 0);
-    for t in 1..=(turns + window) {
-        let pfx = fx;
-        let pfy = fy;
-        fx += vx;
-        fy += vy;
-        if segment_hits_sun(pfx, pfy, fx, fy) {
-            return false;
-        }
-        let cur_pos = cache.position(target_id, t);
-        // Match engine PlanetPath semantics:
-        //   (Some, Some) normal flight,
-        //   (Some, None) comet expiry tick — stationary at prev, still collidable,
-        //   (None, _)    not on board yet (or already gone) — engine skips collision.
-        let (px0, py0, px1, py1) = match (prev_pos, cur_pos) {
-            (Some([x0, y0]), Some([x1, y1])) => (x0, y0, x1, y1),
-            (Some([x0, y0]), None) => (x0, y0, x0, y0),
-            _ => {
-                prev_pos = cur_pos;
-                continue;
-            }
-        };
-        if swept_pair_hit((pfx, pfy), (fx, fy), (px0, py0), (px1, py1), tr) {
-            return true;
-        }
-        prev_pos = cur_pos;
-    }
-    false
-}
-
-/// Iterative convergence solver. Calculates direct or sun-blocked trajectories
-/// by repeatedly refining the predicted intercept position. All results are
-/// UNVERIFIED — caller must verify via `verify_shot_hits`.
-pub fn aim_raw(
-    sx: f64, sy: f64, sr: f64,
-    target_id: i64,
-    ships: i64,
-    cache: &EntityCache,
-) -> Option<(f64, i64, f64, f64)> {
-    let target = cache.get(target_id)?;
-    let tr = target.radius;
-    let [mut tx, mut ty] = cache.position(target_id, 0)?;
-
-    let mut est = match estimate_arrival_frac(sx, sy, sr, tx, ty, tr, ships) {
-        Some(v) => v,
-        None => {
-            // Direct shot blocked by the sun — try a chord around it.
-            return arc_safe_angle(sx, sy, sr, tx, ty, tr, ships)
-                .map(|(a, t)| (a, t, tx, ty));
-        }
-    };
-
-    for _ in 0..FWD_ITER_MAX {
-        let (_, turns_f) = est;
-        let turns_i = turns_f.ceil() as i64;
-        let Some([ntx, nty]) = cache.position(target_id, turns_i) else {
-            return None;
-        };
-        let Some(next_est) = estimate_arrival_frac(sx, sy, sr, ntx, nty, tr, ships) else {
-            return arc_safe_angle(sx, sy, sr, ntx, nty, tr, ships)
-                .map(|(a, t)| (a, t, ntx, nty));
-        };
-        let (_, next_turns_f) = next_est;
-        if (ntx - tx).abs() < 0.3
-            && (nty - ty).abs() < 0.3
-            && (next_turns_f - turns_f).abs() <= INTERCEPT_TOLERANCE as f64
-        {
-            return match estimate_arrival(sx, sy, sr, ntx, nty, tr, ships) {
-                Some((a, t)) => Some((a, t, ntx, nty)),
-                None => arc_safe_angle(sx, sy, sr, ntx, nty, tr, ships)
-                    .map(|(a, t)| (a, t, ntx, nty)),
-            };
-        }
-        tx = ntx;
-        ty = nty;
-        est = next_est;
-    }
-
-    // Fallthrough: best effort with the last predicted position.
-    let final_turns = est.1.ceil() as i64;
-    let [fpx, fpy] = cache.position(target_id, final_turns)?;
-    match estimate_arrival(sx, sy, sr, fpx, fpy, tr, ships) {
-        Some((a, t)) => Some((a, t, fpx, fpy)),
-        None => arc_safe_angle(sx, sy, sr, fpx, fpy, tr, ships)
-            .map(|(a, t)| (a, t, fpx, fpy)),
-    }
-}
-
-/// Exhaustive scan: find the earliest valid intercept window. Every candidate
-/// is forward-sim verified before being accepted. Returns
-/// `(angle, turns, target_x, target_y)` on success.
-pub fn search_safe_intercept(
-    sx: f64, sy: f64, sr: f64,
-    target_id: i64,
-    ships: i64,
-    cache: &EntityCache,
-) -> Option<(f64, i64, f64, f64)> {
-    let target = cache.get(target_id)?;
-    let tr = target.radius;
-
-    let mut max_turns = HORIZON;
-    if target.is_comet() {
-        max_turns = max_turns.min((cache.remaining_life(target_id) - 1).max(0));
-    }
-
-    for candidate_turns in 1..=max_turns {
-        let Some([px, py]) = cache.position(target_id, candidate_turns) else {
-            continue;
-        };
-
-        let est = estimate_arrival(sx, sy, sr, px, py, tr, ships)
-            .or_else(|| arc_safe_angle(sx, sy, sr, px, py, tr, ships));
-        let Some((_, turns)) = est else {
-            continue;
-        };
-        if (turns - candidate_turns).abs() > INTERCEPT_TOLERANCE {
-            continue;
-        }
-
-        let actual_turns = turns.max(candidate_turns);
-        let Some([apx, apy]) = cache.position(target_id, actual_turns) else {
-            continue;
-        };
-
-        let confirm = estimate_arrival(sx, sy, sr, apx, apy, tr, ships)
-            .or_else(|| arc_safe_angle(sx, sy, sr, apx, apy, tr, ships));
-        let Some((angle_out, turns_out)) = confirm else {
-            continue;
-        };
-
-        if (turns_out - actual_turns).abs() > INTERCEPT_TOLERANCE {
-            continue;
-        }
-
-        // Verify before accepting — stops false positives in exhaustive search.
-        if verify_shot_hits(
-            sx, sy, sr, angle_out, turns_out, ships,
-            target_id, cache,
-        ) {
-            return Some((angle_out, turns_out, apx, apy));
-        }
-    }
-
-    None
-}
-
-/// Public solver. Returns `(angle, turns, target_x, target_y)` or `None`.
-/// Every `Some` result is verified by `verify_shot_hits` — callers will
-/// never send a fleet this predicts will miss.
-///
-/// Pipeline: `aim_raw` (fast iterative) → `verify_shot_hits` gate → fall
-/// back to `search_safe_intercept` (exhaustive, verifies internally) → `None`.
-pub fn aim_with_prediction(
-    sx: f64, sy: f64, sr: f64,
-    target_id: i64,
-    ships: i64,
-    cache: &EntityCache,
-) -> Option<(f64, i64, f64, f64)> {
-    if let Some(res) = aim_raw(sx, sy, sr, target_id, ships, cache) {
-        let (angle, turns, _, _) = res;
-        if verify_shot_hits(sx, sy, sr, angle, turns, ships, target_id, cache) {
-            return Some(res);
-        }
-    }
-
-    // Raw missed or failed to verify — exhaustive search (verifies internally).
-    search_safe_intercept(sx, sy, sr, target_id, ships, cache)
-}
 
 
 // ── Timeline Helpers ──────────────────────────────────────────────────────────

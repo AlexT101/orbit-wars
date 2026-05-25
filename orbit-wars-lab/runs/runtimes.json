@@ -1,126 +1,126 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-24T21:14:25.332356+00:00",
+  "last_updated": "2026-05-24T21:59:52.904381+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
-      "total_turns": 4116,
-      "total_seconds": 0.433558,
-      "avg_ms": 0.10533479105928086,
-      "last_updated": "2026-05-24T21:02:10.655991+00:00"
+      "total_turns": 4700,
+      "total_seconds": 0.655366,
+      "avg_ms": 0.1394395744680851,
+      "last_updated": "2026-05-24T21:59:05.027474+00:00"
     },
     "baselines/random": {
-      "total_turns": 2677,
-      "total_seconds": 0.12630199999999997,
-      "avg_ms": 0.04718042584983189,
-      "last_updated": "2026-05-24T21:02:27.027109+00:00"
+      "total_turns": 3179,
+      "total_seconds": 0.16184699999999996,
+      "avg_ms": 0.05091129285938974,
+      "last_updated": "2026-05-24T21:59:13.434724+00:00"
     },
     "baselines/starter": {
-      "total_turns": 2798,
-      "total_seconds": 0.4470770000000001,
-      "avg_ms": 0.15978448892065764,
-      "last_updated": "2026-05-24T21:02:29.015206+00:00"
-    },
-    "mine/simbot": {
-      "total_turns": 39270,
-      "total_seconds": 7920.015583000002,
-      "avg_ms": 201.6810690858162,
-      "last_updated": "2026-05-24T21:14:25.215477+00:00"
+      "total_turns": 3456,
+      "total_seconds": 0.5098310000000001,
+      "avg_ms": 0.1475205439814815,
+      "last_updated": "2026-05-24T21:58:45.802452+00:00"
     },
     "external/marco-dg": {
-      "total_turns": 2189,
-      "total_seconds": 690.9253899999999,
-      "avg_ms": 315.6351713111009,
-      "last_updated": "2026-05-24T21:04:59.691098+00:00"
+      "total_turns": 3215,
+      "total_seconds": 1123.2101569999998,
+      "avg_ms": 349.3655231726282,
+      "last_updated": "2026-05-24T21:59:52.791437+00:00"
     },
     "external/heuristic": {
-      "total_turns": 2515,
-      "total_seconds": 4.38665,
-      "avg_ms": 1.7441948310139166,
-      "last_updated": "2026-05-24T21:03:37.755682+00:00"
+      "total_turns": 3677,
+      "total_seconds": 6.410691,
+      "avg_ms": 1.7434568942072342,
+      "last_updated": "2026-05-24T21:59:26.518948+00:00"
     },
     "external/obnext": {
-      "total_turns": 2276,
-      "total_seconds": 560.707724,
-      "avg_ms": 246.35664499121265,
-      "last_updated": "2026-05-24T21:06:21.550477+00:00"
+      "total_turns": 2980,
+      "total_seconds": 701.2409759999998,
+      "avg_ms": 235.3157637583892,
+      "last_updated": "2026-05-24T21:57:24.358516+00:00"
     },
     "external/owproto": {
-      "total_turns": 2518,
-      "total_seconds": 44.374161,
-      "avg_ms": 17.622780381254966,
-      "last_updated": "2026-05-24T21:05:46.602750+00:00"
+      "total_turns": 3622,
+      "total_seconds": 66.052999,
+      "avg_ms": 18.236609331860848,
+      "last_updated": "2026-05-24T21:57:11.012243+00:00"
     },
     "external/peaking-bot": {
-      "total_turns": 2029,
-      "total_seconds": 195.783474,
-      "avg_ms": 96.4925943814687,
-      "last_updated": "2026-05-24T21:05:25.255891+00:00"
+      "total_turns": 2765,
+      "total_seconds": 253.014055,
+      "avg_ms": 91.50598734177217,
+      "last_updated": "2026-05-24T21:54:01.604282+00:00"
     },
     "external/pilkwang-structured": {
-      "total_turns": 2030,
-      "total_seconds": 413.42007199999995,
-      "avg_ms": 203.65520788177338,
-      "last_updated": "2026-05-24T21:05:43.785809+00:00"
+      "total_turns": 2806,
+      "total_seconds": 552.9610299999999,
+      "avg_ms": 197.06380256593013,
+      "last_updated": "2026-05-24T21:55:37.161521+00:00"
     },
     "external/ppo": {
-      "total_turns": 2312,
-      "total_seconds": 305.76673200000005,
-      "avg_ms": 132.2520467128028,
-      "last_updated": "2026-05-24T21:06:07.076215+00:00"
+      "total_turns": 3120,
+      "total_seconds": 436.828177,
+      "avg_ms": 140.0090310897436,
+      "last_updated": "2026-05-24T21:53:39.973927+00:00"
     },
     "external/sigmaborov-reinforce": {
-      "total_turns": 2024,
-      "total_seconds": 68.982456,
-      "avg_ms": 34.082241106719366,
-      "last_updated": "2026-05-24T21:06:07.026221+00:00"
+      "total_turns": 2802,
+      "total_seconds": 95.310629,
+      "avg_ms": 34.01521377587437,
+      "last_updated": "2026-05-24T21:51:43.474009+00:00"
     },
     "external/smart-baseline": {
-      "total_turns": 2275,
-      "total_seconds": 333.179171,
-      "avg_ms": 146.45238285714285,
-      "last_updated": "2026-05-24T21:08:06.090404+00:00"
+      "total_turns": 2976,
+      "total_seconds": 455.06054,
+      "avg_ms": 152.91012768817205,
+      "last_updated": "2026-05-24T21:51:50.880156+00:00"
     },
     "external/sim-search": {
-      "total_turns": 2277,
-      "total_seconds": 677.062827,
-      "avg_ms": 297.348628458498,
-      "last_updated": "2026-05-24T21:08:37.329290+00:00"
+      "total_turns": 3436,
+      "total_seconds": 1039.519696,
+      "avg_ms": 302.5377462165308,
+      "last_updated": "2026-05-24T21:56:22.157333+00:00"
     },
     "external/structured-v4": {
-      "total_turns": 2135,
-      "total_seconds": 355.894437,
-      "avg_ms": 166.69528665105383,
-      "last_updated": "2026-05-24T21:08:31.727494+00:00"
+      "total_turns": 2845,
+      "total_seconds": 486.625071,
+      "avg_ms": 171.04571915641475,
+      "last_updated": "2026-05-24T21:51:13.557366+00:00"
     },
     "external/tamrazov-starwars": {
-      "total_turns": 3547,
-      "total_seconds": 821.9025780000001,
-      "avg_ms": 231.71767070764025,
-      "last_updated": "2026-05-24T21:14:25.215501+00:00"
+      "total_turns": 4361,
+      "total_seconds": 976.255801,
+      "avg_ms": 223.86053680348545,
+      "last_updated": "2026-05-24T21:51:48.594747+00:00"
     },
     "external/ykhnkf-distance-prioritized": {
-      "total_turns": 2130,
-      "total_seconds": 426.413121,
-      "avg_ms": 200.19395352112676,
-      "last_updated": "2026-05-24T21:09:47.973169+00:00"
+      "total_turns": 2798,
+      "total_seconds": 548.62359,
+      "avg_ms": 196.07705146533237,
+      "last_updated": "2026-05-24T21:50:38.909568+00:00"
     },
     "external/yuriygreben-architect": {
-      "total_turns": 2034,
-      "total_seconds": 328.825428,
-      "avg_ms": 161.66441887905606,
-      "last_updated": "2026-05-24T21:10:26.416243+00:00"
+      "total_turns": 2794,
+      "total_seconds": 447.62416300000007,
+      "avg_ms": 160.20907766642807,
+      "last_updated": "2026-05-24T21:50:29.207499+00:00"
     },
     "mine/simbot_wide": {
-      "total_turns": 2980,
-      "total_seconds": 409.93612200000007,
-      "avg_ms": 137.5624570469799,
-      "last_updated": "2026-05-24T21:11:46.941069+00:00"
+      "total_turns": 3990,
+      "total_seconds": 631.558444,
+      "avg_ms": 158.28532431077693,
+      "last_updated": "2026-05-24T21:49:34.297369+00:00"
     },
     "mine/simbot-simplified": {
-      "total_turns": 5,
-      "total_seconds": 0.064305,
-      "avg_ms": 12.861,
-      "last_updated": "2026-05-24T21:11:44.701048+00:00"
+      "total_turns": 10,
+      "total_seconds": 0.11037399999999999,
+      "avg_ms": 11.0374,
+      "last_updated": "2026-05-24T21:49:26.681672+00:00"
+    },
+    "mine/simbot": {
+      "total_turns": 14005,
+      "total_seconds": 3470.8671829999994,
+      "avg_ms": 247.83057358086393,
+      "last_updated": "2026-05-24T21:59:52.791419+00:00"
     }
   }
 }

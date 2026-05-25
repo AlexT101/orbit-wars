@@ -1,3 +1,4 @@
+mod blockers;
 mod engine;
 mod entity_cache;
 mod obnext;

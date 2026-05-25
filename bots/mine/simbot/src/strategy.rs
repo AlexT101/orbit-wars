@@ -6,7 +6,7 @@
 
 use rustc_hash::FxHashSet as HashSet;
 
-use crate::engine::{EngineState, Planet};
+use crate::engine::{EngineState};
 use crate::entity_cache::EntityCache;
 use crate::obnext::{
     build_mission_artifacts, patient_targets, plan_from_artifacts, MissionArtifacts, PlanProfile,

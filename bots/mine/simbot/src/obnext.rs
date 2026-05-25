@@ -326,10 +326,7 @@ impl<'a> WorldModel<'a> {
         let result = match self.entity_cache.aim_cache_lookup(src_id, target_id, ships) {
             AimCacheVerdict::Hit(r) => r,
             AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
-                let src = self.planet(src_id);
-                let r = aim_with_prediction(
-                    src.x, src.y, src.radius, target_id, ships, self.entity_cache,
-                );
+                let r = aim_with_prediction(self.entity_cache, src_id, target_id, ships);
                 self.entity_cache.aim_cache_store(src_id, target_id, ships, r);
                 r
             }

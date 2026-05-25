@@ -1,0 +1,301 @@
+//! Simulation-oriented tests for the parametric blocker tester in
+//! [`crate::blockers`]. For both verdicts of [`aim_with_prediction`] we
+//! independently re-simulate the fleet trajectory and the per-turn swept-pair
+//! collision against every obstacle, and require the two to agree.
+
+use crate::blockers::{aim_with_prediction, bucket_to_speed, lead_target, speed_bucket};
+use crate::constants::{CENTER, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
+use crate::engine::{swept_pair_hit, Configuration, EngineState};
+use crate::entity_cache::EntityCache;
+
+fn cache_for(state: &EngineState) -> EntityCache {
+    EntityCache::build(
+        &state.initial_planets,
+        &state.comets,
+        &state.comet_planet_ids,
+        state.angular_velocity,
+        state.step,
+    )
+}
+
+/// Ground truth: at the **quantized** fleet speed (so we test the same speed
+/// the blocker table was built against), step the fleet one turn at a time and
+/// run the engine's own [`swept_pair_hit`] against every non-target obstacle
+/// and the sun. Returns the first colliding `(turn, blocker_id)`, where
+/// `blocker_id == -1` represents the sun (which is not stored in
+/// [`EntityCache::entities`]).
+fn ground_truth_collision(
+    cache: &EntityCache,
+    shooter_id: i64,
+    target_id: i64,
+    angle: f64,
+    ships: i64,
+    flight_time: f64,
+) -> Option<(i64, i64)> {
+    let v = bucket_to_speed(speed_bucket(ships));
+    let [lx, ly] = cache.position(shooter_id, 0)?;
+    let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
+    let launch_offset = shooter_radius + LAUNCH_CLEARANCE;
+    let cosa = angle.cos();
+    let sina = angle.sin();
+    let fleet_at = |k: f64| {
+        (
+            lx + (launch_offset + k * v) * cosa,
+            ly + (launch_offset + k * v) * sina,
+        )
+    };
+
+    // Simulate full per-turn chords up to `floor(flight_time)`, plus a partial
+    // chord ending at exactly `flight_time` for the turn containing target
+    // arrival. Stopping at `flight_time` matters because once the fleet
+    // reaches its target it is consumed by the engine — a swept-pair
+    // intersection at `s > (flight_time − floor(flight_time))` of the
+    // arrival turn happens *after* the fleet has ceased to exist and is
+    // therefore not a real collision the aimer needs to predict.
+    let full_turns = flight_time.floor() as i64;
+    let frac = flight_time - full_turns as f64;
+    let last_t = if frac > 1e-9 {
+        full_turns + 1
+    } else {
+        full_turns
+    };
+
+    for t in 1..=last_t {
+        let s_end = if t == last_t && frac > 1e-9 {
+            frac
+        } else {
+            1.0
+        };
+        let a = fleet_at((t - 1) as f64);
+        let b = fleet_at((t - 1) as f64 + s_end);
+
+        // Sun is a stationary disk at the board center; it isn't represented
+        // as an Entity but the blocker table seeds it explicitly, so we have
+        // to test it explicitly here too.
+        if swept_pair_hit(a, b, (CENTER, CENTER), (CENTER, CENTER), SUN_RADIUS) {
+            return Some((t, -1));
+        }
+
+        for (&bid, ent) in &cache.entities {
+            if bid == shooter_id || bid == target_id {
+                continue;
+            }
+            let Some([q0x, q0y]) = cache.position(bid, t - 1) else {
+                continue;
+            };
+            let Some([q1x, q1y]) = cache.position(bid, t) else {
+                continue;
+            };
+            // Same partial-chord truncation for the blocker side: we only
+            // need its position over `s ∈ [0, s_end]`, not the full turn.
+            let q_end_x = q0x + s_end * (q1x - q0x);
+            let q_end_y = q0y + s_end * (q1y - q0y);
+            if swept_pair_hit(a, b, (q0x, q0y), (q_end_x, q_end_y), ent.radius) {
+                return Some((t, bid));
+            }
+        }
+    }
+    None
+}
+
+/// All ids present in the cache at turn 0, sorted for reproducible iteration.
+fn entity_ids_at_t0(cache: &EntityCache) -> Vec<i64> {
+    let mut ids: Vec<i64> = cache
+        .entities
+        .iter()
+        .filter(|(_, e)| e.positions[0].is_some())
+        .map(|(&id, _)| id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// For every (shooter, target, ships) case where the aimer says "path clear",
+/// re-simulate the fleet and require that no non-target obstacle's swept
+/// per-turn pair test fires before the fleet reaches the target.
+///
+/// This is the "no false negatives" direction: if the aimer green-lights a
+/// shot, the shot must really be unobstructed under the engine's own
+/// collision primitive.
+#[test]
+fn clear_verdicts_survive_swept_pair_resimulation() {
+    let seeds = [42u64, 7, 100, 1234, 2025];
+    let ships_grid = [5i64, 50, 500];
+
+    let mut clear_cases = 0usize;
+    for seed in seeds {
+        let state = EngineState::new(seed, 2, Configuration::default());
+        let cache = cache_for(&state);
+        let ids = entity_ids_at_t0(&cache);
+
+        for &shooter in &ids {
+            for &target in &ids {
+                if shooter == target {
+                    continue;
+                }
+                for &ships in &ships_grid {
+                    let Some((angle, turns, _, _)) =
+                        aim_with_prediction(&cache, shooter, target, ships)
+                    else {
+                        continue;
+                    };
+                    let v = bucket_to_speed(speed_bucket(ships));
+                    let Some((_, _, _, _, flight_time)) =
+                        lead_target(&cache, shooter, target, 0, v)
+                    else {
+                        continue;
+                    };
+
+                    // Cap at HORIZON: the table only sees obstacles within
+                    // HORIZON turns of launch by design — past that the
+                    // aimer is silent, not wrong.
+                    let sim_time = flight_time.min(HORIZON as f64);
+                    let collision = ground_truth_collision(
+                        &cache, shooter, target, angle, ships, sim_time,
+                    );
+                    if let Some((t, bid)) = collision {
+                        panic!(
+                            "seed={seed} ships={ships} shooter={shooter} target={target} \
+                             angle={angle:.6} turns={turns} flight_time={flight_time:.3}: \
+                             aimer says CLEAR but engine swept_pair_hit reports collision \
+                             with blocker {bid} on turn {t}"
+                        );
+                    }
+                    clear_cases += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        clear_cases > 200,
+        "expected hundreds of clear verdicts across {} seeds, only saw {clear_cases}",
+        seeds.len()
+    );
+}
+
+/// For every case where the aimer rejects a path, take the angle
+/// [`lead_target`] proposed and require the same swept-pair re-simulation to
+/// find a real collision with some non-target obstacle within the same
+/// flight-time budget.
+///
+/// This is the "no false positives" direction: if the aimer red-lights a
+/// shot, the engine's own collision primitive at that exact angle must agree
+/// that something is in the way.
+#[test]
+fn blocked_verdicts_correspond_to_real_collisions() {
+    let seeds = [42u64, 7, 100, 1234, 2025];
+    let ships_grid = [5i64, 50, 500];
+
+    let mut blocked_cases = 0usize;
+    let mut missing = Vec::new();
+
+    for seed in seeds {
+        let state = EngineState::new(seed, 2, Configuration::default());
+        let cache = cache_for(&state);
+        let ids = entity_ids_at_t0(&cache);
+
+        for &shooter in &ids {
+            for &target in &ids {
+                if shooter == target {
+                    continue;
+                }
+                for &ships in &ships_grid {
+                    let v = bucket_to_speed(speed_bucket(ships));
+                    let Some((angle, turns, _, _, flight_time)) =
+                        lead_target(&cache, shooter, target, 0, v)
+                    else {
+                        continue;
+                    };
+                    if aim_with_prediction(&cache, shooter, target, ships).is_some() {
+                        continue;
+                    }
+
+                    let collision = ground_truth_collision(
+                        &cache, shooter, target, angle, ships, flight_time,
+                    );
+                    if collision.is_none() {
+                        missing.push(format!(
+                            "seed={seed} ships={ships} shooter={shooter} target={target} \
+                             angle={angle:.6} turns={turns} flight_time={flight_time:.3}: \
+                             aimer says BLOCKED but no swept_pair_hit found within \
+                             flight_time"
+                        ));
+                    }
+                    blocked_cases += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "{} aimer-blocked cases had no corresponding swept_pair_hit collision:\n  {}",
+        missing.len(),
+        missing.join("\n  "),
+    );
+    assert!(
+        blocked_cases > 50,
+        "expected dozens of blocked verdicts across {} seeds, only saw {blocked_cases}",
+        seeds.len()
+    );
+}
+
+/// Targeted obvious case: any pair of static planets whose connecting chord
+/// passes well inside the sun's destruction radius must be rejected by the
+/// aimer. Catches catastrophic regressions even if the random sweep above
+/// happens to miss the sun-blocking geometry on these seeds.
+#[test]
+fn sun_blocks_chords_passing_through_center() {
+    let state = EngineState::new(42, 2, Configuration::default());
+    let cache = cache_for(&state);
+
+    let statics: Vec<(i64, f64, f64, f64)> = cache
+        .entities
+        .values()
+        .filter(|e| e.is_static())
+        .filter_map(|e| e.positions[0].map(|p| (e.id, p[0], p[1], e.radius)))
+        .collect();
+
+    let mut tested = 0usize;
+    for &(a_id, ax, ay, _) in &statics {
+        for &(b_id, bx, by, _) in &statics {
+            if a_id == b_id {
+                continue;
+            }
+            let dx = bx - ax;
+            let dy = by - ay;
+            let len2 = dx * dx + dy * dy;
+            if len2 < 1.0 {
+                continue;
+            }
+            // Closest approach of the (infinite) line a→b to the sun center.
+            let t = ((CENTER - ax) * dx + (CENTER - ay) * dy) / len2;
+            if !(0.05..=0.95).contains(&t) {
+                continue;
+            }
+            let px = ax + t * dx;
+            let py = ay + t * dy;
+            let sun_d = ((px - CENTER).powi(2) + (py - CENTER).powi(2)).sqrt();
+            // Require the chord to pass at least 2 units inside the sun
+            // boundary — well past any floating-point ambiguity.
+            if sun_d > SUN_RADIUS - 2.0 {
+                continue;
+            }
+
+            for ships in [5i64, 50, 500] {
+                let verdict = aim_with_prediction(&cache, a_id, b_id, ships);
+                assert!(
+                    verdict.is_none(),
+                    "shooter={a_id} target={b_id} ships={ships}: chord passes \
+                     {sun_d:.2} from sun center (sun radius {SUN_RADIUS}) yet aimer says CLEAR \
+                     (got {verdict:?})"
+                );
+                tested += 1;
+            }
+        }
+    }
+    assert!(
+        tested > 0,
+        "seed 42 should contain at least one diametrically opposite static pair"
+    );
+}
