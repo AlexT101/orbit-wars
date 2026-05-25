@@ -1,12 +1,12 @@
 /**
- * Replays view — unified list of local tournament matches + Kaggle-scraped
- * episodes, with a "Pobierz z Kaggle" dialog to fetch more episodes for a
- * given submission_id.
+ * Replays view - unified list of local tournament matches + Kaggle-scraped
+ * episodes, with an import panel to fetch more episodes for a given
+ * submission_id.
  */
 
 import { installHeaderNav } from "../components/header-nav";
 import { navigate } from "../router";
-import { api } from "../api";
+import { api, AgentInfo } from "../api";
 import { escapeHtml } from "../utils/escape";
 
 interface LocalReplay {
@@ -34,10 +34,139 @@ interface KaggleReplay {
 }
 
 type Replay = LocalReplay | KaggleReplay;
-
 type Source = "all" | "local" | "kaggle";
+type SortOrder = "newest" | "oldest" | "turns-desc" | "turns-asc";
+type AgentBucket = AgentInfo["bucket"];
+
+interface ReplayParticipant {
+  rawName: string;
+  displayName: string;
+  bucket: AgentBucket | null;
+  searchText: string;
+}
+
+type ReplaysFilter = {
+  source: Source;
+  sort: SortOrder;
+  searchA: string;
+  searchB: string;
+};
+
+const KNOWN_BUCKETS = new Set<AgentBucket>(["baselines", "external", "mine"]);
+const FILTER_KEY = "ow-replays-filter";
 
 let pollInterval: number | null = null;
+
+function normalizeSearchTerm(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function splitAgentId(raw: string): { bucket: AgentBucket | null; shortId: string } {
+  const parts = raw.split("/");
+  if (parts.length >= 2 && KNOWN_BUCKETS.has(parts[0] as AgentBucket)) {
+    return {
+      bucket: parts[0] as AgentBucket,
+      shortId: parts.slice(1).join("/"),
+    };
+  }
+  return { bucket: null, shortId: raw };
+}
+
+function agentLookupKeys(agent: AgentInfo): string[] {
+  const { shortId } = splitAgentId(agent.id);
+  return [
+    agent.id,
+    agent.name,
+    shortId,
+    `${agent.name} (${agent.bucket})`,
+    `${agent.bucket}/${shortId}`,
+  ];
+}
+
+function makeParticipant(
+  rawName: string,
+  agentsById: Map<string, AgentInfo>,
+  agentsByKey: Map<string, AgentInfo>,
+): ReplayParticipant {
+  const direct = agentsById.get(rawName);
+  const normalizedRaw = normalizeSearchTerm(rawName);
+  const known = direct ?? agentsByKey.get(normalizedRaw) ?? null;
+  if (known) {
+    const { shortId } = splitAgentId(known.id);
+    return {
+      rawName,
+      displayName: known.name,
+      bucket: known.bucket,
+      searchText: [
+        known.id,
+        known.name,
+        shortId,
+        `${known.name} (${known.bucket})`,
+        rawName,
+      ]
+        .map(normalizeSearchTerm)
+        .filter(Boolean)
+        .join("\n"),
+    };
+  }
+
+  const { bucket, shortId } = splitAgentId(rawName);
+  const displayName = shortId.trim() || rawName.trim() || "?";
+  return {
+    rawName,
+    displayName,
+    bucket,
+    searchText: [rawName, displayName, bucket ? `${displayName} (${bucket})` : ""]
+      .map(normalizeSearchTerm)
+      .filter(Boolean)
+      .join("\n"),
+  };
+}
+
+function getReplayParticipants(
+  replay: Replay,
+  agentsById: Map<string, AgentInfo>,
+  agentsByKey: Map<string, AgentInfo>,
+): ReplayParticipant[] {
+  if (replay.source === "local") {
+    return replay.agent_ids.map((agentId) =>
+      makeParticipant(agentId, agentsById, agentsByKey),
+    );
+  }
+  const names =
+    replay.team_names && replay.team_names.length > 0
+      ? replay.team_names
+      : ((replay.agents || []).map((agent) => agent.name).filter(Boolean) as string[]);
+  return names.map((name) => makeParticipant(name, agentsById, agentsByKey));
+}
+
+function renderParticipantHtml(participant: ReplayParticipant): string {
+  return `<span class="replay-name">${escapeHtml(participant.displayName)}</span>`;
+}
+
+function participantText(participant: ReplayParticipant): string {
+  return participant.displayName;
+}
+
+function readFilter(): ReplaysFilter {
+  try {
+    const raw = sessionStorage.getItem(FILTER_KEY);
+    if (!raw) return { source: "all", sort: "newest", searchA: "", searchB: "" };
+    const parsed = JSON.parse(raw);
+    return {
+      source: (["all", "local", "kaggle"] as const).includes(parsed.source)
+        ? parsed.source
+        : "all",
+      sort: (["newest", "oldest", "turns-desc", "turns-asc"] as const).includes(parsed.sort)
+        ? parsed.sort
+        : "newest",
+      searchA: typeof parsed.searchA === "string" ? parsed.searchA : "",
+      searchB: typeof parsed.searchB === "string" ? parsed.searchB : "",
+    };
+  } catch {
+    return { source: "all", sort: "newest", searchA: "", searchB: "" };
+  }
+}
 
 export async function renderReplays(
   root: HTMLElement,
@@ -51,6 +180,11 @@ export async function renderReplays(
             <button class="source-pill on" data-source="all">All</button>
             <button class="source-pill" data-source="local">Local</button>
             <button class="source-pill" data-source="kaggle">Kaggle LB</button>
+          </div>
+          <div class="replays-match-search" aria-label="Replay bot matchup filters">
+            <input id="replays-search-a" class="picker-search" type="text" placeholder="Bot A">
+            <span class="replays-match-search-vs">vs</span>
+            <input id="replays-search-b" class="picker-search" type="text" placeholder="Bot B">
           </div>
           <label class="replays-sort">
             Submission
@@ -79,7 +213,7 @@ export async function renderReplays(
             </div>
           </div>
           <div class="scrape-hint">
-            Paste a Kaggle replay URL — either an episode page or a leaderboard link containing <code>?episodeId=&lt;id&gt;</code>.
+            Paste a Kaggle replay URL - either an episode page or a leaderboard link containing <code>?episodeId=&lt;id&gt;</code>.
             The <code>submissionId</code> in the URL flags which bot you care about; we fetch that single episode.
           </div>
           <div id="scrape-status" class="scrape-status" hidden></div>
@@ -90,39 +224,60 @@ export async function renderReplays(
   `;
   installHeaderNav(root, "replays");
 
-  // Populate the submission filter dropdown from the user's Kaggle list.
-  // Preserves URL handoff: `?sub=X` pre-selects and shows the filter chip.
+  const agentsById = new Map<string, AgentInfo>();
+  const agentsByKey = new Map<string, AgentInfo>();
+
+  function indexAgents(agents: AgentInfo[]): void {
+    agentsById.clear();
+    agentsByKey.clear();
+    for (const agent of agents) {
+      agentsById.set(agent.id, agent);
+      for (const key of agentLookupKeys(agent)) {
+        const normalized = normalizeSearchTerm(key);
+        if (normalized && !agentsByKey.has(normalized)) {
+          agentsByKey.set(normalized, agent);
+        }
+      }
+    }
+  }
+
+  const agentDirectoryLoad = api.listAgents()
+    .then((agents) => {
+      indexAgents(agents);
+    })
+    .catch(() => {
+      agentsById.clear();
+      agentsByKey.clear();
+    });
+
   const subSelect = document.getElementById("replays-sub-select") as HTMLSelectElement;
   void (async () => {
     try {
       const subs = await api.listKaggleSubmissions();
-      // Newest first — Kaggle returns ISO dates descending already.
       for (const s of subs) {
         const opt = document.createElement("option");
         opt.value = String(s.submission_id);
         const shortDesc = (s.description || "").slice(0, 50);
-        opt.textContent = `${s.submission_id}${shortDesc ? " · " + shortDesc : ""}`;
+        opt.textContent = `${s.submission_id}${shortDesc ? " - " + shortDesc : ""}`;
         if (subFilter && opt.value === subFilter) opt.selected = true;
         subSelect.appendChild(opt);
       }
     } catch {
-      // Kaggle auth not set — leave only "All submissions". User will route
-      // through Settings eventually; no point surfacing the error here.
+      // Leave only "All submissions" if Kaggle auth is not configured.
     }
   })();
   subSelect.addEventListener("change", () => {
-    const v = subSelect.value;
-    location.hash = v ? `#/replays?sub=${encodeURIComponent(v)}` : "#/replays";
+    const value = subSelect.value;
+    location.hash = value ? `#/replays?sub=${encodeURIComponent(value)}` : "#/replays";
   });
 
   if (subFilter) {
-    // `subFilter` comes from `?sub=` in the URL — user-controlled. Coerce to
-    // an integer string so `<img onerror=…>` can never survive; if it isn't a
-    // clean integer, render the raw string HTML-escaped instead.
     const digits = /^\d+$/.test(subFilter) ? subFilter : escapeHtml(subFilter);
     const chip = document.createElement("div");
     chip.className = "filter-chip";
-    chip.innerHTML = `Filtered by submission <strong>${digits}</strong> <button class="filter-chip-x" title="Clear filter">✕</button>`;
+    chip.innerHTML =
+      `Filtered by submission <strong>${digits}</strong> ` +
+      `<button class="filter-chip-x" title="Clear filter">&times;</button>`;
     root.querySelector<HTMLElement>(".replays-toolbar")!.prepend(chip);
     chip.querySelector<HTMLButtonElement>(".filter-chip-x")!.addEventListener(
       "click",
@@ -132,69 +287,66 @@ export async function renderReplays(
     );
   }
 
-  // Persist pill + sort across navigation within tab.
-  const FILTER_KEY = "ow-replays-filter";
-  type ReplaysFilter = { source: Source; sort: "newest" | "oldest" | "turns-desc" | "turns-asc" };
-  const restored: ReplaysFilter = (() => {
-    try {
-      const raw = sessionStorage.getItem(FILTER_KEY);
-      if (!raw) return { source: "all", sort: "newest" };
-      const p = JSON.parse(raw);
-      return {
-        source: (["all", "local", "kaggle"] as const).includes(p.source) ? p.source : "all",
-        sort: (["newest", "oldest", "turns-desc", "turns-asc"] as const).includes(p.sort) ? p.sort : "newest",
-      };
-    } catch {
-      return { source: "all", sort: "newest" };
-    }
-  })();
-
+  const restored = readFilter();
   let currentSource: Source = restored.source;
-  let currentSort: "newest" | "oldest" | "turns-desc" | "turns-asc" = restored.sort;
+  let currentSort: SortOrder = restored.sort;
+  let currentSearchA = restored.searchA;
+  let currentSearchB = restored.searchB;
   let hasLoadedList = false;
   let listRequestId = 0;
+  let loadedItems: Replay[] = [];
 
-  // Apply restored state to toolbar controls.
-  root.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((b) =>
-    b.classList.toggle("on", b.dataset.source === currentSource),
+  root.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((button) =>
+    button.classList.toggle("on", button.dataset.source === currentSource),
   );
   (document.getElementById("replays-sort-select") as HTMLSelectElement).value = currentSort;
+  (document.getElementById("replays-search-a") as HTMLInputElement).value = currentSearchA;
+  (document.getElementById("replays-search-b") as HTMLInputElement).value = currentSearchB;
 
   function saveFilter(): void {
-    try { sessionStorage.setItem(FILTER_KEY, JSON.stringify({ source: currentSource, sort: currentSort })); } catch { /* quota */ }
+    try {
+      sessionStorage.setItem(
+        FILTER_KEY,
+        JSON.stringify({
+          source: currentSource,
+          sort: currentSort,
+          searchA: currentSearchA,
+          searchB: currentSearchB,
+        }),
+      );
+    } catch {
+      // Ignore storage quota errors.
+    }
   }
 
-  // Game-time: when the match was actually played.
-  // Kaggle episodes carry ISO `endTime`; local tournaments carry `started_at`.
-  // Fall back to file mtime (`ts`, seconds) if neither is present.
-  function playedAtMs(r: Replay): number {
-    if (r.source === "kaggle" && r.endTime) {
-      const t = Date.parse(r.endTime);
-      if (!isNaN(t)) return t;
+  function playedAtMs(replay: Replay): number {
+    if (replay.source === "kaggle" && replay.endTime) {
+      const t = Date.parse(replay.endTime);
+      if (!Number.isNaN(t)) return t;
     }
-    if (r.source === "local" && r.started_at) {
-      const t = Date.parse(r.started_at);
-      if (!isNaN(t)) return t;
+    if (replay.source === "local" && replay.started_at) {
+      const t = Date.parse(replay.started_at);
+      if (!Number.isNaN(t)) return t;
     }
-    const ts = (r as any).ts;
+    const ts = (replay as Replay & { ts?: unknown }).ts;
     return typeof ts === "number" ? ts * 1000 : 0;
   }
 
   function formatRelative(ms: number): string {
     if (!ms) return "";
     const diff = Math.max(0, Date.now() - ms);
-    const s = Math.floor(diff / 1000);
-    if (s < 60) return `${s}s temu`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m} min temu`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h temu`;
-    const d = Math.floor(h / 24);
-    if (d < 14) return `${d}d temu`;
-    const w = Math.floor(d / 7);
-    if (w < 8) return `${w} tyg. temu`;
-    const mo = Math.floor(d / 30);
-    return `${mo} mies. temu`;
+    const seconds = Math.floor(diff / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 14) return `${days}d ago`;
+    const weeks = Math.floor(days / 7);
+    if (weeks < 8) return `${weeks} wk ago`;
+    const months = Math.floor(days / 30);
+    return `${months} mo ago`;
   }
 
   function sortItems(items: Replay[]): Replay[] {
@@ -205,101 +357,125 @@ export async function renderReplays(
     } else {
       const sign = currentSort === "turns-desc" ? -1 : 1;
       copy.sort((a, b) => {
-        const ta = a.source === "local" ? a.turns : 0;
-        const tb = b.source === "local" ? b.turns : 0;
-        return sign * (ta - tb);
+        const turnsA = a.source === "local" ? a.turns : 0;
+        const turnsB = b.source === "local" ? b.turns : 0;
+        return sign * (turnsA - turnsB);
       });
     }
     return copy;
   }
 
-  async function loadList(options?: { showLoading?: boolean }) {
-    const listEl = document.getElementById("replays-list")!;
-    const requestId = ++listRequestId;
-    const showLoading = options?.showLoading ?? !hasLoadedList;
-    if (showLoading) {
-      listEl.innerHTML = `<div class="loading">Loading…</div>`;
-    }
-    try {
-      const r = await fetch(`/api/replays?source=${currentSource}`);
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      let items: Replay[] = await r.json();
-      if (requestId !== listRequestId) return;
-      if (subFilter) {
-        const sub = Number(subFilter);
-        items = items.filter(
-          (i) => i.source === "kaggle" && i.submission_id === sub,
-        );
-      }
-      renderList(sortItems(items));
-      hasLoadedList = true;
-    } catch (e) {
-      if (requestId !== listRequestId) return;
-      if (!hasLoadedList) {
-        listEl.innerHTML = `<div class="loading">Error: ${(e as Error).message}</div>`;
-      }
-    }
+  function participantMatches(participant: ReplayParticipant, query: string): boolean {
+    return participant.searchText.includes(query);
   }
 
-  function renderList(items: Replay[]) {
+  function replayMatchesParticipantFilters(replay: Replay): boolean {
+    const queries = [currentSearchA, currentSearchB]
+      .map(normalizeSearchTerm)
+      .filter(Boolean);
+    if (queries.length === 0) return true;
+
+    const participants = getReplayParticipants(replay, agentsById, agentsByKey);
+    if (participants.length === 0) return false;
+
+    const used = new Set<number>();
+    const matchQueryAt = (queryIdx: number): boolean => {
+      if (queryIdx >= queries.length) return true;
+      const query = queries[queryIdx];
+      for (let participantIdx = 0; participantIdx < participants.length; participantIdx += 1) {
+        if (used.has(participantIdx)) continue;
+        if (!participantMatches(participants[participantIdx], query)) continue;
+        used.add(participantIdx);
+        if (matchQueryAt(queryIdx + 1)) return true;
+        used.delete(participantIdx);
+      }
+      return false;
+    };
+
+    return matchQueryAt(0);
+  }
+
+  function applyClientFilters(items: Replay[]): Replay[] {
+    let filtered = items;
+    if (subFilter) {
+      const sub = Number(subFilter);
+      filtered = filtered.filter(
+        (item) => item.source === "kaggle" && item.submission_id === sub,
+      );
+    }
+    filtered = filtered.filter(replayMatchesParticipantFilters);
+    return sortItems(filtered);
+  }
+
+  function renderList(items: Replay[]): void {
     const listEl = document.getElementById("replays-list")!;
     if (items.length === 0) {
-      listEl.innerHTML = `<div class="loading">No replays yet. Play a match in Quick Match or import from Kaggle.</div>`;
+      const hasParticipantFilters = Boolean(
+        normalizeSearchTerm(currentSearchA) || normalizeSearchTerm(currentSearchB),
+      );
+      const message = hasParticipantFilters
+        ? "No replays match those bot filters."
+        : "No replays yet. Play a match in Quick Match or import from Kaggle.";
+      listEl.innerHTML = `<div class="loading">${message}</div>`;
       return;
     }
+
     listEl.innerHTML = items
-      .map((r, idx) => {
-        const playedMs = playedAtMs(r);
+      .map((replay, idx) => {
+        const playedMs = playedAtMs(replay);
         const relative = formatRelative(playedMs);
         const absolute = playedMs
-          ? new Date(playedMs).toISOString().replace("T", " ").slice(0, 16) + " UTC"
+          ? `${new Date(playedMs).toISOString().replace("T", " ").slice(0, 16)} UTC`
           : "";
         const timeCell = relative
           ? `<span class="replay-time" title="${absolute}">${relative}</span>`
           : "";
-        if (r.source === "local") {
-          const agents = r.agent_ids.map(escapeHtml).join(" vs ");
-          const winner = r.winner ? escapeHtml(r.winner) : "draw";
+        const participants = getReplayParticipants(replay, agentsById, agentsByKey);
+        const agentsHtml = participants.length > 0
+          ? participants.map(renderParticipantHtml).join(`<span class="replay-vs">vs</span>`)
+          : "?";
+
+        if (replay.source === "local") {
+          const winner = replay.winner
+            ? escapeHtml(participantText(makeParticipant(replay.winner, agentsById, agentsByKey)))
+            : "draw";
           return `
             <div class="replay-item" data-idx="${idx}" data-kind="local"
-                 data-run-id="${escapeHtml(r.run_id)}" data-match-id="${escapeHtml(r.match_id)}">
+                 data-run-id="${escapeHtml(replay.run_id)}" data-match-id="${escapeHtml(replay.match_id)}">
               <div class="replay-meta-row">
                 <span class="replay-source local">local</span>
-                <span class="replay-title">${agents}</span>
+                <span class="replay-title">${agentsHtml}</span>
                 <span class="replay-winner">winner: <strong>${winner}</strong></span>
                 ${timeCell}
               </div>
               <div class="replay-meta-sub">
-                run ${escapeHtml(r.run_id)} · match ${escapeHtml(r.match_id)} · ${r.turns} turns · ${r.duration_s.toFixed(1)}s · ${escapeHtml(r.status)}
+                run ${escapeHtml(replay.run_id)} - match ${escapeHtml(replay.match_id)} - ${replay.turns} turns - ${replay.duration_s.toFixed(1)}s - ${escapeHtml(replay.status)}
               </div>
-              <button class="replay-delete" title="Delete replay">×</button>
-            </div>
-          `;
-        } else {
-          const names =
-            r.team_names && r.team_names.length > 0
-              ? r.team_names
-              : (r.agents || []).map((a) => a.name).filter(Boolean) as string[];
-          const agents = names.length > 0 ? names.map(escapeHtml).join(" vs ") : "?";
-          const winner = r.winner
-            ? `winner: <strong>${escapeHtml(r.winner)}</strong>`
-            : (r.type ? escapeHtml(r.type) : "");
-          return `
-            <div class="replay-item" data-idx="${idx}" data-kind="kaggle"
-                 data-submission-id="${r.submission_id}" data-episode-id="${r.episode_id}">
-              <div class="replay-meta-row">
-                <span class="replay-source kaggle">kaggle</span>
-                <span class="replay-title">${agents}</span>
-                <span class="replay-winner">${winner}</span>
-                ${timeCell}
-              </div>
-              <div class="replay-meta-sub">
-                submission ${r.submission_id} · episode ${r.episode_id}
-              </div>
-              <button class="replay-delete" title="Delete replay">×</button>
+              <button class="replay-delete" title="Delete replay">&times;</button>
             </div>
           `;
         }
+
+        const winner = replay.winner
+          ? `winner: <strong>${escapeHtml(
+            participantText(makeParticipant(replay.winner, agentsById, agentsByKey)),
+          )}</strong>`
+          : (replay.type ? escapeHtml(replay.type) : "");
+        return `
+          <div class="replay-item" data-idx="${idx}" data-kind="kaggle"
+               data-submission-id="${replay.submission_id}" data-episode-id="${replay.episode_id}">
+            <div class="replay-meta-row">
+              <span class="replay-source kaggle">kaggle</span>
+              <span class="replay-title">${agentsHtml}</span>
+              <span class="replay-winner">${winner}</span>
+              ${timeCell}
+            </div>
+            <div class="replay-meta-sub">
+              submission ${replay.submission_id} - episode ${replay.episode_id}
+            </div>
+            <button class="replay-delete" title="Delete replay">&times;</button>
+          </div>
+        `;
       })
       .join("");
 
@@ -307,8 +483,6 @@ export async function renderReplays(
       el.addEventListener("click", (ev) => {
         if ((ev.target as HTMLElement).closest(".replay-delete")) return;
         const kind = el.dataset.kind;
-        // Route through Quick Match so the user keeps the stats sidebar.
-        // Quick Match reads sessionStorage on init and triggers the load.
         const payload = kind === "local"
           ? { kind: "local", runId: el.dataset.runId!, matchId: el.dataset.matchId! }
           : {
@@ -324,7 +498,7 @@ export async function renderReplays(
     listEl.querySelectorAll<HTMLButtonElement>(".replay-delete").forEach((btn) => {
       btn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
-        const item = btn.closest(".replay-item") as HTMLElement;
+        const item = btn.closest(".replay-item") as HTMLElement | null;
         if (!item) return;
         if (!confirm("Delete this replay?")) return;
         try {
@@ -344,27 +518,65 @@ export async function renderReplays(
     });
   }
 
-  // Source pills
+  function renderVisibleList(): void {
+    renderList(applyClientFilters(loadedItems));
+  }
+
+  async function loadList(options?: { showLoading?: boolean }): Promise<void> {
+    const listEl = document.getElementById("replays-list")!;
+    const requestId = ++listRequestId;
+    const showLoading = options?.showLoading ?? !hasLoadedList;
+    if (showLoading) {
+      listEl.innerHTML = `<div class="loading">Loading...</div>`;
+    }
+    try {
+      const response = await fetch(`/api/replays?source=${currentSource}`);
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      const items: Replay[] = await response.json();
+      if (requestId !== listRequestId) return;
+      loadedItems = items;
+      renderVisibleList();
+      hasLoadedList = true;
+    } catch (e) {
+      if (requestId !== listRequestId) return;
+      if (!hasLoadedList) {
+        listEl.innerHTML = `<div class="loading">Error: ${(e as Error).message}</div>`;
+      }
+    }
+  }
+
   root.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((btn) => {
     btn.addEventListener("click", () => {
       currentSource = btn.dataset.source as Source;
       saveFilter();
-      root.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((b) => {
-        b.classList.toggle("on", b === btn);
+      root.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((button) => {
+        button.classList.toggle("on", button === btn);
       });
       void loadList();
     });
   });
 
-  // Sort select
   (document.getElementById("replays-sort-select") as HTMLSelectElement)
     .addEventListener("change", (e) => {
-      currentSort = (e.target as HTMLSelectElement).value as typeof currentSort;
+      currentSort = (e.target as HTMLSelectElement).value as SortOrder;
       saveFilter();
-      void loadList();
+      renderVisibleList();
     });
 
-  // Scrape go — single episode from URL
+  (document.getElementById("replays-search-a") as HTMLInputElement)
+    .addEventListener("input", (e) => {
+      currentSearchA = (e.target as HTMLInputElement).value;
+      saveFilter();
+      renderVisibleList();
+    });
+
+  (document.getElementById("replays-search-b") as HTMLInputElement)
+    .addEventListener("input", (e) => {
+      currentSearchB = (e.target as HTMLInputElement).value;
+      saveFilter();
+      renderVisibleList();
+    });
+
   document.getElementById("scrape-go")!.addEventListener("click", async () => {
     const urlInput = document.getElementById("scrape-url") as HTMLInputElement;
     const url = urlInput.value.trim();
@@ -374,19 +586,20 @@ export async function renderReplays(
     }
     const statusEl = document.getElementById("scrape-status")!;
     statusEl.hidden = false;
-    statusEl.textContent = "Fetching…";
+    statusEl.textContent = "Fetching...";
     try {
-      const r = await fetch("/api/replays/scrape-url", {
+      const response = await fetch("/api/replays/scrape-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
       });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({ detail: r.statusText }));
-        throw new Error(err.detail || r.statusText);
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(err.detail || response.statusText);
       }
-      const data = await r.json();
-      statusEl.textContent = `Imported: episode ${data.episode_id} (submission ${data.submission_id || "?"})`;
+      const data = await response.json();
+      statusEl.textContent =
+        `Imported: episode ${data.episode_id} (submission ${data.submission_id || "?"})`;
       urlInput.value = "";
       await loadList();
     } catch (e) {
@@ -394,9 +607,9 @@ export async function renderReplays(
     }
   });
 
+  await agentDirectoryLoad;
   await loadList({ showLoading: true });
 
-  // Soft refresh every 10 s while user is on page
   if (pollInterval !== null) window.clearInterval(pollInterval);
   pollInterval = window.setInterval(() => {
     if (document.hidden) return;

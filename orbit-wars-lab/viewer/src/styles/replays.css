@@ -14,6 +14,27 @@
   flex-wrap: wrap;
 }
 
+.replays-match-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 360px;
+  min-width: min(100%, 360px);
+}
+
+.replays-match-search .picker-search {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.replays-match-search-vs {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .source-pills {
   display: flex;
   gap: 0;
@@ -284,6 +305,20 @@
   white-space: nowrap;
 }
 
+.replay-name {
+  color: inherit;
+}
+
+.replay-vs {
+  display: inline-block;
+  margin: 0 8px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .replay-winner {
   color: var(--text-muted);
   font-size: 0.78rem;
@@ -355,4 +390,21 @@
   text-align: center;
   color: var(--text-dim);
   font-size: 0.85rem;
+}
+
+@media (max-width: 900px) {
+  .replays-match-search {
+    flex-basis: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .replays-match-search {
+    flex-wrap: wrap;
+  }
+
+  .replays-match-search-vs {
+    width: 100%;
+    text-align: center;
+  }
 }
