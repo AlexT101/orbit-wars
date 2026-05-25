@@ -41,11 +41,13 @@ use crate::constants::{
 use crate::engine::fleet_speed;
 use crate::entity_cache::{EntityCache, EntityKind};
 
-/// Maximum fixed-point iterations when leading a moving target. We iterate on
-/// the *integer* arrival turn, not just the fractional travel time, so a few
-/// more rounds are worthwhile to settle orbiters without returning an angle
-/// aimed at one turn and an ETA for another.
-const LEAD_ITERS: usize = 8;
+/// Per-turn sub-sampling resolution for [`lead_target`]. For each candidate
+/// arrival turn we sample the target's chord at this many evenly-spaced `s`
+/// values and pick the one that best aligns the fleet's radial chord with the
+/// target's tangential chord (smallest radial gap). 11 samples gives ~0.1
+/// turn-fraction resolution — enough to land within `target_radius` whenever
+/// a swept-pair hit is geometrically possible.
+const LEAD_SAMPLES: usize = 11;
 
 /// Synthetic id used for the sun in [`BlockerEntry::blocker_id`]. Negative so
 /// it cannot collide with any real planet/comet id.
@@ -248,7 +250,7 @@ fn add_static_band(
 /// the per-`s` arcs cover the full set of blocking aim angles, with adjacent
 /// arcs overlapping for any reasonable obstacle motion (`Δθ` per sample
 /// `≪ α`).
-const DYN_SAMPLES: usize = 11;
+const DYN_SAMPLES: usize = 21;
 
 /// For each integer turn `t`, sample `s ∈ [0, 1]` at [`DYN_SAMPLES`] points
 /// and emit one [`BlockerEntry`] per sample whose triangle-inequality check
@@ -330,7 +332,25 @@ fn add_dynamic_bands(
 }
 
 /// Lead a (possibly moving) target. Returns `(angle, integer_turns, target_x,
-/// target_y, fractional_flight_time)`. `v` is the quantized fleet speed.
+/// target_y, fractional_flight_time)` where `(target_x, target_y) = Q(s*)` is
+/// the point on the target's chord during turn `integer_turns` at which the
+/// engine's swept-pair test fires, and `fractional_flight_time = integer_turns
+/// − 1 + s*`. `v` is the quantized fleet speed.
+///
+/// Approach: walk integer turn `t` forward from the earliest geometrically
+/// feasible turn. For each `t`, find `s* ∈ [0, 1]` that minimizes the radial
+/// gap `|K(s) − D(s)|` between the target's chord position `Q(s)` and the
+/// fleet's chord distance `D(s) = launch_offset + (t − 1 + s)·v` (same chord
+/// linearization the engine uses). Aiming `θ = bearing(L → Q(s*))` puts the
+/// fleet at distance `D(s*)` along the line through `Q(s*)`, so the actual
+/// fleet-to-target distance at `s*` is exactly `|K(s*) − D(s*)|`. If that is
+/// ≤ `target_radius`, the engine's `swept_pair_hit` fires for turn `t` —
+/// return immediately with the earliest such turn.
+///
+/// This replaces a prior end-of-turn fixed-point iteration that could settle
+/// on a self-consistent `(angle, turns)` whose chord never actually intersects
+/// the target's chord during that turn — the cause of fleets launched at
+/// orbiters flying clean past and off the map.
 pub fn lead_target(
     cache: &EntityCache,
     shooter_id: i64,
@@ -344,35 +364,60 @@ pub fn lead_target(
     let target = cache.get(target_id)?;
     let tr = target.radius;
 
-    let [seed_x, seed_y] = cache.position(target_id, launch_turn_offset)?;
-    let mut flight_time = ((seed_x - lx).hypot(seed_y - ly) - tr - launch_offset).max(0.0) / v;
-    let mut turns = (flight_time.ceil() as i64).max(1);
-
-    for _ in 0..LEAD_ITERS {
-        let probe_turn = launch_turn_offset + turns;
-        let [tx, ty] = cache.position(target_id, probe_turn)?;
-        let d = (tx - lx).hypot(ty - ly);
-        let next_flight_time = (d - tr - launch_offset).max(0.0) / v;
-        let next_turns = (next_flight_time.ceil() as i64).max(1);
-        flight_time = next_flight_time;
-        if next_turns == turns {
-            let angle = (ty - ly).atan2(tx - lx);
-            return Some((angle, turns, tx, ty, flight_time));
-        }
-        turns = next_turns;
+    let abs_launch = cache.current_turn + launch_turn_offset;
+    let max_lookahead = HORIZON.min((EPISODE_STEPS - 1 - abs_launch).max(0));
+    if max_lookahead < 1 {
+        return None;
     }
 
-    // Final resynchronization: if we exhausted iterations, still make the
-    // returned aim point correspond to the returned integer ETA.
-    let [tx, ty] = cache.position(target_id, launch_turn_offset + turns)?;
-    let d = (tx - lx).hypot(ty - ly);
-    flight_time = (d - tr - launch_offset).max(0.0) / v;
-    let turns = (flight_time.ceil() as i64).max(1);
-    let [tx, ty] = cache.position(target_id, launch_turn_offset + turns)?;
-    let d = (tx - lx).hypot(ty - ly);
-    let flight_time = (d - tr - launch_offset).max(0.0) / v;
-    let angle = (ty - ly).atan2(tx - lx);
-    Some((angle, turns, tx, ty, flight_time))
+    // Seed: ceil-flight-time at the target's launch-turn position is a lower
+    // bound for the earliest feasible arrival turn — the fleet can't possibly
+    // arrive sooner than it would against a stationary target at that range.
+    let [seed_x, seed_y] = cache.position(target_id, launch_turn_offset)?;
+    let seed_d = (seed_x - lx).hypot(seed_y - ly);
+    let start = (((seed_d - tr - launch_offset).max(0.0) / v).ceil() as i64).max(1);
+
+    let inv_samples = 1.0 / (LEAD_SAMPLES - 1) as f64;
+
+    for t in start..=max_lookahead {
+        let [q0x, q0y] = cache.position(target_id, launch_turn_offset + t - 1)?;
+        let [q1x, q1y] = cache.position(target_id, launch_turn_offset + t)?;
+        let dqx = q1x - q0x;
+        let dqy = q1y - q0y;
+        let d0 = launch_offset + (t as f64 - 1.0) * v;
+
+        let mut best_gap = f64::INFINITY;
+        let mut best_s = 0.0_f64;
+        for i in 0..LEAD_SAMPLES {
+            let s = i as f64 * inv_samples;
+            let qx = q0x + s * dqx;
+            let qy = q0y + s * dqy;
+            let k = (qx - lx).hypot(qy - ly);
+            let d = d0 + s * v;
+            let gap = (k - d).abs();
+            if gap < best_gap {
+                best_gap = gap;
+                best_s = s;
+            }
+        }
+
+        if best_gap > tr {
+            continue;
+        }
+
+        let qx = q0x + best_s * dqx;
+        let qy = q0y + best_s * dqy;
+        // Skip pathological cases where the target's chord passes through the
+        // launcher position — bearing is undefined.
+        if (qx - lx).hypot(qy - ly) < 1e-9 {
+            continue;
+        }
+        let angle = (qy - ly).atan2(qx - lx);
+        let flight_time = t as f64 - 1.0 + best_s;
+        return Some((angle, t, qx, qy, flight_time));
+    }
+
+    None
 }
 
 /// Aim from `shooter_id` to `target_id` with `ships`, launching now

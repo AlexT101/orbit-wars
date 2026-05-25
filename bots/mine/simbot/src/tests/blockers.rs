@@ -349,6 +349,10 @@ fn sun_blocks_chords_passing_through_center() {
 
 #[test]
 fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
+    // `lead_target` returns the closest-approach point `Q(s*)` on the target's
+    // chord during the returned turn — anywhere in `[Q(turns-1), Q(turns)]`.
+    // Verify the returned `(tx, ty)` lies on that segment (within numerical
+    // tolerance) rather than equalling either endpoint.
     let seeds = [42u64, 7, 100];
     let ships_grid = [5i64, 17, 50, 120, 500];
 
@@ -375,14 +379,28 @@ fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
                     else {
                         continue;
                     };
-                    let Some([px, py]) = cache.position(target, turns) else {
+                    let Some([p0x, p0y]) = cache.position(target, turns - 1) else {
                         continue;
                     };
-                    let err = (tx - px).hypot(ty - py);
-                    if err > 1e-6 {
+                    let Some([p1x, p1y]) = cache.position(target, turns) else {
+                        continue;
+                    };
+                    let dqx = p1x - p0x;
+                    let dqy = p1y - p0y;
+                    let len_sq = dqx * dqx + dqy * dqy;
+                    let s = if len_sq < 1e-18 {
+                        0.0
+                    } else {
+                        ((tx - p0x) * dqx + (ty - p0y) * dqy) / len_sq
+                    };
+                    let on_seg = s.clamp(0.0, 1.0);
+                    let proj_x = p0x + on_seg * dqx;
+                    let proj_y = p0y + on_seg * dqy;
+                    let err = (tx - proj_x).hypot(ty - proj_y);
+                    if err > 1e-6 || !(-1e-9..=1.0 + 1e-9).contains(&s) {
                         mismatches.push(format!(
                             "seed={seed} shooter={shooter} target={target} ships={ships} turns={turns} \
-                             returned=({tx:.3},{ty:.3}) pos[turns]=({px:.3},{py:.3}) err={err:.6}"
+                             returned=({tx:.3},{ty:.3}) s={s:.6} err={err:.6}"
                         ));
                         if mismatches.len() >= 12 {
                             break;
@@ -486,6 +504,93 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
     assert!(
         misses.is_empty(),
         "accepted orbiting shots that never reached their target:\n  {}",
+        misses.join("\n  "),
+    );
+}
+
+#[test]
+fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
+    // Broader version of `accepted_orbiting_shots_reach_target_under_engine_speed`:
+    // 30 seeds × 5 game steps. The original 3-seed × 2-step coverage was
+    // insufficient to surface the orbital-target convergence bug that caused
+    // fleets to fly off the map; pre-fix this scan produced 20+ misses on
+    // seed=0 step=0 alone.
+    let seeds: Vec<u64> = (0..30).collect();
+    let future_steps = [0i64, 25, 75, 150, 300];
+    let ships_grid = [10i64, 100, 500];
+    let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
+
+    let mut misses = Vec::new();
+    for seed in seeds {
+        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut cache = cache_for(&state);
+
+        for &step in &future_steps {
+            while state.step < step {
+                if state.step_with_actions(&noop).is_err() {
+                    break;
+                }
+            }
+            cache.set_current_turn(state.step);
+
+            let mut ids: Vec<i64> = cache
+                .entities
+                .iter()
+                .filter(|(_, e)| e.positions[state.step as usize].is_some())
+                .map(|(&id, _)| id)
+                .collect();
+            ids.sort_unstable();
+
+            for &shooter in &ids {
+                for &target in &ids {
+                    if shooter == target {
+                        continue;
+                    }
+                    let Some(target_ent) = cache.get(target) else {
+                        continue;
+                    };
+                    if !matches!(target_ent.kind, EntityKind::OrbitingPlanet) {
+                        continue;
+                    }
+                    for &ships in &ships_grid {
+                        let Some((angle, turns, _, _)) =
+                            aim_with_prediction(&cache, shooter, target, ships)
+                        else {
+                            continue;
+                        };
+                        let max_turns = (EPISODE_STEPS - cache.current_turn).max(0);
+                        if !reaches_target_with_engine_speed(
+                            &cache, shooter, target, angle, ships, max_turns,
+                        ) {
+                            misses.push(format!(
+                                "seed={seed} step={step} shooter={shooter} target={target} \
+                                 ships={ships} angle={angle:.6} turns={turns}"
+                            ));
+                            if misses.len() >= 12 {
+                                break;
+                            }
+                        }
+                    }
+                    if misses.len() >= 12 {
+                        break;
+                    }
+                }
+                if misses.len() >= 12 {
+                    break;
+                }
+            }
+            if misses.len() >= 12 {
+                break;
+            }
+        }
+        if misses.len() >= 12 {
+            break;
+        }
+    }
+
+    assert!(
+        misses.is_empty(),
+        "accepted orbiting shots that did not reach target (broad scan):\n  {}",
         misses.join("\n  "),
     );
 }
