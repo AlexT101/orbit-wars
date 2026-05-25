@@ -20,6 +20,7 @@ use crate::helpers::{
     count_players, simulate_planet_timeline, state_at_timeline, ArrivalEvent, PlanetTimeline,
     TimelineCache,
 };
+use crate::sim_probe::SimProbe;
 
 /// Per-turn world snapshot. Strategy code borrows this and never mutates it.
 pub struct WorldState<'a> {
@@ -101,16 +102,27 @@ impl<'a> WorldState<'a> {
         engine: &EngineState,
         entity_cache: &'a EntityCache,
     ) -> Self {
-        let step = engine.step;
-        let angular_velocity = engine.angular_velocity;
-        let num_players = engine.num_players;
-        let timeline_cache = TimelineCache::build(engine, player, HORIZON, entity_cache);
+        let probe = SimProbe::from_engine(engine);
+        Self::from_simprobe(player, &probe, entity_cache)
+    }
 
-        // Clone the planets/fleets/comet ids once for the owned WorldState
-        // fields (vs. twice when the caller routed through `build`).
-        let planets: Vec<Planet> = engine.planets.clone();
-        let fleets: Vec<Fleet> = engine.fleets.clone();
-        let comet_planet_ids: Vec<i64> = engine.comet_planet_ids.clone();
+    /// Canonical constructor used during rollout: builds the snapshot directly
+    /// from a [`SimProbe`] without ever materializing a full `EngineState`.
+    /// `TimelineCache::build` internally forks the probe to walk forward
+    /// `HORIZON` turns for the arrival ledger.
+    pub fn from_simprobe(
+        player: i64,
+        probe: &SimProbe,
+        entity_cache: &'a EntityCache,
+    ) -> Self {
+        let step = probe.step_count();
+        let angular_velocity = probe.angular_velocity();
+        let num_players = probe.num_players();
+        let timeline_cache = TimelineCache::build(probe, player, HORIZON, entity_cache);
+
+        let planets: Vec<Planet> = probe.planets().to_vec();
+        let fleets: Vec<Fleet> = probe.fleets().to_vec();
+        let comet_planet_ids: Vec<i64> = probe.comet_planet_ids().to_vec();
 
         let mut planet_by_id: HashMap<i64, Planet> = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
         for planet in &planets {

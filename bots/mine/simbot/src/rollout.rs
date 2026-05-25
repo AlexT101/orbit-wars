@@ -6,8 +6,10 @@
 
 #![allow(dead_code)]
 
-use crate::engine::{EngineState, MoveAction};
+use crate::constants::EPISODE_STEPS;
+use crate::engine::{EngineState, Fleet, MoveAction, Planet};
 use crate::entity_cache::EntityCache;
+use crate::sim_probe::SimProbe;
 use crate::world::WorldState;
 
 pub const REACTIVE_TURNS: i64 = 2;
@@ -81,13 +83,13 @@ pub fn rollout_score(
 ) -> f64 {
     let saved_turn = cache.current_turn;
     let num_players = initial_state.num_players;
-    let mut engine = initial_state.clone();
+    let mut probe = SimProbe::from_engine(initial_state);
 
     for t in 0..REACTIVE_TURNS {
-        if engine.done {
+        if probe.step_count() >= EPISODE_STEPS {
             break;
         }
-        cache.set_current_turn(engine.step);
+        cache.set_current_turn(probe.step_count());
         let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
         for p in 0..num_players {
             let pid = p as i64;
@@ -100,27 +102,23 @@ pub fn rollout_score(
                 actions[p] = turn0_opponents[p].clone();
                 continue;
             }
-            let ws = WorldState::from_engine(pid, &engine, cache);
+            let ws = WorldState::from_simprobe(pid, &probe, cache);
             actions[p] = to_move_actions(&reply_plan_fn(&ws));
         }
-        if engine.step_with_actions(&actions).is_err() {
-            break;
-        }
+        let action_slices: Vec<&[MoveAction]> = actions.iter().map(|v| v.as_slice()).collect();
+        probe.step_with_actions(&action_slices);
     }
 
     // Ballistic phase: no new launches. Fleets in flight still resolve.
-    let empty: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
     for _ in 0..BALLISTIC_TURNS {
-        if engine.done {
+        if probe.step_count() >= EPISODE_STEPS {
             break;
         }
-        if engine.step_with_actions(&empty).is_err() {
-            break;
-        }
+        probe.step();
     }
 
     cache.set_current_turn(saved_turn);
-    score_state(&engine, my_player)
+    score_probe(&probe, my_player)
 }
 
 /// Precompute opponent turn-0 plans from the shared initial state. `my_player`'s
@@ -218,11 +216,15 @@ fn to_move_actions(moves: &[PlannedMove]) -> Vec<MoveAction> {
 /// Production-weighted board control delta from `my_player`'s perspective.
 /// Counts owned-planet production over the remaining game, current ship
 /// inventories on planets, and ships in flight.
-fn score_state(engine: &EngineState, my_player: i64) -> f64 {
-    let remaining = (engine.configuration.episode_steps - engine.step).max(0) as f64;
+fn score_probe(probe: &SimProbe, my_player: i64) -> f64 {
+    score_snapshot(probe.planets(), probe.fleets(), probe.step_count(), my_player)
+}
+
+fn score_snapshot(planets: &[Planet], fleets: &[Fleet], step: i64, my_player: i64) -> f64 {
+    let remaining = (EPISODE_STEPS - step).max(0) as f64;
     let mut my_score = 0.0;
     let mut enemy_score = 0.0;
-    for planet in &engine.planets {
+    for planet in planets {
         if planet.owner == my_player {
             my_score += planet.production as f64 * remaining;
             my_score += planet.ships as f64;
@@ -231,7 +233,7 @@ fn score_state(engine: &EngineState, my_player: i64) -> f64 {
             enemy_score += planet.ships as f64;
         }
     }
-    for fleet in &engine.fleets {
+    for fleet in fleets {
         if fleet.owner == my_player {
             my_score += fleet.ships as f64;
         } else {

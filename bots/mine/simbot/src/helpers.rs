@@ -6,7 +6,7 @@ use crate::constants::{CENTER, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS};
 
 use crate::blockers;
 pub use crate::blockers::AimResult;
-use crate::engine::{EngineState, Fleet, Planet};
+use crate::engine::{Fleet, Planet};
 use crate::entity_cache::EntityCache;
 use crate::sim_probe::SimProbe;
 pub use crate::sim_probe::ArrivalEvent;
@@ -465,24 +465,26 @@ pub struct TimelineCache {
 }
 
 impl TimelineCache {
-    /// Build the cache from a single SimProbe rollout. `O(horizon * |planets|)`.
+    /// Build the cache by forking `parent` and walking forward `horizon` turns
+    /// to collect the in-flight arrival ledger. `O(horizon * |planets|)`.
     pub fn build(
-        state: &EngineState,
+        parent: &SimProbe,
         player: i64,
         horizon: i64,
         entity_cache: &EntityCache,
     ) -> Self {
-        let mut probe = SimProbe::from_engine(state);
+        let mut probe = parent.fork();
         probe.step_n(horizon);
         let mut ledger = probe.collect_arrivals();
-        for planet in &state.planets {
+        let snapshot_planets = parent.planets();
+        for planet in snapshot_planets {
             ledger.entry(planet.id).or_default();
         }
 
         let mut baselines =
-            HashMap::with_capacity_and_hasher(state.planets.len(), Default::default());
+            HashMap::with_capacity_and_hasher(snapshot_planets.len(), Default::default());
         let mut expiry_at: HashMap<i64, i64> = HashMap::default();
-        for planet in &state.planets {
+        for planet in snapshot_planets {
             let arrivals = ledger
                 .get(&planet.id)
                 .map(|v| v.as_slice())

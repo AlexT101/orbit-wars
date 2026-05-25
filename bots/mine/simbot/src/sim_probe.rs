@@ -18,7 +18,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::constants::{BOARD_SIZE, CENTER, MAX_PLAYERS, ROTATION_LIMIT, SUN_RADIUS};
+use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, MAX_PLAYERS, ROTATION_LIMIT, SUN_RADIUS};
 use crate::engine::{
     fleet_speed, point_to_segment_distance, swept_pair_hit,
     EngineState, Fleet, MoveAction, Planet, PlanetPath,
@@ -69,6 +69,7 @@ pub struct SimProbe<'a> {
     initial_by_id: HashMap<i64, &'a Planet>,
     angular_velocity: f64,
     ship_speed: f64,
+    num_players: usize,
 
     // ── Owned mutable state.
     step: i64,
@@ -126,6 +127,7 @@ impl<'a> SimProbe<'a> {
             initial_by_id,
             angular_velocity: state.angular_velocity,
             ship_speed: state.configuration.ship_speed,
+            num_players: state.num_players,
             step: state.step,
             initial_step: state.step,
             planets: state.planets.clone(),
@@ -154,6 +156,12 @@ impl<'a> SimProbe<'a> {
     pub fn fleets(&self) -> &[Fleet] { &self.fleets }
     #[inline]
     pub fn events(&self) -> &[SimEvent] { &self.events }
+    #[inline]
+    pub fn angular_velocity(&self) -> f64 { self.angular_velocity }
+    #[inline]
+    pub fn num_players(&self) -> usize { self.num_players }
+    #[inline]
+    pub fn comet_planet_ids(&self) -> &[i64] { &self.comet_planet_ids }
     /// Engine step number after the most recent `step()`.
     #[inline]
     pub fn step_count(&self) -> i64 { self.step }
@@ -163,22 +171,75 @@ impl<'a> SimProbe<'a> {
 
     pub fn clear_events(&mut self) { self.events.clear(); }
 
+    /// Fork a sub-probe that shares the parent's borrowed comet path tables
+    /// and initial-planet table, but owns an independent copy of the mutable
+    /// rollout state (planets / fleets / comet groups). Used by
+    /// `TimelineCache::build` to walk forward `HORIZON` turns from the parent
+    /// probe's current step without disturbing the parent.
+    ///
+    /// `initial_step` is reset to the parent's current step so arrival event
+    /// turns are measured from the fork point.
+    pub fn fork(&self) -> SimProbe<'a> {
+        let planet_count = self.planets.len();
+        let fleet_count = self.fleets.len();
+        SimProbe {
+            initial_by_id: self.initial_by_id.clone(),
+            angular_velocity: self.angular_velocity,
+            ship_speed: self.ship_speed,
+            num_players: self.num_players,
+            step: self.step,
+            initial_step: self.step,
+            planets: self.planets.clone(),
+            fleets: self.fleets.clone(),
+            next_fleet_id: self.next_fleet_id,
+            comet_planet_ids: self.comet_planet_ids.clone(),
+            comet_groups: self
+                .comet_groups
+                .iter()
+                .map(|g| ProbeCometGroup {
+                    planet_ids: g.planet_ids.clone(),
+                    paths: g.paths,
+                    path_index: g.path_index,
+                })
+                .collect(),
+            planet_index_by_id: self.planet_index_by_id.clone(),
+            planet_paths: vec![None; planet_count],
+            fleets_to_remove: vec![false; fleet_count],
+            combat_lists: (0..planet_count).map(|_| Vec::new()).collect(),
+            comet_id_set: HashSet::with_capacity_and_hasher(
+                self.comet_planet_ids.len(),
+                Default::default(),
+            ),
+            expired_postmove: Vec::new(),
+            events: Vec::with_capacity(64),
+        }
+    }
+
     /// Step one turn with no player actions.
     #[inline]
     pub fn step(&mut self) {
         self.step_with_actions(&[]);
     }
 
-    /// Step `n` turns with no player actions.
+    /// Step `n` turns with no player actions. Caps at `EPISODE_STEPS` so a
+    /// probe started near the end of the game won't simulate phantom turns
+    /// the real game never reaches.
     pub fn step_n(&mut self, n: i64) {
         for _ in 0..n.max(0) {
+            if self.step >= EPISODE_STEPS {
+                break;
+            }
             self.step_with_actions(&[]);
         }
     }
 
     /// Step one turn applying `actions[p]` as player `p`'s moves. Players
-    /// beyond `actions.len()` take no action.
+    /// beyond `actions.len()` take no action. No-op once `self.step` reaches
+    /// `EPISODE_STEPS` — the episode is over.
     pub fn step_with_actions(&mut self, actions: &[&[MoveAction]]) {
+        if self.step >= EPISODE_STEPS {
+            return;
+        }
         // 1. Expire comets whose path ran out before this turn began.
         self.expire_pre_step();
 
