@@ -148,7 +148,7 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
               ${errBadge}${disabledBadge}
               <span class="replay-title">${escapeHtml(a.name)}</span>
               <span class="replay-winner">${a.author ? "by <strong>" + escapeHtml(a.author) + "</strong>" : ""}</span>
-              <span class="agent-runtime" title="${rtTooltip}" style="margin-left:auto; font-size:0.85em; color:var(--text-dim, #8a8a8a); font-variant-numeric:tabular-nums;">${rtText}/turn</span>
+              <span class="agent-runtime" title="${rtTooltip}">${rtText}/turn</span>
             </div>
             <div class="replay-meta-sub">
               ${safeId}${tags ? " · " + tags : ""}${desc ? " · " + desc : ""}
