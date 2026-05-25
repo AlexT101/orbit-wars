@@ -187,3 +187,4 @@ submission.tar.gz
 .rustup-home
 
 node_modules/
+.pnpm-store/
