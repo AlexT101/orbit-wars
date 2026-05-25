@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-25T02:01:50.259206+00:00",
+  "last_updated": "2026-05-25T19:21:32.591601+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 4700,
@@ -117,10 +117,16 @@
       "last_updated": "2026-05-24T21:49:26.681672+00:00"
     },
     "mine/simbot": {
-      "total_turns": 14692,
-      "total_seconds": 3591.401370999999,
-      "avg_ms": 244.44605029948264,
-      "last_updated": "2026-05-25T02:01:50.229948+00:00"
+      "total_turns": 14853,
+      "total_seconds": 3592.847684999999,
+      "avg_ms": 241.89373762876178,
+      "last_updated": "2026-05-25T19:21:32.562760+00:00"
+    },
+    "external/hellburner": {
+      "total_turns": 161,
+      "total_seconds": 2.76461,
+      "avg_ms": 17.171490683229813,
+      "last_updated": "2026-05-25T19:21:32.562794+00:00"
     }
   }
 }
