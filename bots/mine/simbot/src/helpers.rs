@@ -444,6 +444,51 @@ pub fn simulate_planet_timeline_from(
     }
 }
 
+/// Player-agnostic forward-sim output: the in-flight arrival ledger and the
+/// expiry map. Both are functions of probe state alone — building them once
+/// per rollout step and sharing across every player's `TimelineCache` is the
+/// main reason to keep this split out.
+#[derive(Debug, Clone)]
+pub struct ArrivalLedger {
+    pub horizon: i64,
+    pub ledger: ArrivalsByPlanet,
+    /// Turn at which a planet leaves the board, populated only for planets
+    /// that expire within `horizon` (i.e. comets near end of life). Missing
+    /// entry means the planet survives the entire window.
+    pub expiry_at: HashMap<i64, i64>,
+}
+
+impl ArrivalLedger {
+    /// Fork `parent` and walk forward `horizon` turns, collecting per-planet
+    /// arrivals plus expiry turns. `O(horizon * |planets|)`. This is the
+    /// expensive step that gets shared across players in [`rollout`].
+    pub fn build(parent: &SimProbe, horizon: i64, entity_cache: &EntityCache) -> Self {
+        let mut probe = parent.fork();
+        probe.step_n(horizon);
+        let mut ledger = probe.collect_arrivals();
+        let mut expiry_at: HashMap<i64, i64> = HashMap::default();
+        for planet in parent.planets() {
+            ledger.entry(planet.id).or_default();
+            if let Some(exp) = expiry_within_horizon(entity_cache, planet.id, horizon) {
+                expiry_at.insert(planet.id, exp);
+            }
+        }
+        Self { horizon, ledger, expiry_at }
+    }
+
+    pub fn arrivals(&self, planet_id: i64) -> &[ArrivalEvent] {
+        self.ledger
+            .get(&planet_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    #[inline]
+    pub fn expiry(&self, planet_id: i64) -> Option<i64> {
+        self.expiry_at.get(&planet_id).copied()
+    }
+}
+
 /// One-call cache that holds both the arrival ledger and per-planet baseline
 /// timelines, built from a single `SimProbe` rollout.
 ///
@@ -466,45 +511,42 @@ pub struct TimelineCache {
 
 impl TimelineCache {
     /// Build the cache by forking `parent` and walking forward `horizon` turns
-    /// to collect the in-flight arrival ledger. `O(horizon * |planets|)`.
+    /// to collect the in-flight arrival ledger, then computing per-player
+    /// baselines. `O(horizon * |planets|)`.
     pub fn build(
         parent: &SimProbe,
         player: i64,
         horizon: i64,
         entity_cache: &EntityCache,
     ) -> Self {
-        let mut probe = parent.fork();
-        probe.step_n(horizon);
-        let mut ledger = probe.collect_arrivals();
-        let snapshot_planets = parent.planets();
-        for planet in snapshot_planets {
-            ledger.entry(planet.id).or_default();
-        }
+        let ledger = ArrivalLedger::build(parent, horizon, entity_cache);
+        Self::from_ledger(parent.planets(), player, &ledger)
+    }
 
+    /// Build the cache from a precomputed [`ArrivalLedger`], paying only for
+    /// the per-player baseline pass (`O(horizon * |planets|)` but with a much
+    /// smaller constant than `build` — no probe forwarding). Use this when the
+    /// same ledger is shared across multiple players (rollout reactive turns).
+    ///
+    /// `planets` must match the snapshot the ledger was built from.
+    pub fn from_ledger(planets: &[Planet], player: i64, ledger: &ArrivalLedger) -> Self {
+        let horizon = ledger.horizon;
         let mut baselines =
-            HashMap::with_capacity_and_hasher(snapshot_planets.len(), Default::default());
-        let mut expiry_at: HashMap<i64, i64> = HashMap::default();
-        for planet in snapshot_planets {
-            let arrivals = ledger
-                .get(&planet.id)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            let expiry = expiry_within_horizon(entity_cache, planet.id, horizon);
-            if let Some(exp) = expiry {
-                expiry_at.insert(planet.id, exp);
-            }
+            HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        for planet in planets {
+            let arrivals = ledger.arrivals(planet.id);
+            let expiry = ledger.expiry(planet.id);
             baselines.insert(
                 planet.id,
                 simulate_planet_timeline(planet, arrivals, player, horizon, expiry),
             );
         }
-
         Self {
             player,
             horizon,
-            ledger,
+            ledger: ledger.ledger.clone(),
             baselines,
-            expiry_at,
+            expiry_at: ledger.expiry_at.clone(),
         }
     }
 

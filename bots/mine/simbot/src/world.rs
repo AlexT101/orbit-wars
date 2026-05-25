@@ -17,8 +17,8 @@ use crate::constants::{EPISODE_STEPS, HORIZON};
 use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
 use crate::entity_cache::EntityCache;
 use crate::helpers::{
-    count_players, simulate_planet_timeline, state_at_timeline, ArrivalEvent, PlanetTimeline,
-    TimelineCache,
+    count_players, simulate_planet_timeline, state_at_timeline, ArrivalEvent, ArrivalLedger,
+    PlanetTimeline, TimelineCache,
 };
 use crate::sim_probe::SimProbe;
 
@@ -115,10 +115,25 @@ impl<'a> WorldState<'a> {
         probe: &SimProbe,
         entity_cache: &'a EntityCache,
     ) -> Self {
+        let ledger = ArrivalLedger::build(probe, HORIZON, entity_cache);
+        Self::from_simprobe_with_ledger(player, probe, &ledger, entity_cache)
+    }
+
+    /// Shared-ledger variant of [`Self::from_simprobe`]. Skips the probe walk
+    /// in favor of reusing `ledger` — caller is responsible for ensuring the
+    /// ledger was built from the same probe snapshot. Used by `rollout` to
+    /// share the player-agnostic forward sim across every player's WorldState
+    /// in a reactive turn.
+    pub fn from_simprobe_with_ledger(
+        player: i64,
+        probe: &SimProbe,
+        ledger: &ArrivalLedger,
+        entity_cache: &'a EntityCache,
+    ) -> Self {
         let step = probe.step_count();
         let angular_velocity = probe.angular_velocity();
         let num_players = probe.num_players();
-        let timeline_cache = TimelineCache::build(probe, player, HORIZON, entity_cache);
+        let timeline_cache = TimelineCache::from_ledger(probe.planets(), player, ledger);
 
         let planets: Vec<Planet> = probe.planets().to_vec();
         let fleets: Vec<Fleet> = probe.fleets().to_vec();

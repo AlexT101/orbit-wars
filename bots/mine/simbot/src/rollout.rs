@@ -6,9 +6,10 @@
 
 #![allow(dead_code)]
 
-use crate::constants::EPISODE_STEPS;
+use crate::constants::{EPISODE_STEPS, HORIZON};
 use crate::engine::{EngineState, Fleet, MoveAction, Planet};
 use crate::entity_cache::EntityCache;
+use crate::helpers::ArrivalLedger;
 use crate::sim_probe::SimProbe;
 use crate::world::WorldState;
 
@@ -91,6 +92,17 @@ pub fn rollout_score(
         }
         cache.set_current_turn(probe.step_count());
         let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
+
+        // Build the arrival ledger once per reactive step and share it across
+        // every player's WorldState — the probe-walk is player-agnostic.
+        // On turn 0 every player uses pre-baked actions, so the ledger isn't
+        // needed and we skip the forward sim entirely.
+        let ledger: Option<ArrivalLedger> = if t == 0 {
+            None
+        } else {
+            Some(ArrivalLedger::build(&probe, HORIZON, cache))
+        };
+
         for p in 0..num_players {
             let pid = p as i64;
             if pid == my_player {
@@ -102,7 +114,8 @@ pub fn rollout_score(
                 actions[p] = turn0_opponents[p].clone();
                 continue;
             }
-            let ws = WorldState::from_simprobe(pid, &probe, cache);
+            let ledger = ledger.as_ref().expect("ledger built for t >= 1");
+            let ws = WorldState::from_simprobe_with_ledger(pid, &probe, ledger, cache);
             actions[p] = to_move_actions(&reply_plan_fn(&ws));
         }
         let action_slices: Vec<&[MoveAction]> = actions.iter().map(|v| v.as_slice()).collect();
@@ -133,13 +146,15 @@ pub fn opponent_turn0_actions(
     let saved_turn = cache.current_turn;
     cache.set_current_turn(initial_state.step);
     let num_players = initial_state.num_players;
+    let probe = SimProbe::from_engine(initial_state);
+    let ledger = ArrivalLedger::build(&probe, HORIZON, cache);
     let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
     for p in 0..num_players {
         let pid = p as i64;
         if pid == my_player {
             continue;
         }
-        let ws = WorldState::from_engine(pid, initial_state, cache);
+        let ws = WorldState::from_simprobe_with_ledger(pid, &probe, &ledger, cache);
         actions[p] = to_move_actions(&reply_plan_fn(&ws));
     }
     cache.set_current_turn(saved_turn);
