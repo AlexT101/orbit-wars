@@ -420,7 +420,7 @@ fn neighbor_holds_under_worst_case(
             continue;
         }
         let half_ships = (attacker.ships / 2).max(1);
-        let Some((_, turns, _, _)) =
+        let Some((_, turns, _, _, _)) =
             aim_with_prediction(world.entity_cache, *attacker_id, neighbor.id, attacker.ships)
         else {
             continue;
@@ -525,7 +525,7 @@ fn evaluate_frontline_strategy(
             }
         }
 
-        let Some((angle, turns, _, _)) =
+        let Some((angle, turns, _, _, _)) =
             aim_with_prediction(world.entity_cache, src_id, target.id, ships_to_send)
         else {
             continue;
@@ -578,7 +578,7 @@ fn evaluate_frontline_strategy(
                 let keep = excess / 2;
                 let trimmed = (ships_to_send - keep).max(TRIM_MIN_SHIPS);
                 if trimmed < ships_to_send {
-                    if let Some((t_angle, t_turns, _, _)) =
+                    if let Some((t_angle, t_turns, _, _, _)) =
                         aim_with_prediction(world.entity_cache, src_id, target.id, trimmed)
                     {
                         let last_t = trial.len() - 1;
@@ -700,7 +700,7 @@ fn send_reinforcements(
             continue;
         }
         let ships = available - GARRISON_SIZE;
-        let Some((angle, _turns, _, _)) =
+        let Some((angle, _turns, _, _, _)) =
             aim_with_prediction(world.entity_cache, p.id, target_id, ships)
         else {
             continue;
@@ -1068,7 +1068,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
         if *launch_turn != world.step {
             continue;
         }
-        let Some((angle, _turns, _, _)) =
+        let Some((angle, _turns, _, _, _)) =
             aim_with_prediction(world.entity_cache, *source_id, target_planet.id, *fleet_size)
         else {
             continue;

@@ -181,7 +181,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
                     continue;
                 }
                 for &ships in &ships_grid {
-                    let Some((angle, turns, _, _)) =
+                    let Some((angle, turns, _, _, _)) =
                         aim_with_prediction(&cache, shooter, target, ships)
                     else {
                         continue;
@@ -374,7 +374,7 @@ fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
                     continue;
                 }
                 for &ships in &ships_grid {
-                    let Some((_, turns, tx, ty)) =
+                    let Some((_, turns, tx, ty, _)) =
                         aim_with_prediction(&cache, shooter, target, ships)
                     else {
                         continue;
@@ -465,7 +465,7 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
                         continue;
                     }
                     for &ships in &ships_grid {
-                        let Some((angle, turns, _, _)) =
+                        let Some((angle, turns, _, _, _)) =
                             aim_with_prediction(&cache, shooter, target, ships)
                         else {
                             continue;
@@ -553,7 +553,7 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
                         continue;
                     }
                     for &ships in &ships_grid {
-                        let Some((angle, turns, _, _)) =
+                        let Some((angle, turns, _, _, _)) =
                             aim_with_prediction(&cache, shooter, target, ships)
                         else {
                             continue;

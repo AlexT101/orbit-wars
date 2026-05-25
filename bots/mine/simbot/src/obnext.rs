@@ -361,7 +361,12 @@ impl<'a> WorldModel<'a> {
             return *cached;
         }
 
-        let result = match self.entity_cache.aim_cache_lookup(src_id, target_id, ships) {
+        // The L2 cache and `aim_with_prediction` both deal in the 5-tuple
+        // (angle, turns, tx, ty, flight_time); obnext's local AimResult only
+        // tracks the first four, so drop flight_time at the boundary. The
+        // fifth field is what `shot_still_clear` needs internally to verify
+        // L2 entries after a comet spawn.
+        let result5 = match self.entity_cache.aim_cache_lookup(src_id, target_id, ships) {
             AimCacheVerdict::Hit(r) => r,
             AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
                 let r = aim_with_prediction(self.entity_cache, src_id, target_id, ships);
@@ -369,6 +374,7 @@ impl<'a> WorldModel<'a> {
                 r
             }
         };
+        let result: Option<AimResult> = result5.map(|(a, t, tx, ty, _ft)| (a, t, tx, ty));
 
         self.shot_cache.borrow_mut().insert(key, result);
         result

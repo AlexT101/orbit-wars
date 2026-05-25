@@ -59,8 +59,14 @@ const SUN_BLOCKER_ID: i64 = -1;
 /// one cached table. 20 → 0.05 speed steps → ~2.5% max speed error.
 const V_QUANT: f64 = 20.0;
 
-/// Aim solver result: `(angle_radians, integer_turns, target_x, target_y)`.
-pub type AimResult = (f64, i64, f64, f64);
+/// Aim solver result: `(angle_radians, integer_turns, target_x, target_y,
+/// fractional_flight_time)`. The fifth component is the real-valued flight
+/// time at which the swept-pair test fires — strictly `≤ turns` and used by
+/// the aim cache when re-verifying a stored shot after a comet spawn. Passing
+/// `turns as f64` there is incorrect (over-conservative): a blocker whose
+/// `flight_t` lies in `(flight_time, turns]` would falsely evict a still-valid
+/// shot.
+pub type AimResult = (f64, i64, f64, f64, f64);
 
 /// One turn's worth of blocking arc for one obstacle.
 ///
@@ -451,20 +457,21 @@ pub fn aim_with_prediction(
     if is_blocked(&table, target_id, angle, flight_time) {
         return None;
     }
-    Some((angle, turns, tx, ty))
+    Some((angle, turns, tx, ty, flight_time))
 }
 
-/// Cheap revalidation of a previously-computed `(angle, turns)` against the
-/// current obstacle set. Used by the aim cache when a comet may have spawned
-/// since the result was cached.
+/// Cheap revalidation of a previously-computed shot against the current
+/// obstacle set. Used by the aim cache when a comet may have spawned since
+/// the result was cached. `flight_time` must be the fractional flight time
+/// from the original solve — not `turns as f64` (see [`AimResult`]).
 pub fn shot_still_clear(
     cache: &EntityCache,
     shooter_id: i64,
     target_id: i64,
     ships: i64,
     angle: f64,
-    turns: i64,
+    flight_time: f64,
 ) -> bool {
     let table = cache.blocker_table(shooter_id, 0, ships);
-    !is_blocked(&table, target_id, angle, turns as f64)
+    !is_blocked(&table, target_id, angle, flight_time)
 }

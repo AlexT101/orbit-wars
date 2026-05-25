@@ -12,8 +12,9 @@ use crate::blockers::{self, BlockerTable};
 use crate::constants::{CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, ROTATION_LIMIT};
 use crate::engine::{CometGroup, Planet};
 
-/// Aim solver result tuple: `(angle, turns, target_x, target_y)`.
-pub type AimResult = (f64, i64, f64, f64);
+/// Aim solver result tuple: `(angle, turns, target_x, target_y,
+/// fractional_flight_time)`. See [`crate::blockers::AimResult`].
+pub type AimResult = (f64, i64, f64, f64, f64);
 
 #[derive(Clone, Copy)]
 struct CachedAim {
@@ -217,8 +218,8 @@ impl EntityCache {
                 if !comet_spawn_crossed(entry.stored_at_turn, self.current_turn) {
                     return AimCacheVerdict::Hit(Some(result));
                 }
-                let (angle, turns, _, _) = result;
-                if blockers::shot_still_clear(self, src, target, ships, angle, turns) {
+                let (angle, _turns, _tx, _ty, flight_time) = result;
+                if blockers::shot_still_clear(self, src, target, ships, angle, flight_time) {
                     self.aim_cache.lock().unwrap()[slot].insert(
                         key,
                         CachedAim {
