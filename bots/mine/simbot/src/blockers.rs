@@ -167,6 +167,31 @@ pub fn build_blocker_table(
 
     for (&bid, ent) in cache.entities.iter() {
         if bid == shooter_id {
+            // Source planet is normally skipped — the fleet launches at
+            // `radius + LAUNCH_CLEARANCE` from its center, outside the disk.
+            // BUT: an orbiting source with tangential speed `ω·r_orbital`
+            // (up to ~2.5/turn at ROTATION_LIMIT) can overtake a slow
+            // prograde-launched fleet within turn 1. The engine's collision
+            // loop doesn't skip the source, so without this we'd authorize
+            // shots the engine will instantly delete. Static sources can't
+            // move, so they remain skipped. Only emit the t=1 band — by
+            // turn 2 the fleet has moved ≥ v ≥ 1 outward while the planet
+            // moves ≤ 2.5 tangentially, so the chord geometry can no longer
+            // re-contact.
+            if matches!(ent.kind, EntityKind::OrbitingPlanet) {
+                add_dynamic_bands(
+                    &mut entries,
+                    cache,
+                    bid,
+                    ent.radius,
+                    lx,
+                    ly,
+                    launch_turn_offset,
+                    1, // t=1 band only
+                    launch_offset,
+                    v,
+                );
+            }
             continue;
         }
         match ent.kind {

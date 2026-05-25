@@ -196,6 +196,10 @@ impl Bot {
         // Construct the engine state once and reuse it for both the candidate
         // WorldState and the rollout seed — avoids parsing/cloning the
         // observation vecs a second time.
+        // NOTE: this recycles IDs of destroyed fleets — Kaggle's engine issues
+        // monotonically increasing IDs across the whole game, but we only see
+        // currently-visible fleets. Safe today because no consumer keys on
+        // fleet ID across turns; revisit if any cache/hash ever does.
         let next_fleet_id = obs.fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
         let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
         let player = obs.player;

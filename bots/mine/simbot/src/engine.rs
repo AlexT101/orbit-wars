@@ -351,6 +351,12 @@ pub struct EngineState {
     pub seed: u64,
     pub num_players: usize,
     pub configuration: Configuration,
+    /// When true, `step_with_actions` skips `spawn_comets()`. Set by
+    /// `from_observation_parts` because the bot doesn't know the real game
+    /// seed — spawning with the placeholder `seed: 0` would materialize
+    /// hallucinated comets in rollouts that cross a `COMET_SPAWN_STEPS`
+    /// boundary, poisoning collision/combat predictions.
+    pub disable_spawning: bool,
     // Cached `planet.id -> index-in-planets`. Maintained whenever the planets
     // vec is mutated (new / spawn_comets / remove_comets). NEVER read or
     // written elsewhere — keep mutation centralized so it can't drift.
@@ -409,6 +415,7 @@ impl EngineState {
             seed,
             num_players,
             configuration,
+            disable_spawning: false,
             planet_index_by_id,
             initial_planets_version: 0,
         }
@@ -450,6 +457,7 @@ impl EngineState {
             seed: 0,
             num_players,
             configuration,
+            disable_spawning: true,
             planet_index_by_id,
             initial_planets_version: 0,
         }
@@ -568,7 +576,7 @@ impl EngineState {
         #[cfg(feature = "profile")]
         let _ps0 = std::time::Instant::now();
 
-        if COMET_SPAWN_STEPS.contains(&(self.step + 1)) {
+        if !self.disable_spawning && COMET_SPAWN_STEPS.contains(&(self.step + 1)) {
             self.spawn_comets();
         }
 
