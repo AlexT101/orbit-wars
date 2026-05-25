@@ -2,7 +2,7 @@
 name = "simbot_native"
 version = "0.1.0"
 edition = "2021"
-description = "Native Orbit Wars agent for simbot — nearest-sniper baseline plus a vendored in-bot engine for simulation"
+description = "Rust native Orbit Wars agent"
 
 [lib]
 name = "simbot_native"
