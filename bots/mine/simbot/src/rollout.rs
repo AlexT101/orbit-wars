@@ -1,19 +1,63 @@
-//! Opponent-modeled rollout for scoring candidate plans.
+//! Strategy-agnostic rollout/search infrastructure for scoring candidate plans.
 //!
-//! Structure: 2 turns of full simulation where every player replans with the
-//! full obnext profile, then 20 turns of "ballistic" stepping with no new
+//! Structure: 2 turns of full simulation where every player replans via the
+//! supplied planner hook, then 20 turns of "ballistic" stepping with no new
 //! launches (in-flight fleets keep moving, combat resolves, planets produce).
 
 #![allow(dead_code)]
 
 use crate::engine::{EngineState, MoveAction};
 use crate::entity_cache::EntityCache;
-use crate::obnext::{plan_with_profile, PlanProfile};
-use crate::strategy::obnext_candidates;
 use crate::world::WorldState;
 
 pub const REACTIVE_TURNS: i64 = 2;
 pub const BALLISTIC_TURNS: i64 = 20;
+
+pub type PlannedMove = (i64, f64, i64);
+pub type PlanFn = for<'a> fn(&WorldState<'a>) -> Vec<PlannedMove>;
+pub type CandidateFn = for<'a> fn(&WorldState<'a>) -> Vec<Vec<PlannedMove>>;
+
+/// Score pre-built candidate plans via rollout and return the best. The
+/// planner hooks make the rollout/search layer strategy-agnostic: any policy
+/// that can produce a greedy reply plan and (optionally) a wider candidate set
+/// for 2-player opponent turn-0 minimax can plug in here.
+pub fn pick_plan_by_rollout(
+    initial_state: &EngineState,
+    my_player: i64,
+    candidates: Vec<Vec<PlannedMove>>,
+    reply_plan_fn: PlanFn,
+    opponent_candidate_fn: CandidateFn,
+    cache: &mut EntityCache,
+) -> Vec<PlannedMove> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let opp_variants = opponent_turn0_variants(
+        initial_state,
+        my_player,
+        reply_plan_fn,
+        opponent_candidate_fn,
+        cache,
+    );
+
+    let mut best_idx = 0;
+    let mut best_score = f64::NEG_INFINITY;
+    for (i, moves) in candidates.iter().enumerate() {
+        let mut worst = f64::INFINITY;
+        for opp in &opp_variants {
+            let score = rollout_score(initial_state, my_player, moves, opp, reply_plan_fn, cache);
+            if score < worst {
+                worst = score;
+            }
+        }
+        if worst > best_score {
+            best_score = worst;
+            best_idx = i;
+        }
+    }
+    candidates.into_iter().nth(best_idx).unwrap_or_default()
+}
 
 /// Score a candidate plan by simulating it forward.
 ///
@@ -30,8 +74,9 @@ pub const BALLISTIC_TURNS: i64 = 20;
 pub fn rollout_score(
     initial_state: &EngineState,
     my_player: i64,
-    my_moves: &[(i64, f64, i64)],
+    my_moves: &[PlannedMove],
     turn0_opponents: &[Vec<MoveAction>],
+    reply_plan_fn: PlanFn,
     cache: &mut EntityCache,
 ) -> f64 {
     let saved_turn = cache.current_turn;
@@ -56,7 +101,7 @@ pub fn rollout_score(
                 continue;
             }
             let ws = WorldState::from_engine(pid, &engine, cache);
-            actions[p] = to_move_actions(&plan_with_profile(&ws, PlanProfile::full()));
+            actions[p] = to_move_actions(&reply_plan_fn(&ws));
         }
         if engine.step_with_actions(&actions).is_err() {
             break;
@@ -84,6 +129,7 @@ pub fn rollout_score(
 pub fn opponent_turn0_actions(
     initial_state: &EngineState,
     my_player: i64,
+    reply_plan_fn: PlanFn,
     cache: &mut EntityCache,
 ) -> Vec<Vec<MoveAction>> {
     let saved_turn = cache.current_turn;
@@ -96,7 +142,7 @@ pub fn opponent_turn0_actions(
             continue;
         }
         let ws = WorldState::from_engine(pid, initial_state, cache);
-        actions[p] = to_move_actions(&plan_with_profile(&ws, PlanProfile::full()));
+        actions[p] = to_move_actions(&reply_plan_fn(&ws));
     }
     cache.set_current_turn(saved_turn);
     actions
@@ -111,14 +157,26 @@ pub fn opponent_turn0_actions(
 pub fn opponent_turn0_variants(
     initial_state: &EngineState,
     my_player: i64,
+    reply_plan_fn: PlanFn,
+    opponent_candidate_fn: CandidateFn,
     cache: &mut EntityCache,
 ) -> Vec<Vec<Vec<MoveAction>>> {
     let num_players = initial_state.num_players;
     if num_players != 2 {
-        return vec![opponent_turn0_actions(initial_state, my_player, cache)];
+        return vec![opponent_turn0_actions(
+            initial_state,
+            my_player,
+            reply_plan_fn,
+            cache,
+        )];
     }
     let Some(opp_player) = (0..num_players as i64).find(|&p| p != my_player) else {
-        return vec![opponent_turn0_actions(initial_state, my_player, cache)];
+        return vec![opponent_turn0_actions(
+            initial_state,
+            my_player,
+            reply_plan_fn,
+            cache,
+        )];
     };
 
     let saved_turn = cache.current_turn;
@@ -132,7 +190,7 @@ pub fn opponent_turn0_variants(
         single[opp_player as usize] = Vec::new();
         return vec![single];
     }
-    let variants = obnext_candidates(&opp_ws);
+    let variants = opponent_candidate_fn(&opp_ws);
 
     cache.set_current_turn(saved_turn);
 
@@ -146,7 +204,7 @@ pub fn opponent_turn0_variants(
         .collect()
 }
 
-fn to_move_actions(moves: &[(i64, f64, i64)]) -> Vec<MoveAction> {
+fn to_move_actions(moves: &[PlannedMove]) -> Vec<MoveAction> {
     moves
         .iter()
         .map(|&(from_id, angle, ships)| MoveAction {

@@ -9,7 +9,6 @@ mod helpers;
 mod obnext;
 mod rollout;
 mod sim_probe;
-mod strategy;
 mod world;
 
 #[cfg(test)]
@@ -22,7 +21,7 @@ use pyo3::types::{PyDict, PySequence};
 use crate::constants::COMET_SPAWN_STEPS;
 use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
 use crate::entity_cache::EntityCache;
-use crate::strategy::{obnext, obnext_candidates, pick_plan_by_rollout};
+use crate::rollout::pick_plan_by_rollout;
 use crate::world::WorldState;
 
 #[allow(dead_code)]
@@ -179,7 +178,7 @@ impl Bot {
             cache,
         );
 
-        let moves = obnext(&world);
+        let moves = crate::obnext::plan(&world);
         self.current_turn += 1;
         Ok(moves)
     }
@@ -217,11 +216,18 @@ impl Bot {
         let candidates = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
             let world = WorldState::from_engine(player, &initial_state, cache_ref);
-            obnext_candidates(&world)
+            crate::obnext::search_candidates(&world)
         };
 
         let cache_mut = self.cache.as_mut().expect("entity cache populated above");
-        let moves = pick_plan_by_rollout(&initial_state, player, candidates, cache_mut);
+        let moves = pick_plan_by_rollout(
+            &initial_state,
+            player,
+            candidates,
+            crate::obnext::plan,
+            crate::obnext::search_candidates,
+            cache_mut,
+        );
         self.current_turn += 1;
         Ok(moves)
     }

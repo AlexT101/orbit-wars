@@ -168,6 +168,22 @@ fn plan_smoke_returns_valid_moves() {
 }
 
 #[test]
+fn search_candidates_include_greedy_plan() {
+    let state = EngineState::new(42, 2, Configuration::default());
+    let cache = cache_for(&state);
+    let world = build_world(&state, &cache, 0);
+
+    let greedy = obnext::plan(&world);
+    let candidates = obnext::search_candidates(&world);
+
+    assert!(!candidates.is_empty(), "search should emit at least one candidate");
+    assert!(
+        candidates.iter().any(|moves| moves == &greedy),
+        "search candidates should include the plain greedy obnext plan"
+    );
+}
+
+#[test]
 fn plan_runs_under_advancing_engine() {
     let mut state = EngineState::new(42, 2, Configuration::default());
     let mut cache = cache_for(&state);
