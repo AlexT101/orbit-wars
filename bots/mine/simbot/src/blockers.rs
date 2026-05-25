@@ -41,10 +41,11 @@ use crate::constants::{
 use crate::engine::fleet_speed;
 use crate::entity_cache::{EntityCache, EntityKind};
 
-/// Maximum Newton iterations when leading a moving target. Three is plenty —
-/// converges to sub-tick accuracy in 1–2 in practice; the extra step is for
-/// pathological grazing orbits.
-const LEAD_ITERS: usize = 3;
+/// Maximum fixed-point iterations when leading a moving target. We iterate on
+/// the *integer* arrival turn, not just the fractional travel time, so a few
+/// more rounds are worthwhile to settle orbiters without returning an angle
+/// aimed at one turn and an ETA for another.
+const LEAD_ITERS: usize = 8;
 
 /// Synthetic id used for the sun in [`BlockerEntry::blocker_id`]. Negative so
 /// it cannot collide with any real planet/comet id.
@@ -343,27 +344,35 @@ pub fn lead_target(
     let target = cache.get(target_id)?;
     let tr = target.radius;
 
-    let [mut tx, mut ty] = cache.position(target_id, launch_turn_offset)?;
-    let mut t_est = ((tx - lx).hypot(ty - ly) - tr - launch_offset).max(0.0) / v;
+    let [seed_x, seed_y] = cache.position(target_id, launch_turn_offset)?;
+    let mut flight_time = ((seed_x - lx).hypot(seed_y - ly) - tr - launch_offset).max(0.0) / v;
+    let mut turns = (flight_time.ceil() as i64).max(1);
 
     for _ in 0..LEAD_ITERS {
-        let probe_turn = launch_turn_offset + (t_est.ceil() as i64).max(1);
-        let Some([nx, ny]) = cache.position(target_id, probe_turn) else {
-            break;
-        };
-        let d = (nx - lx).hypot(ny - ly);
-        let new_t = (d - tr - launch_offset).max(0.0) / v;
-        let converged = (new_t - t_est).abs() < 0.05 && (nx - tx).abs() + (ny - ty).abs() < 0.5;
-        tx = nx;
-        ty = ny;
-        t_est = new_t;
-        if converged {
-            break;
+        let probe_turn = launch_turn_offset + turns;
+        let [tx, ty] = cache.position(target_id, probe_turn)?;
+        let d = (tx - lx).hypot(ty - ly);
+        let next_flight_time = (d - tr - launch_offset).max(0.0) / v;
+        let next_turns = (next_flight_time.ceil() as i64).max(1);
+        flight_time = next_flight_time;
+        if next_turns == turns {
+            let angle = (ty - ly).atan2(tx - lx);
+            return Some((angle, turns, tx, ty, flight_time));
         }
+        turns = next_turns;
     }
+
+    // Final resynchronization: if we exhausted iterations, still make the
+    // returned aim point correspond to the returned integer ETA.
+    let [tx, ty] = cache.position(target_id, launch_turn_offset + turns)?;
+    let d = (tx - lx).hypot(ty - ly);
+    flight_time = (d - tr - launch_offset).max(0.0) / v;
+    let turns = (flight_time.ceil() as i64).max(1);
+    let [tx, ty] = cache.position(target_id, launch_turn_offset + turns)?;
+    let d = (tx - lx).hypot(ty - ly);
+    let flight_time = (d - tr - launch_offset).max(0.0) / v;
     let angle = (ty - ly).atan2(tx - lx);
-    let turns = (t_est.ceil() as i64).max(1);
-    Some((angle, turns, tx, ty, t_est))
+    Some((angle, turns, tx, ty, flight_time))
 }
 
 /// Aim from `shooter_id` to `target_id` with `ships`, launching now

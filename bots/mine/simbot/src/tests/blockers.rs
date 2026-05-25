@@ -4,9 +4,9 @@
 //! collision against every obstacle, and require the two to agree.
 
 use crate::blockers::{aim_with_prediction, bucket_to_speed, lead_target, speed_bucket};
-use crate::constants::{CENTER, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
-use crate::engine::{swept_pair_hit, Configuration, EngineState};
-use crate::entity_cache::EntityCache;
+use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
+use crate::engine::{fleet_speed, swept_pair_hit, Configuration, EngineState, MoveAction};
+use crate::entity_cache::{EntityCache, EntityKind};
 
 fn cache_for(state: &EngineState) -> EntityCache {
     EntityCache::build(
@@ -108,6 +108,53 @@ fn entity_ids_at_t0(cache: &EntityCache) -> Vec<i64> {
         .collect();
     ids.sort();
     ids
+}
+
+/// Returns true iff the shot eventually collides with the target under the
+/// engine's real fleet speed and swept-pair target motion. Stops when the
+/// fleet hits, leaves the board, or the turn budget expires.
+fn reaches_target_with_engine_speed(
+    cache: &EntityCache,
+    shooter_id: i64,
+    target_id: i64,
+    angle: f64,
+    ships: i64,
+    max_turns: i64,
+) -> bool {
+    let [sx, sy] = cache.position(shooter_id, 0).expect("shooter visible");
+    let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
+    let target_radius = cache.get(target_id).map(|e| e.radius).unwrap_or(0.0);
+    let launch_offset = shooter_radius + LAUNCH_CLEARANCE;
+    let speed = fleet_speed(ships.max(1), 6.0);
+    let mut fx = sx + angle.cos() * launch_offset;
+    let mut fy = sy + angle.sin() * launch_offset;
+    let vx = angle.cos() * speed;
+    let vy = angle.sin() * speed;
+
+    let mut prev_pos = cache.position(target_id, 0);
+    for t in 1..=max_turns {
+        let old_pos = (fx, fy);
+        fx += vx;
+        fy += vy;
+        let new_pos = (fx, fy);
+        let cur_pos = cache.position(target_id, t);
+        let (px0, py0, px1, py1) = match (prev_pos, cur_pos) {
+            (Some([x0, y0]), Some([x1, y1])) => (x0, y0, x1, y1),
+            (Some([x0, y0]), None) => (x0, y0, x0, y0),
+            _ => {
+                prev_pos = cur_pos;
+                continue;
+            }
+        };
+        if swept_pair_hit(old_pos, new_pos, (px0, py0), (px1, py1), target_radius) {
+            return true;
+        }
+        if !(0.0..=BOARD_SIZE).contains(&fx) || !(0.0..=BOARD_SIZE).contains(&fy) {
+            return false;
+        }
+        prev_pos = cur_pos;
+    }
+    false
 }
 
 /// For every (shooter, target, ships) case where the aimer says "path clear",
@@ -297,5 +344,148 @@ fn sun_blocks_chords_passing_through_center() {
     assert!(
         tested > 0,
         "seed 42 should contain at least one diametrically opposite static pair"
+    );
+}
+
+#[test]
+fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
+    let seeds = [42u64, 7, 100];
+    let ships_grid = [5i64, 17, 50, 120, 500];
+
+    let mut mismatches = Vec::new();
+    for seed in seeds {
+        let state = EngineState::new(seed, 2, Configuration::default());
+        let cache = cache_for(&state);
+        let ids = entity_ids_at_t0(&cache);
+
+        for &shooter in &ids {
+            for &target in &ids {
+                if shooter == target {
+                    continue;
+                }
+                let Some(target_ent) = cache.get(target) else {
+                    continue;
+                };
+                if !matches!(target_ent.kind, EntityKind::OrbitingPlanet) {
+                    continue;
+                }
+                for &ships in &ships_grid {
+                    let Some((_, turns, tx, ty)) =
+                        aim_with_prediction(&cache, shooter, target, ships)
+                    else {
+                        continue;
+                    };
+                    let Some([px, py]) = cache.position(target, turns) else {
+                        continue;
+                    };
+                    let err = (tx - px).hypot(ty - py);
+                    if err > 1e-6 {
+                        mismatches.push(format!(
+                            "seed={seed} shooter={shooter} target={target} ships={ships} turns={turns} \
+                             returned=({tx:.3},{ty:.3}) pos[turns]=({px:.3},{py:.3}) err={err:.6}"
+                        ));
+                        if mismatches.len() >= 12 {
+                            break;
+                        }
+                    }
+                }
+                if mismatches.len() >= 12 {
+                    break;
+                }
+            }
+            if mismatches.len() >= 12 {
+                break;
+            }
+        }
+        if mismatches.len() >= 12 {
+            break;
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "lead_target returned aim points that did not match their returned ETA:\n  {}",
+        mismatches.join("\n  "),
+    );
+}
+
+#[test]
+fn accepted_orbiting_shots_reach_target_under_engine_speed() {
+    let seeds = [42u64, 7, 100];
+    let ships_grid = [5i64, 17, 50, 120, 500];
+    let future_steps = [0i64, 10];
+    let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
+
+    let mut misses = Vec::new();
+    for seed in seeds {
+        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut cache = cache_for(&state);
+
+        for &step in &future_steps {
+            while state.step < step {
+                state.step_with_actions(&noop).unwrap();
+            }
+            cache.set_current_turn(state.step);
+
+            let mut ids: Vec<i64> = cache
+                .entities
+                .iter()
+                .filter(|(_, e)| e.positions[state.step as usize].is_some())
+                .map(|(&id, _)| id)
+                .collect();
+            ids.sort_unstable();
+
+            for &shooter in &ids {
+                for &target in &ids {
+                    if shooter == target {
+                        continue;
+                    }
+                    let Some(target_ent) = cache.get(target) else {
+                        continue;
+                    };
+                    if !matches!(target_ent.kind, EntityKind::OrbitingPlanet) {
+                        continue;
+                    }
+                    for &ships in &ships_grid {
+                        let Some((angle, turns, _, _)) =
+                            aim_with_prediction(&cache, shooter, target, ships)
+                        else {
+                            continue;
+                        };
+                        let max_turns = (EPISODE_STEPS - cache.current_turn).max(0);
+                        if reaches_target_with_engine_speed(
+                            &cache, shooter, target, angle, ships, max_turns,
+                        ) {
+                            continue;
+                        }
+                        misses.push(format!(
+                            "seed={seed} step={step} shooter={shooter} target={target} ships={ships} \
+                             angle={angle:.6} turns={turns}"
+                        ));
+                        if misses.len() >= 12 {
+                            break;
+                        }
+                    }
+                    if misses.len() >= 12 {
+                        break;
+                    }
+                }
+                if misses.len() >= 12 {
+                    break;
+                }
+            }
+            if misses.len() >= 12 {
+                break;
+            }
+        }
+        if misses.len() >= 12 {
+            break;
+        }
+    }
+
+    assert!(
+        misses.is_empty(),
+        "accepted orbiting shots that never reached their target:\n  {}",
+        misses.join("\n  "),
     );
 }
