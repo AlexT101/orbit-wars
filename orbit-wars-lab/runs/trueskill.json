@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-25T00:44:32.031952+00:00",
+  "last_updated": "2026-05-25T01:01:07.195651+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -40,9 +40,9 @@
     },
     "mine/simbot": {
       "2p": {
-        "mu": 851.6495204636533,
-        "sigma": 25.145899239744256,
-        "games_played": 372
+        "mu": 854.5773563299717,
+        "sigma": 25.01066424676782,
+        "games_played": 373
       }
     },
     "external/marco-dg": {
@@ -73,9 +73,9 @@
     },
     "external/owproto": {
       "2p": {
-        "mu": 816.2200428007196,
-        "sigma": 41.75960061842563,
-        "games_played": 22
+        "mu": 808.1777216531126,
+        "sigma": 40.82285140230431,
+        "games_played": 23
       }
     },
     "external/peaking-bot": {
