@@ -456,15 +456,22 @@ pub fn lead_target(
     None
 }
 
-/// Aim from `shooter_id` to `target_id` with `ships`, launching now
-/// (`launch_turn_offset == 0`). Quantizes the speed once, then routes the
-/// quantized value through both the leader and the cached blocker table so
-/// the (angle, turns) result is consistent with what the table tested.
+/// Aim from `shooter_id` to `target_id` with `ships`, for a fleet launching
+/// at `launch_turn_offset` turns after the cache's current turn (pass `0`
+/// for "launch now"). Source, target, and obstacle positions are all
+/// evaluated at the launch turn so the blocker table reflects the real
+/// flight window — required by the early-game DFS, which scores delayed
+/// launches and would otherwise falsely assume current geometry.
+///
+/// Quantizes the speed once, then routes the quantized value through both
+/// the leader and the cached blocker table so the (angle, turns) result is
+/// consistent with what the table tested.
 pub fn aim_with_prediction(
     cache: &EntityCache,
     shooter_id: i64,
     target_id: i64,
     ships: i64,
+    launch_turn_offset: i64,
 ) -> Option<AimResult> {
     // Lead the target at the **exact** engine speed so the (angle, turns) we
     // emit lands on the actual orbital intercept point — quantizing here was
@@ -472,13 +479,13 @@ pub fn aim_with_prediction(
     // out from under our predicted hit point on long shots.
     let v_true = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
     let (angle, turns, tx, ty, flight_time) =
-        lead_target(cache, shooter_id, target_id, 0, v_true)?;
+        lead_target(cache, shooter_id, target_id, launch_turn_offset, v_true)?;
     // The blocker table is still keyed by the quantized bucket so different
     // ship counts that round to the same speed share a cached table; the
     // angle/flight_time we query it with come from the precise lead solve,
     // which is the conservative direction (slight over-rejection at the
     // boundary, never under-rejection).
-    let table = cache.blocker_table(shooter_id, 0, ships);
+    let table = cache.blocker_table(shooter_id, launch_turn_offset, ships);
     if is_blocked(&table, target_id, angle, flight_time) {
         return None;
     }
@@ -489,6 +496,11 @@ pub fn aim_with_prediction(
 /// obstacle set. Used by the aim cache when a comet may have spawned since
 /// the result was cached. `flight_time` must be the fractional flight time
 /// from the original solve — not `turns as f64` (see [`AimResult`]).
+/// `launch_turn_offset` is the offset of the launch turn *relative to the
+/// cache's current turn* at re-verification time — for a delayed-launch
+/// entry whose abs-launch slot has been partially overtaken, this is
+/// `slot - current_turn`. The blocker table is built for that offset so
+/// re-verification sees obstacle positions at the actual launch time.
 pub fn shot_still_clear(
     cache: &EntityCache,
     shooter_id: i64,
@@ -496,7 +508,8 @@ pub fn shot_still_clear(
     ships: i64,
     angle: f64,
     flight_time: f64,
+    launch_turn_offset: i64,
 ) -> bool {
-    let table = cache.blocker_table(shooter_id, 0, ships);
+    let table = cache.blocker_table(shooter_id, launch_turn_offset, ships);
     !is_blocked(&table, target_id, angle, flight_time)
 }

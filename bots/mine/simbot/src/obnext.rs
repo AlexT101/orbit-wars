@@ -366,11 +366,11 @@ impl<'a> WorldModel<'a> {
         // tracks the first four, so drop flight_time at the boundary. The
         // fifth field is what `shot_still_clear` needs internally to verify
         // L2 entries after a comet spawn.
-        let result5 = match self.entity_cache.aim_cache_lookup(src_id, target_id, ships) {
+        let result5 = match self.entity_cache.aim_cache_lookup(src_id, target_id, ships, 0) {
             AimCacheVerdict::Hit(r) => r,
             AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
-                let r = aim_with_prediction(self.entity_cache, src_id, target_id, ships);
-                self.entity_cache.aim_cache_store(src_id, target_id, ships, r);
+                let r = aim_with_prediction(self.entity_cache, src_id, target_id, ships, 0);
+                self.entity_cache.aim_cache_store(src_id, target_id, ships, 0, r);
                 r
             }
         };

@@ -182,7 +182,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
                 }
                 for &ships in &ships_grid {
                     let Some((angle, turns, _, _, _)) =
-                        aim_with_prediction(&cache, shooter, target, ships)
+                        aim_with_prediction(&cache, shooter, target, ships, 0)
                     else {
                         continue;
                     };
@@ -253,7 +253,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
                     else {
                         continue;
                     };
-                    if aim_with_prediction(&cache, shooter, target, ships).is_some() {
+                    if aim_with_prediction(&cache, shooter, target, ships, 0).is_some() {
                         continue;
                     }
 
@@ -330,7 +330,7 @@ fn sun_blocks_chords_passing_through_center() {
             }
 
             for ships in [5i64, 50, 500] {
-                let verdict = aim_with_prediction(&cache, a_id, b_id, ships);
+                let verdict = aim_with_prediction(&cache, a_id, b_id, ships, 0);
                 assert!(
                     verdict.is_none(),
                     "shooter={a_id} target={b_id} ships={ships}: chord passes \
@@ -375,7 +375,7 @@ fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
                 }
                 for &ships in &ships_grid {
                     let Some((_, turns, tx, ty, _)) =
-                        aim_with_prediction(&cache, shooter, target, ships)
+                        aim_with_prediction(&cache, shooter, target, ships, 0)
                     else {
                         continue;
                     };
@@ -466,7 +466,7 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
                     }
                     for &ships in &ships_grid {
                         let Some((angle, turns, _, _, _)) =
-                            aim_with_prediction(&cache, shooter, target, ships)
+                            aim_with_prediction(&cache, shooter, target, ships, 0)
                         else {
                             continue;
                         };
@@ -554,7 +554,7 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
                     }
                     for &ships in &ships_grid {
                         let Some((angle, turns, _, _, _)) =
-                            aim_with_prediction(&cache, shooter, target, ships)
+                            aim_with_prediction(&cache, shooter, target, ships, 0)
                         else {
                             continue;
                         };

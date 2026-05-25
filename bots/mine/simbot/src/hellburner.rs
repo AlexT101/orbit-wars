@@ -150,12 +150,13 @@ pub struct HellburnerModel<'a> {
     pub outbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub reinforcement_target: HashMap<i64, i64>,
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
-    /// memoization of `(src, target, ships) → aim`. Avoids repeated traffic
-    /// to the L2 `EntityCache::aim_cache` inside the inner loops of
-    /// `evaluate_frontline_strategy`, `evaluate_move_orders` (where the same
-    /// shot can be re-queried several times across the main loop and the
-    /// worst-case sub-rollout), and `run_early_game`'s DFS.
-    shot_cache: RefCell<HashMap<(i64, i64, i64), Option<AimResult>>>,
+    /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
+    /// Avoids repeated traffic to the L2 `EntityCache::aim_cache` inside the
+    /// inner loops of `evaluate_frontline_strategy`, `evaluate_move_orders`
+    /// (where the same shot can be re-queried several times across the main
+    /// loop and the worst-case sub-rollout), and `run_early_game`'s DFS
+    /// (which probes both `offset == 0` shots and delayed-launch shots).
+    shot_cache: RefCell<HashMap<(i64, i64, i64, i64), Option<AimResult>>>,
 }
 
 impl<'a> HellburnerModel<'a> {
@@ -224,27 +225,36 @@ impl<'a> HellburnerModel<'a> {
         }
     }
 
-    /// Cached `aim_with_prediction`. Two-level cache (mirrors the obnext
-    /// `WorldModel::plan_shot` pattern):
-    ///   * L1 — per-`HellburnerModel` `shot_cache`: avoids repeated traffic
-    ///     to the L2 `RefCell` inside hot evaluation loops.
-    ///   * L2 — `EntityCache::aim_cache`: shares results across every
-    ///     `HellburnerModel` built during the same bot turn (rollout
-    ///     candidates / opponent rebuilds) and across turns when geometry
-    ///     is still valid. Stale entries (post-comet-spawn) are re-verified
-    ///     or evicted lazily inside `aim_cache_lookup`.
-    pub fn plan_shot(&self, src_id: i64, target_id: i64, ships: i64) -> Option<AimResult> {
+    /// Cached aim with an optional future launch offset.
+    ///
+    /// Caching:
+    ///   * L1 — per-`HellburnerModel` `shot_cache`, keyed by
+    ///     `(src, target, ships, launch_turn_offset)`. Avoids repeated
+    ///     traffic to L2 inside hot evaluation loops and the early-game DFS.
+    ///   * L2 — `EntityCache::aim_cache`, indexed by absolute launch turn
+    ///     so launch-now and delayed-launch entries share slots whenever
+    ///     their `current_turn + offset` matches. Shared across every
+    ///     `HellburnerModel` built during this bot turn, with rollout
+    ///     forward-sim entries, and across real turns (with lazy comet-spawn
+    ///     re-verification inside `aim_cache_lookup`).
+    pub fn plan_shot(
+        &self,
+        src_id: i64,
+        target_id: i64,
+        ships: i64,
+        launch_turn_offset: i64,
+    ) -> Option<AimResult> {
         let ships = ships.max(1);
-        let key = (src_id, target_id, ships);
+        let key = (src_id, target_id, ships, launch_turn_offset);
         if let Some(&cached) = self.shot_cache.borrow().get(&key) {
             return cached;
         }
         let cache = self.state.entity_cache;
-        let result = match cache.aim_cache_lookup(src_id, target_id, ships) {
+        let result = match cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset) {
             AimCacheVerdict::Hit(r) => r,
             AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
-                let r = aim_with_prediction(cache, src_id, target_id, ships);
-                cache.aim_cache_store(src_id, target_id, ships, r);
+                let r = aim_with_prediction(cache, src_id, target_id, ships, launch_turn_offset);
+                cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
                 r
             }
         };
@@ -460,7 +470,7 @@ fn neighbor_holds_under_worst_case(
         }
         let half_ships = (attacker.ships / 2).max(1);
         let Some((_, turns, _, _, _)) =
-            model.plan_shot(*attacker_id, neighbor.id, attacker.ships)
+            model.plan_shot(*attacker_id, neighbor.id, attacker.ships, 0)
         else {
             continue;
         };
@@ -565,7 +575,7 @@ fn evaluate_frontline_strategy(
         }
 
         let Some((angle, turns, _, _, _)) =
-            model.plan_shot(src_id, target.id, ships_to_send)
+            model.plan_shot(src_id, target.id, ships_to_send, 0)
         else {
             continue;
         };
@@ -618,7 +628,7 @@ fn evaluate_frontline_strategy(
                 let trimmed = (ships_to_send - keep).max(TRIM_MIN_SHIPS);
                 if trimmed < ships_to_send {
                     if let Some((t_angle, t_turns, _, _, _)) =
-                        model.plan_shot(src_id, target.id, trimmed)
+                        model.plan_shot(src_id, target.id, trimmed, 0)
                     {
                         let last_t = trial.len() - 1;
                         let saved = trial[last_t];
@@ -740,7 +750,7 @@ fn send_reinforcements(
         }
         let ships = available - GARRISON_SIZE;
         let Some((angle, _turns, _, _, _)) =
-            model.plan_shot(p.id, target_id, ships)
+            model.plan_shot(p.id, target_id, ships, 0)
         else {
             continue;
         };
@@ -777,31 +787,27 @@ fn early_production_of(world: &WorldState, planet_id: i64) -> i64 {
         .unwrap_or(0)
 }
 
-/// Iterative-intercept travel time mirroring hellburner's
-/// `early_game_compute_travel_turns` + `intercept_planet`. Source position is
-/// taken at the continuous absolute step `launch_turn - 0.5` (orbital sources)
-/// and target position is solved via the damped fixed-point in `intercept_from`.
+/// Travel time for the early-game DFS. Routes through
+/// `model.plan_shot` so the search is obstacle-aware *and*
+/// future-launch-aware: source, target, and obstacles are all evaluated at
+/// the real launch turn (`launch_turn_offset = launch_turn - world.step`),
+/// not at the current turn. Returns `+inf` when the shot is blocked or no
+/// viable intercept exists.
 fn early_travel_turns(
-    world: &WorldState,
+    model: &HellburnerModel,
     source_id: i64,
     target_id: i64,
     fleet_size: i64,
-    launch_turn: i64,
+    launch_turn_offset: i64,
 ) -> f64 {
-    let (sx, sy) = source_pos_at(world, source_id, launch_turn as f64 - 0.5);
-    let (_angle, _tx, _ty, travel) = intercept_from(
-        world,
-        sx,
-        sy,
-        target_id,
-        fleet_size,
-        launch_turn as f64,
-    );
-    travel
+    match model.plan_shot(source_id, target_id, fleet_size, launch_turn_offset) {
+        Some((_angle, turns, _, _, _)) => turns as f64,
+        None => f64::INFINITY,
+    }
 }
 
 fn early_find_capture_turn(
-    world: &WorldState,
+    model: &HellburnerModel,
     state: &EarlyState,
     target: &Planet,
 ) -> Option<i64> {
@@ -820,8 +826,13 @@ fn early_find_capture_turn(
             if launch_turn >= horizon {
                 break;
             }
-            let travel = early_travel_turns(world, source, target.id, fleet_size, launch_turn);
+            let launch_offset = launch_turn - model.state.step;
+            let travel = early_travel_turns(model, source, target.id, fleet_size, launch_offset);
             if !travel.is_finite() {
+                // Shot is blocked at this fleet size. Different ship counts
+                // produce different fleet_speed and thus different intercept
+                // geometry, so a heavier/lighter fleet could still be viable —
+                // keep searching this source rather than abandoning it.
                 continue;
             }
             let arrival = launch_turn + travel.ceil() as i64;
@@ -839,7 +850,7 @@ fn early_find_capture_turn(
 
 /// (source_id, fleet_size, launch_turn, arrival_turn)
 fn early_assign_fleet(
-    world: &WorldState,
+    model: &HellburnerModel,
     state: &EarlyState,
     target: &Planet,
     capture_turn: i64,
@@ -856,7 +867,8 @@ fn early_assign_fleet(
                 continue;
             }
             let launch_turn = state.turn + wait_turns;
-            let travel = early_travel_turns(world, source, target.id, fleet_size, launch_turn);
+            let launch_offset = launch_turn - model.state.step;
+            let travel = early_travel_turns(model, source, target.id, fleet_size, launch_offset);
             if !travel.is_finite() {
                 continue;
             }
@@ -1005,7 +1017,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
     };
 
     let initial_gain = |planet: &Planet, state: &EarlyState| -> f64 {
-        let Some(ct) = early_find_capture_turn(world, state, planet) else {
+        let Some(ct) = early_find_capture_turn(model, state, planet) else {
             return f64::NEG_INFINITY;
         };
         let horizon = state.turn + EARLY_LOOK_AHEAD;
@@ -1030,6 +1042,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
 
     fn dfs(
         world: &WorldState,
+        model: &HellburnerModel,
         state: &EarlyState,
         remaining: &[Planet],
         sequence: &mut Vec<(Planet, (i64, i64, i64, i64), i64)>,
@@ -1045,7 +1058,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
         let horizon = state.turn + EARLY_LOOK_AHEAD;
         let mut bound = cur_score;
         for planet in remaining {
-            if let Some(ct) = early_find_capture_turn(world, state, planet) {
+            if let Some(ct) = early_find_capture_turn(model, state, planet) {
                 let gain = planet.production * (horizon - ct) - planet.ships;
                 if gain > 0 {
                     bound += gain;
@@ -1066,13 +1079,13 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
             if already_targeted.contains(&planet.id) {
                 continue;
             }
-            let Some(ct) = early_find_capture_turn(world, state, planet) else {
+            let Some(ct) = early_find_capture_turn(model, state, planet) else {
                 continue;
             };
             if planet.production * (horizon - ct) - planet.ships <= 0 {
                 continue;
             }
-            let Some(assign) = early_assign_fleet(world, state, planet, ct) else {
+            let Some(assign) = early_assign_fleet(model, state, planet, ct) else {
                 continue;
             };
             let mut next_state = state.clone();
@@ -1082,6 +1095,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
             next_remaining.extend(remaining[idx + 1..].iter().cloned());
             dfs(
                 world,
+                model,
                 &next_state,
                 &next_remaining,
                 sequence,
@@ -1094,6 +1108,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
 
     dfs(
         world,
+        model,
         &initial_state,
         &candidates,
         &mut sequence,
@@ -1108,7 +1123,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
             continue;
         }
         let Some((angle, _turns, _, _, _)) =
-            model.plan_shot(*source_id, target_planet.id, *fleet_size)
+            model.plan_shot(*source_id, target_planet.id, *fleet_size, 0)
         else {
             continue;
         };

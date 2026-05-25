@@ -78,15 +78,18 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
 /// Public aim entry point. Delegates to the parametric blocker pipeline in
 /// [`crate::blockers`]: lead the target with Newton iteration, then reject
 /// the shot if any blocker (sun, static planet, orbiter, comet) covers the
-/// resulting `(angle, flight_time)` pair.
+/// resulting `(angle, flight_time)` pair. Pass `launch_turn_offset = 0` to
+/// launch now; non-zero offsets evaluate source/target/obstacle positions
+/// at the future launch turn (used by the hellburner early-game DFS).
 #[inline]
 pub fn aim_with_prediction(
     cache: &EntityCache,
     shooter_id: i64,
     target_id: i64,
     ships: i64,
+    launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    blockers::aim_with_prediction(cache, shooter_id, target_id, ships)
+    blockers::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
 }
 
 /// Returns the engine's player-slot count: `max_owner + 1` across all

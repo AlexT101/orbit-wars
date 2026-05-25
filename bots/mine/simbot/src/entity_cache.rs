@@ -73,9 +73,15 @@ pub struct EntityCache {
     pub current_turn: i64,
     pub angular_velocity: f64,
     pub entities: HashMap<i64, Entity>,
-    /// Per-turn aim cache. `aim_cache[abs_turn]` maps `(src, target, ships)`
-    /// to a cached aim result. Indexed by absolute turn because aim geometry
-    /// is fully determined by the source/target positions at that turn.
+    /// Per-turn aim cache. `aim_cache[abs_launch_turn]` maps
+    /// `(src, target, ships)` to a cached aim result. Indexed by the
+    /// **absolute launch turn** (= `current_turn + launch_turn_offset` at
+    /// storage time) rather than the storage turn, so that:
+    ///   * Delayed-launch entries from the hellburner early-game DFS and
+    ///     launch-now entries from later real turns share the slot whose
+    ///     `abs_launch` matches, giving cross-turn reuse for free.
+    ///   * Rollout forward-sim entries (stored at the rollout's notion of
+    ///     `current_turn`) likewise share slots with the bot's real turns.
     aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
     /// Lazily-built [`BlockerTable`]s keyed by
     /// `(shooter_id, absolute_launch_turn, speed_bucket)`. Two different
@@ -188,20 +194,27 @@ impl EntityCache {
         table
     }
 
-    /// Look up a cached aim result keyed at the current absolute turn.
+    /// Look up a cached aim result for a shot launching at
+    /// `current_turn + launch_turn_offset`.
     ///
     /// `Some` entries stored across a [`COMET_SPAWN_STEPS`] boundary are
-    /// re-verified against the current obstacle set: passing entries are
-    /// returned (with `stored_at_turn` refreshed so the next lookup is free);
-    /// failing entries are evicted and reported as `Stale`. `None` entries
-    /// never need re-verification — a fresh comet can only block paths,
-    /// never enable them.
-    pub fn aim_cache_lookup(&self, src: i64, target: i64, ships: i64) -> AimCacheVerdict {
-        let slot = self.current_turn;
-        if slot < 0 || (slot as usize) >= EPISODE_STEPS as usize {
+    /// re-verified against the obstacle set at the entry's launch turn:
+    /// passing entries are returned (with `stored_at_turn` refreshed so the
+    /// next lookup is free); failing entries are evicted and reported as
+    /// `Stale`. `None` entries never need re-verification — a fresh comet
+    /// can only block paths, never enable them.
+    pub fn aim_cache_lookup(
+        &self,
+        src: i64,
+        target: i64,
+        ships: i64,
+        launch_turn_offset: i64,
+    ) -> AimCacheVerdict {
+        let abs_launch = self.current_turn + launch_turn_offset;
+        if abs_launch < 0 || (abs_launch as usize) >= EPISODE_STEPS as usize {
             return AimCacheVerdict::Miss;
         }
-        let slot = slot as usize;
+        let slot = abs_launch as usize;
         let key = (src, target, ships);
 
         let entry = {
@@ -219,7 +232,15 @@ impl EntityCache {
                     return AimCacheVerdict::Hit(Some(result));
                 }
                 let (angle, _turns, _tx, _ty, flight_time) = result;
-                if blockers::shot_still_clear(self, src, target, ships, angle, flight_time) {
+                if blockers::shot_still_clear(
+                    self,
+                    src,
+                    target,
+                    ships,
+                    angle,
+                    flight_time,
+                    launch_turn_offset,
+                ) {
                     self.aim_cache.lock().unwrap()[slot].insert(
                         key,
                         CachedAim {
@@ -236,21 +257,30 @@ impl EntityCache {
         }
     }
 
-    /// Store an aim result for `(src, target, ships)` at the current turn.
-    pub fn aim_cache_store(&self, src: i64, target: i64, ships: i64, result: Option<AimResult>) {
-        let slot = self.current_turn;
-        if slot < 0 || (slot as usize) >= EPISODE_STEPS as usize {
+    /// Store an aim result for a shot launching at
+    /// `current_turn + launch_turn_offset`.
+    pub fn aim_cache_store(
+        &self,
+        src: i64,
+        target: i64,
+        ships: i64,
+        launch_turn_offset: i64,
+        result: Option<AimResult>,
+    ) {
+        let abs_launch = self.current_turn + launch_turn_offset;
+        if abs_launch < 0 || (abs_launch as usize) >= EPISODE_STEPS as usize {
             return;
         }
         let entry = CachedAim {
             result,
             stored_at_turn: self.current_turn,
         };
-        self.aim_cache.lock().unwrap()[slot as usize].insert((src, target, ships), entry);
+        self.aim_cache.lock().unwrap()[abs_launch as usize].insert((src, target, ships), entry);
     }
 
-    /// Drop all cached aim results for `turn`. Called once per bot turn to
-    /// keep the cache from accumulating dead entries over a 500-turn match.
+    /// Drop all cached aim results for launches at absolute `turn`. Called
+    /// once per bot turn (with `turn = current_turn - 1`) to release slots
+    /// whose launch time has passed and that can no longer be queried.
     pub fn clear_aim_cache_slot(&mut self, turn: i64) {
         if turn < 0 || (turn as usize) >= EPISODE_STEPS as usize {
             return;
