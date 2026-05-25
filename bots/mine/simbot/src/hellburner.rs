@@ -21,11 +21,12 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::constants::{CENTER, MAX_SHIP_SPEED};
-use crate::engine::{distance, fleet_speed, Planet};
+use crate::constants::CENTER;
+use crate::engine::Planet;
 use crate::entity_cache::{AimCacheVerdict, Entity};
 use crate::helpers::{
-    aim_with_prediction, simulate_planet_timeline, AimResult, ArrivalEvent, PlanetTimeline,
+    aim_with_prediction, dist, fleet_speed, simulate_planet_timeline, AimResult, ArrivalEvent,
+    PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
 
@@ -71,11 +72,11 @@ fn intercept_from(
     scene_step: f64,
 ) -> (f64, f64, f64, f64) {
     let target = world.planet(target_id);
-    let speed = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
+    let speed = fleet_speed(ships);
     let entity = match world.entity_cache.get(target_id) {
         Some(e) => e,
         None => {
-            let travel = distance((sx, sy), (target.x, target.y)) / speed;
+            let travel = dist(sx, sy, target.x, target.y) / speed;
             let angle = (target.y - sy).atan2(target.x - sx);
             return (angle, target.x, target.y, travel);
         }
@@ -87,7 +88,7 @@ fn intercept_from(
         // only hit for static planets. Use target's current position.
         let tx = target.x;
         let ty = target.y;
-        let travel = distance((sx, sy), (tx, ty)) / speed;
+        let travel = dist(sx, sy, tx, ty) / speed;
         let angle = (ty - sy).atan2(tx - sx);
         return (angle, tx, ty, travel);
     }
@@ -96,13 +97,13 @@ fn intercept_from(
     let initial_pos = entity.positions[0].unwrap_or([CENTER + r, CENTER]);
     let ia = (initial_pos[1] - CENTER).atan2(initial_pos[0] - CENTER);
 
-    let mut travel = distance((sx, sy), (target.x, target.y)) / speed;
+    let mut travel = dist(sx, sy, target.x, target.y) / speed;
     let mut converged = false;
     for _ in 0..30 {
         let a = ia + omega * (scene_step + travel - 0.5);
         let nx = CENTER + r * a.cos();
         let ny = CENTER + r * a.sin();
-        let raw_new = distance((sx, sy), (nx, ny)) / speed;
+        let raw_new = dist(sx, sy, nx, ny) / speed;
         let new_travel = 0.5 * (travel + raw_new - 0.5);
         if (new_travel - travel).abs() < 1e-6 {
             travel = new_travel;
@@ -195,7 +196,7 @@ impl<'a> HellburnerModel<'a> {
                     continue;
                 }
                 let [fx, fy] = future_pos[&dst.id];
-                let travel = distance((src.x, src.y), (fx, fy));
+                let travel = dist(src.x, src.y, fx, fy);
                 if travel <= MAX_DISTANCE {
                     inbound_edges
                         .get_mut(&dst.id)
