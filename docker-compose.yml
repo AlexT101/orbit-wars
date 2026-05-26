@@ -7,6 +7,7 @@ services:
       context: ./orbit-wars-lab
       additional_contexts:
         agents: ./bots
+        rust: ./rust_engine
     image: orbit-wars-lab:latest
     container_name: orbit-wars-lab
     # Drop to the host user so files written to volumes are owned by you,

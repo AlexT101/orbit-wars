@@ -560,11 +560,26 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     try {
       if (detail.kind === "local") {
         setKaggleCtx(null);
-        activeReplay.playLocal(detail.runId, detail.matchId);
+        // Fetch the run first so we can short-circuit ultrafast runs
+        // (which have no replay file) before kicking the iframe to a
+        // 404-bound URL.
         const run = await api.getRun(detail.runId);
+        const runMode =
+          (run as any).config?.mode || (run as any).run?.mode;
         const m = run.results?.matches.find(
           (x: any) => x.match_id === detail.matchId,
         );
+        if (runMode === "ultrafast") {
+          activeReplay.showError(
+            "Ultrafast mode — no replay recorded for this match.",
+          );
+        } else {
+          activeReplay.playLocal(detail.runId, detail.matchId);
+          // Compute series directly — independent of the iframe, so the
+          // Graphs accordion populates even if the iframe is on a stale
+          // cached bundle or hasn't fired its first render yet.
+          void publishLocalSeries(detail.runId, detail.matchId, m?.agent_ids?.length);
+        }
         if (m) {
           renderMatchInfo(
             detail.runId,
@@ -574,10 +589,6 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
             `${m.turns}t · ${(m.duration_s || 0).toFixed(1)}s`,
           );
         }
-        // Compute series directly — independent of the iframe, so the
-        // Graphs accordion populates even if the iframe is on a stale
-        // cached bundle or hasn't fired its first render yet.
-        void publishLocalSeries(detail.runId, detail.matchId, m?.agent_ids?.length);
       } else {
         setKaggleCtx({ sub: detail.submissionId, ep: detail.episodeId });
         activeReplay.playKaggle(detail.submissionId, detail.episodeId);
@@ -762,6 +773,11 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     try {
       const details = await api.getRun(runId);
       const matches = details.results?.matches ?? [];
+      // Ultrafast mode produces no replay files; downstream load/series
+      // calls would 404 and surface as a fake "match crashed" error.
+      const runMode =
+        (details as any).config?.mode || (details as any).run?.mode;
+      const noReplays = runMode === "ultrafast";
 
       const doneMatches = matches.map((m: any) => ({
         match_id: m.match_id,
@@ -790,11 +806,22 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
       const replayInner = document.getElementById("qm-replay-inner")!;
       activeReplay = mountEmbeddedReplay(replayInner);
       if (doneMatches.length > 0) {
-        activeReplay.load(
-          runId,
-          doneMatches.map((m: any) => ({ runId, matchId: m.match_id })),
-        );
         const first = doneMatches[0];
+        if (noReplays) {
+          activeReplay.showError(
+            "Ultrafast mode — no replay recorded. Results above.",
+          );
+        } else {
+          activeReplay.load(
+            runId,
+            doneMatches.map((m: any) => ({ runId, matchId: m.match_id })),
+          );
+          // Repopulate the Graphs accordion for the new match — the previous
+          // run's series was wiped on Play. Without this, after Picker → Play
+          // the View tab would briefly show data from whatever was loaded
+          // last (or stay empty) until the iframe got around to publishing.
+          void publishLocalSeries(runId, first.match_id, first.agent_ids?.length);
+        }
         renderMatchInfo(
           runId,
           first.agent_ids,
@@ -802,11 +829,6 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
           first.scores,
           `${first.turns}t · ${(first.duration_s || 0).toFixed(1)}s`,
         );
-        // Repopulate the Graphs accordion for the new match — the previous
-        // run's series was wiped on Play. Without this, after Picker → Play
-        // the View tab would briefly show data from whatever was loaded last
-        // (or stay empty) until the iframe got around to publishing.
-        void publishLocalSeries(runId, first.match_id, first.agent_ids?.length);
         setSidebarMode("view");
       } else {
         activeReplay.showError("No matches completed.");

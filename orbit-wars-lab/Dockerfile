@@ -45,6 +45,30 @@ COPY requirements.txt ./
 RUN pip wheel --no-cache-dir --wheel-dir=/wheels -r requirements.txt
 
 # ==============================================================================
+# Stage 2b — Rust engine wheel.
+#
+# Builds the PyO3-backed `orbit_wars_rust` crate into a Linux wheel via
+# maturin so the runtime stage can `pip install` it like any other dep.
+# Powers ultrafast tournament mode; without this, ultrafast matches would
+# fail to load the native module inside the container.
+# ==============================================================================
+FROM rust:1-slim-bookworm AS rust-build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Isolated venv so maturin's deps don't get blocked by Debian's PEP 668 mark.
+RUN python3 -m venv /opt/maturin-venv \
+    && /opt/maturin-venv/bin/pip install --no-cache-dir 'maturin>=1.7,<2.0'
+
+WORKDIR /build/rust_engine
+# Build context for this stage is the rust_engine/ dir (see compose.yml's
+# `additional_contexts: rust=../rust_engine`).
+COPY --from=rust . .
+RUN /opt/maturin-venv/bin/maturin build --release --out /wheels-rust
+
+# ==============================================================================
 # Stage 3 — Python runtime (FastAPI + tournament runner).
 # ==============================================================================
 FROM python:3.12-slim
@@ -59,9 +83,11 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=py-build /wheels /wheels
+COPY --from=rust-build /wheels-rust /wheels-rust
 COPY requirements.txt pyproject.toml ./
 RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \
-    && rm -rf /wheels
+    && pip install --no-cache-dir /wheels-rust/*.whl \
+    && rm -rf /wheels /wheels-rust
 
 # Application code + zoo + leaderboard seed.
 COPY orbit_wars_app/ orbit_wars_app/

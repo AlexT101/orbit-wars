@@ -57,8 +57,9 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
               <label>
                 <span>Mode</span>
                 <div class="seg-group" id="cfg-mode">
-                  <button class="config-pill on" data-v="fast">fast</button>
-                  <button class="config-pill" data-v="faithful">faithful</button>
+                  <button class="config-pill" data-v="ultrafast" title="Native Rust engine, no replays (tournament throughput)">ultrafast</button>
+                  <button class="config-pill on" data-v="fast" title="In-process kaggle-environments">fast</button>
+                  <button class="config-pill" data-v="faithful" title="Subprocess + HTTP (Kaggle protocol)">faithful</button>
                 </div>
               </label>
               <label>
@@ -78,7 +79,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
                   <input id="cfg-seed" class="seed-input" type="number" value="42" inputmode="numeric" disabled>
                 </div>
               </label>
-              <label title="ProcessPoolExecutor workers (fast mode only). 1 = sequential. Higher = faster but uses more RAM.">
+              <label title="ProcessPoolExecutor workers (fast/ultrafast modes). 1 = sequential. Higher = faster but uses more RAM.">
                 <span>Parallel workers</span>
                 <select id="cfg-parallel">
                   <option value="1">1 (sequential)</option>
