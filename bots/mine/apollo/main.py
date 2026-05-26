@@ -42,7 +42,7 @@ def _as_dict(obs):
 
 def agent(obs):
     try:
-        moves = _BOT.compute_moves(_as_dict(obs))
+        moves = _BOT.compute_moves_with_search(_as_dict(obs))
     except Exception:
         traceback.print_exc()
         raise
