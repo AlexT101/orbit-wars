@@ -48,7 +48,7 @@ Then open <http://localhost:6001>.
 | [orbit-wars-lab/](orbit-wars-lab/) | Local visualizer with tournament and gauntlet modes |
 | [orbit_wars_rules.md](orbit_wars_rules.md) | Orbit Wars gameplay rules |
 | [agents.md](agents.md) | Build, test, and submit an agent to Kaggle |
-| [bots/_open_source/](bots/_open_source/) | Open-source bots used as training opponents |
+| [bots/](bots/) | Various agents including `/mine`, `/baseline`, and `/external` (open source bots) |
 | [rust_engine/](rust_engine/) | Rust-native port of the Kaggle engine ([README](rust_engine/README.md)) |
 | [engine_parity_checker/](engine_parity_checker/) | Harness comparing ported Rust engine to Kaggle engine |
 | [run_match.py](run_match.py) | Run a single Kaggle-engine match between two bots |
