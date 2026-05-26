@@ -60,9 +60,12 @@ Rule-based external agents are redistributed from their authors' public
 Kaggle notebooks (links + versions in each agent's `agent.yaml`). 
 
 Orbit Wars lab from: https://github.com/automatylicza/orbit-wars-lab
+Replay graphs from: https://github.com/MatthewWHuang/orbit-wars
 
 ---
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT for everything except graphs. See [`LICENSE`](LICENSE).
+
+PolyForm Noncommercial License 1.0.0 for graphs. See [`LICENSE_2`](LICENSE_2).
