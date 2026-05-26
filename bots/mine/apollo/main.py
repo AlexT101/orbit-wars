@@ -19,9 +19,9 @@ else:
     _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 
-import simbot_native
+import apollo_native
 
-_BOT = simbot_native.Bot()
+_BOT = apollo_native.Bot()
 
 _OBS_FIELDS = (
     "player",

@@ -5,8 +5,8 @@ Usage:
     python run_batched.py <bot1> <bot2> <n_matches> [--start-seed S]
 
 Each match runs in the same Python process; agents are re-imported per match
-under a fresh module name so any module-level singletons (e.g. simbot's
-`_BOT = simbot_native.Bot()`) are re-created cleanly per match.
+under a fresh module name so any module-level singletons (e.g. apollo's
+`_BOT = apollo_native.Bot()`) are re-created cleanly per match.
 """
 
 import argparse
@@ -69,7 +69,7 @@ def bot_entry(bot_name: str) -> Path:
 
 def load_agent(main_path: Path, mod_name: str):
     # Drop any cached module with this name so module-level state (singletons
-    # like `_BOT = simbot_native.Bot()`) is rebuilt each match.
+    # like `_BOT = apollo_native.Bot()`) is rebuilt each match.
     sys.modules.pop(mod_name, None)
     spec = importlib.util.spec_from_file_location(mod_name, main_path)
     module = importlib.util.module_from_spec(spec)

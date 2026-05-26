@@ -7,7 +7,7 @@ Our codebase for the [Orbit Wars Kaggle competition](https://www.kaggle.com/comp
 Though we are required to use Python for the entrypoint to our bot, all of our core logic is in Rust. Anytime the code changes, the Rust module **needs to be recompiled** like so:
 
 ```powershell
-cd bots/mine/simbot
+cd bots/mine/apollo
 maturin develop --release
 cd ../../..
 ```
@@ -18,7 +18,7 @@ To compile the final bot for submission, run:
 
 ```powershell
 Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
-python bots/simbot/build_submission.py
+python bots/apollo/build_submission.py
 ```
 
 And then submit the generated `submission.tar.gz` file.

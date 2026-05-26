@@ -7,7 +7,6 @@ mod engine;
 mod entity_cache;
 mod helpers;
 mod hellburner;
-mod obnext;
 mod rollout;
 mod sim_probe;
 mod world;
@@ -266,7 +265,7 @@ impl Bot {
 }
 
 #[pymodule]
-fn simbot_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn apollo_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bot>()?;
     Ok(())
 }

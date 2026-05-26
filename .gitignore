@@ -181,10 +181,10 @@ cython_debug/
 .cursorindexingignore
 .claude
 
-submission.tar.gz
 
 .cargo-home
 .rustup-home
 
 node_modules/
 .pnpm-store/
+.extracted

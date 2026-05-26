@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "apollo_native"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "rustc-hash",
+ "sha2",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -206,15 +215,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
-]
-
-[[package]]
-name = "simbot_native"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "rustc-hash",
- "sha2",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 """
-Build a Kaggle-ready submission bundle for simbot-simplified.
+Build a Kaggle-ready submission bundle for apollo.
 
 Kaggle runs agents on Linux x86_64 and will not compile Rust, so we build the
 native module *inside Kaggle's own runtime image* (gcr.io/kaggle-images/python)
@@ -9,9 +9,9 @@ mysteriously stopped being called — a near-textbook symptom of subtle
 runtime-mismatch breakage. Building in the runtime image rules that out.
 
 Usage:
-    python bots/mine/simbot-simplified/build_submission.py
+    python bots/apollo/build_submission.py
 
-Requires Docker. Output: bots/mine/simbot-simplified/submission.tar.gz
+Requires Docker. Output: bots/apollo/submission.tar.gz
 """
 
 import os
@@ -58,7 +58,7 @@ def main() -> int:
     #    `linux_x86_64`; older manylinux wheels left over from prior builds
     #    are also matched so a clean target/ isn't required to upgrade.
     wheels = sorted(
-        glob(str(HERE / "target" / "wheels" / "simbot_simplified_native-*-abi3-*linux*.whl")),
+        glob(str(HERE / "target" / "wheels" / "apollo_native-*-abi3-*linux*.whl")),
         key=os.path.getmtime,
     )
     if not wheels:
@@ -82,7 +82,7 @@ def main() -> int:
     print(f"Wrote {bundle}")
     print(
         "Submit with:\n"
-        f"  kaggle competitions submit orbit-wars -f {bundle} -m 'simbot-simplified v1'"
+        f"  kaggle competitions submit orbit-wars -f {bundle} -m 'apollo v1'"
     )
     return 0
 
