@@ -73,7 +73,7 @@ export function mountEmbeddedReplay(root: HTMLElement): EmbeddedReplayHandle {
       // network error — keep empty
     }
 
-    const itemsEl = document.getElementById("replay-idle-items");
+    const itemsEl = root.querySelector<HTMLElement>("#replay-idle-items");
     if (!itemsEl) return; // unmounted
 
     if (items.length === 0) {
@@ -205,7 +205,7 @@ export function mountEmbeddedReplay(root: HTMLElement): EmbeddedReplayHandle {
       </div>
       <iframe class="replay-iframe" src="${src}" title="Replay"></iframe>
     `;
-    document.getElementById("back-to-idle")!.addEventListener("click", () => {
+    root.querySelector<HTMLButtonElement>("#back-to-idle")!.addEventListener("click", () => {
       currentMatches = [];
       void renderIdle();
     });
@@ -239,17 +239,11 @@ export function mountEmbeddedReplay(root: HTMLElement): EmbeddedReplayHandle {
       renderProgress(matchesDone, total);
     },
     playLocal(runId: string, matchId: string) {
-      root.dispatchEvent(new CustomEvent("ow-replay-selected", {
-        detail: { kind: "local", runId, matchId },
-        bubbles: true,
-      }));
+      // Parent-triggered loads already know which replay was selected.
+      // Re-dispatching here causes Quick Match to recursively reload it.
       renderIframeWithSrc(`#/replay/${runId}/${matchId}`);
     },
     playKaggle(submissionId: number, episodeId: number) {
-      root.dispatchEvent(new CustomEvent("ow-replay-selected", {
-        detail: { kind: "kaggle", submissionId, episodeId },
-        bubbles: true,
-      }));
       renderIframeWithSrc(`#/kreplay/${submissionId}/${episodeId}`);
     },
   };
