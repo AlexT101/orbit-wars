@@ -29,7 +29,7 @@ export interface RunSummary {
   id: string;
   started_at: string;
   finished_at?: string | null;
-  mode: "fast" | "faithful";
+  mode: "fast" | "faithful" | "ultrafast";
   format: "2p" | "4p";
   status: "running" | "completed" | "aborted";
   total_matches: number;

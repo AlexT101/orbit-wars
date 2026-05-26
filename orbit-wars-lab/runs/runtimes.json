@@ -1,18 +1,18 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-26T03:14:09.415899+00:00",
+  "last_updated": "2026-05-26T04:14:21.353299+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
-      "total_turns": 9713,
-      "total_seconds": 1.4723949999999997,
-      "avg_ms": 0.15159013692988774,
-      "last_updated": "2026-05-26T02:50:41.093997+00:00"
+      "total_turns": 14536,
+      "total_seconds": 2.705992,
+      "avg_ms": 0.18615795266923502,
+      "last_updated": "2026-05-26T03:19:22.181255+00:00"
     },
     "baselines/random": {
-      "total_turns": 8540,
-      "total_seconds": 0.41817,
-      "avg_ms": 0.04896604215456674,
-      "last_updated": "2026-05-26T02:57:31.135071+00:00"
+      "total_turns": 11754,
+      "total_seconds": 0.5592970000000002,
+      "avg_ms": 0.04758354602688448,
+      "last_updated": "2026-05-26T03:19:53.549076+00:00"
     },
     "external/ykhnkf-distance-prioritized": {
       "total_turns": 10401,
@@ -27,28 +27,28 @@
       "last_updated": "2026-05-26T02:37:26.652773+00:00"
     },
     "external/hellburner": {
-      "total_turns": 22453,
-      "total_seconds": 438.38131200000004,
-      "avg_ms": 19.5243981650559,
-      "last_updated": "2026-05-26T03:14:09.303499+00:00"
+      "total_turns": 27535,
+      "total_seconds": 541.8741892740119,
+      "avg_ms": 19.679469376212523,
+      "last_updated": "2026-05-26T04:14:21.308231+00:00"
     },
     "baselines/starter": {
-      "total_turns": 10068,
-      "total_seconds": 1.264166,
-      "avg_ms": 0.1255627731426301,
-      "last_updated": "2026-05-26T02:50:41.093972+00:00"
+      "total_turns": 14790,
+      "total_seconds": 2.1455100000000003,
+      "avg_ms": 0.14506490872210956,
+      "last_updated": "2026-05-26T03:19:53.904494+00:00"
     },
     "external/owproto": {
-      "total_turns": 17374,
-      "total_seconds": 429.5287250000001,
-      "avg_ms": 24.722500575572703,
-      "last_updated": "2026-05-26T03:07:45.631301+00:00"
+      "total_turns": 20291,
+      "total_seconds": 481.59135400000014,
+      "avg_ms": 23.73423458676261,
+      "last_updated": "2026-05-26T03:21:01.070502+00:00"
     },
     "external/peaking-bot": {
-      "total_turns": 8481,
-      "total_seconds": 1070.906591,
-      "avg_ms": 126.2712641197972,
-      "last_updated": "2026-05-26T02:37:28.392812+00:00"
+      "total_turns": 9032,
+      "total_seconds": 1118.69604,
+      "avg_ms": 123.85917183348096,
+      "last_updated": "2026-05-26T03:17:09.260222+00:00"
     },
     "external/obnext": {
       "total_turns": 11195,
@@ -87,10 +87,10 @@
       "last_updated": "2026-05-26T02:37:02.181526+00:00"
     },
     "external/pilkwang-structured": {
-      "total_turns": 11714,
-      "total_seconds": 2790.8954729999996,
-      "avg_ms": 238.25298557281883,
-      "last_updated": "2026-05-26T03:02:46.074080+00:00"
+      "total_turns": 12265,
+      "total_seconds": 2879.9804559999993,
+      "avg_ms": 234.81291936404398,
+      "last_updated": "2026-05-26T03:17:09.260203+00:00"
     },
     "external/smart-baseline": {
       "total_turns": 14639,
@@ -99,10 +99,10 @@
       "last_updated": "2026-05-26T02:58:16.646992+00:00"
     },
     "external/sim-search": {
-      "total_turns": 1561,
-      "total_seconds": 422.401443,
-      "avg_ms": 270.59669634849456,
-      "last_updated": "2026-05-26T02:38:01.458265+00:00"
+      "total_turns": 4423,
+      "total_seconds": 945.902233,
+      "avg_ms": 213.85987632828397,
+      "last_updated": "2026-05-26T03:21:01.070474+00:00"
     },
     "external/marco-dg": {
       "total_turns": 12014,
@@ -111,10 +111,10 @@
       "last_updated": "2026-05-26T03:02:46.074050+00:00"
     },
     "mine/apollo": {
-      "total_turns": 27104,
-      "total_seconds": 28.970241999999995,
-      "avg_ms": 1.0688548553719006,
-      "last_updated": "2026-05-26T03:06:00.945908+00:00"
+      "total_turns": 32186,
+      "total_seconds": 33.73351562901072,
+      "avg_ms": 1.048080396104229,
+      "last_updated": "2026-05-26T04:14:21.308203+00:00"
     },
     "mine/bruteforcer": {
       "total_turns": 7081,

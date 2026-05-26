@@ -8,6 +8,7 @@ import os
 import random
 import sys
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -169,6 +170,12 @@ class Tournament:
         self.runs_root = runs_root
         self.zoo_root = zoo_root
         self.cancel_event = cancel_event
+        # Throttle for run.json writes during a tournament. The UI polls this
+        # file for progress, so we trade a small staleness budget (a few
+        # matches / ~1s) for ~10× fewer JSON writes on large round-robins.
+        # Terminal writes (status != "running") always go through.
+        self._run_json_last_write_t: float = 0.0
+        self._run_json_last_done: int = -1
 
     def run(
         self,
@@ -229,7 +236,7 @@ class Tournament:
                 ))
 
         try:
-            if self.config.parallel <= 1 or self.config.mode != "fast":
+            if self.config.parallel <= 1 or self.config.mode not in ("fast", "ultrafast"):
                 # Sequential path. Faithful mode also takes this branch:
                 # subprocess agents already use OS-level concurrency, and
                 # nesting ProcessPoolExecutor on top would multiply RAM and
@@ -470,6 +477,10 @@ class Tournament:
         if on_match_done is not None:
             on_match_done(match_result, progress, total_matches)
 
+    # Throttle policy for in-progress run.json writes.
+    _RUN_JSON_THROTTLE_MATCHES = 10
+    _RUN_JSON_THROTTLE_SECONDS = 1.0
+
     def _write_run_json(
         self,
         run_dir: Path,
@@ -485,7 +496,24 @@ class Tournament:
         run.json is the UI's single source for run lifecycle state; it
         intentionally duplicates mode/format from config.json so the
         web UI doesn't need to read two files per run.
+
+        Throttled while `status == "running"`: writes at most every
+        `_RUN_JSON_THROTTLE_SECONDS` or every `_RUN_JSON_THROTTLE_MATCHES`
+        match completions, whichever comes first. Terminal writes
+        (completed/aborted/etc.) and the very first/last match always go
+        through so progress bars don't appear stuck.
         """
+        if status == "running" and matches_done not in (0, total_matches):
+            now = time.monotonic()
+            since_last = matches_done - self._run_json_last_done
+            elapsed = now - self._run_json_last_write_t
+            if (
+                since_last < self._RUN_JSON_THROTTLE_MATCHES
+                and elapsed < self._RUN_JSON_THROTTLE_SECONDS
+            ):
+                return
+            self._run_json_last_write_t = now
+            self._run_json_last_done = matches_done
         payload = {
             "id": run_id,
             "started_at": started_at,
@@ -687,9 +715,9 @@ def _cmd_run(args):
             file=sys.stderr,
         )
         sys.exit(1)
-    if args.parallel > 1 and args.mode != "fast":
+    if args.parallel > 1 and args.mode not in ("fast", "ultrafast"):
         print(
-            "--parallel >1 only supported in fast mode; falling back to sequential.",
+            "--parallel >1 only supported in fast/ultrafast modes; falling back to sequential.",
             file=sys.stderr,
         )
         args.parallel = 1
@@ -798,8 +826,9 @@ def main():
              "Example: --exclude-tag broken --exclude-tag slow",
     )
     p_run.add_argument("--games-per-pair", type=int, default=3, help="K games per pair (default 3)")
-    p_run.add_argument("--mode", choices=["fast", "faithful"], default="fast",
-                       help="fast=in-process, faithful=subprocess+HTTP (Kaggle protocol)")
+    p_run.add_argument("--mode", choices=["fast", "faithful", "ultrafast"], default="fast",
+                       help="fast=in-process kaggle-envs, faithful=subprocess+HTTP "
+                            "(Kaggle protocol), ultrafast=native Rust engine (no replays)")
     p_run.add_argument("--format", choices=["2p", "4p"], default="2p",
                        help="Match format — 2-player or 4-player FFA (default 2p)")
     p_run.add_argument("--parallel", type=int, default=1, help="Parallel matches (fast mode only)")
@@ -816,7 +845,7 @@ def main():
     p_g.add_argument("--exclude-tag", action="append", default=[], dest="exclude_tag",
                      help="Exclude opponents with this tag")
     p_g.add_argument("--games-per-pair", type=int, default=10, help="K games per opponent (default 10)")
-    p_g.add_argument("--mode", choices=["fast", "faithful"], default="fast")
+    p_g.add_argument("--mode", choices=["fast", "faithful", "ultrafast"], default="fast")
     p_g.add_argument("--format", choices=["2p", "4p"], default="2p",
                      help="2p: challenger vs 1 opponent. 4p: challenger + 3 opponents per match.")
     p_g.add_argument("--seed", type=int, default=42)
@@ -826,8 +855,9 @@ def main():
     p_h2h.add_argument("agent_a", help="First agent ID (player 0)")
     p_h2h.add_argument("agent_b", help="Second agent ID (player 1)")
     p_h2h.add_argument("--games", type=int, default=10, help="Number of games (default 10)")
-    p_h2h.add_argument("--mode", choices=["fast", "faithful"], default="fast",
-                       help="fast=in-process, faithful=subprocess+HTTP")
+    p_h2h.add_argument("--mode", choices=["fast", "faithful", "ultrafast"], default="fast",
+                       help="fast=in-process, faithful=subprocess+HTTP, "
+                            "ultrafast=native Rust engine (no replays)")
     p_h2h.add_argument("--seed", type=int, default=42, help="Base seed")
     p_h2h.set_defaults(func=_cmd_head_to_head)
 

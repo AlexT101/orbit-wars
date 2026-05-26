@@ -5,7 +5,7 @@
 
 export interface MatchConfig {
   games: number;
-  mode: "fast" | "faithful";
+  mode: "fast" | "faithful" | "ultrafast";
   seed: "random" | number;
   format: "2p" | "4p";
 }
@@ -45,8 +45,9 @@ export function mountMatchConfigBar(
         </div>
         <div class="config-group">
           <span class="config-label">mode</span>
-          <button class="config-pill ${config.mode === "fast" ? "on" : ""}" data-k="mode" data-v="fast">fast</button>
-          <button class="config-pill ${config.mode === "faithful" ? "on" : ""}" data-k="mode" data-v="faithful">faithful</button>
+          <button class="config-pill ${config.mode === "ultrafast" ? "on" : ""}" data-k="mode" data-v="ultrafast" title="Native Rust engine, no replays (tournament throughput)">ultrafast</button>
+          <button class="config-pill ${config.mode === "fast" ? "on" : ""}" data-k="mode" data-v="fast" title="In-process kaggle-environments">fast</button>
+          <button class="config-pill ${config.mode === "faithful" ? "on" : ""}" data-k="mode" data-v="faithful" title="Subprocess + HTTP (Kaggle protocol)">faithful</button>
         </div>
         <div class="config-group">
           <span class="config-label">seed</span>
@@ -69,7 +70,7 @@ export function mountMatchConfigBar(
         const k = el.dataset.k as keyof MatchConfig;
         const v = el.dataset.v!;
         if (k === "games") config.games = parseInt(v, 10);
-        else if (k === "mode") config.mode = v as "fast" | "faithful";
+        else if (k === "mode") config.mode = v as "fast" | "faithful" | "ultrafast";
         else if (k === "seed") config.seed = v === "random" ? "random" : customSeed;
         else if (k === "format") config.format = v as "2p" | "4p";
         onChange({ ...config });

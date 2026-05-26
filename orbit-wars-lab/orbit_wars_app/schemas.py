@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 Bucket = Literal["baselines", "external", "mine"]
 Format = Literal["2p", "4p"]
-Mode = Literal["fast", "faithful"]
+Mode = Literal["fast", "faithful", "ultrafast"]
 TournamentShape = Literal["round-robin", "gauntlet"]
 SeedMode = Literal["fixed", "random"]
 MatchStatus = Literal[
