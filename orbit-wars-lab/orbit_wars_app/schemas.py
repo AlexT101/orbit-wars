@@ -77,6 +77,11 @@ class MatchResult(BaseModel):
     status: MatchStatus = "ok"
     seed: int = 0
     replay_path: str = ""
+    # Populated when a match ends in a non-ok status (crashed / timeout /
+    # invalid_action / agent_failed_to_start). Sourced from
+    # `MatchOutcome.replay["error"]` in fast/faithful/ultrafast modes, or
+    # synthesized from the worker exception if the worker itself crashed.
+    error: Optional[str] = None
 
 
 class RunSummary(BaseModel):

@@ -16,6 +16,96 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 
+_DEBUG_PREFIXES = ("[LINE]", "[DOT]", "[TEXT]")
+
+
+def _parse_debug_lines(text: str, *, player: int, step: int) -> list[dict]:
+    """Parse a chunk of agent stdout into debug message dicts.
+
+    Each non-empty line becomes one message tagged with `player` and `step`.
+    Lines starting with `[LINE]`/`[DOT]`/`[TEXT]` are classified by `kind`;
+    everything else is treated as a free-form log line (`kind="log"`).
+    """
+    out: list[dict] = []
+    if not text:
+        return out
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Strip optional `[P<n>]` prefix some agents emit when manually
+        # tagging their own output. We already know the player from the
+        # env.logs structure, so this is just a courtesy strip.
+        if line.startswith("[P") and "]" in line:
+            close = line.index("]")
+            inner = line[2:close]
+            if inner.isdigit():
+                line = line[close + 1:].strip()
+                if not line:
+                    continue
+        if line.startswith(_DEBUG_PREFIXES):
+            # `[LINE]` -> `line`, `[DOT]` -> `dot`, `[TEXT]` -> `text`.
+            kind = line.split(maxsplit=1)[0][1:-1].lower()
+            out.append({"kind": kind, "raw": line, "player": player, "step": step})
+        else:
+            out.append({"kind": "log", "raw": line, "player": player, "step": step})
+    return out
+
+
+def _attach_debug_output(
+    replay: dict, env_logs: list, num_agents: int
+) -> dict:
+    """Walk `env.logs[step][agent_idx]` and attach parsed debug messages.
+
+    kaggle-environments captures each agent's stdout chunk for the step in
+    `entry["stdout"]`; we split those into lines and tag each with the player
+    + step from the log structure. The viewer reads
+    `replay["debug"]["messages"]` to overlay [LINE]/[DOT] indicators and
+    per-team log panels.
+    """
+    if not env_logs:
+        return replay
+    messages: list[dict] = []
+    for step_idx, step_entries in enumerate(env_logs):
+        if not isinstance(step_entries, list):
+            continue
+        for agent_idx, entry in enumerate(step_entries):
+            if agent_idx >= num_agents or not isinstance(entry, dict):
+                continue
+            chunk = entry.get("stdout")
+            if not chunk:
+                continue
+            text = chunk if isinstance(chunk, str) else str(chunk)
+            messages.extend(_parse_debug_lines(text, player=agent_idx, step=step_idx))
+    if messages:
+        replay["debug"] = {"messages": messages}
+    return replay
+
+
+def _attach_durations(replay: dict, env_logs: list, num_agents: int) -> dict:
+    """Attach per-step per-agent wall-clock durations as `replay["durations"]`.
+
+    Shape: `durations[step][agent]` of seconds (or `None` when missing).
+    The viewer reads this to show how long each agent took per turn.
+    """
+    if not env_logs:
+        return replay
+    durations: list[list[float | None]] = []
+    for step_entries in env_logs:
+        row: list[float | None] = [None] * num_agents
+        if isinstance(step_entries, list):
+            for agent_idx, entry in enumerate(step_entries):
+                if agent_idx >= num_agents:
+                    continue
+                if isinstance(entry, dict):
+                    d = entry.get("duration")
+                    if isinstance(d, (int, float)):
+                        row[agent_idx] = float(d)
+        durations.append(row)
+    replay["durations"] = durations
+    return replay
+
+
 @dataclass
 class MatchOutcome:
     agent_ids: list[str]
@@ -138,26 +228,50 @@ def run_match_fast(
             f"agent_ids and agent_paths length mismatch: "
             f"{len(agent_ids)} vs {len(agent_paths)}"
         )
+    import contextlib
+    import io as _io
     from kaggle_environments import make
 
     from .agent_extract import ensure_extracted
+    from .agent_serve import load_agent, _count_args
 
     env = make("orbit_wars", debug=False)
 
-    # kaggle-environments loads main.py directly from each path. For
-    # Kaggle-style `submission.tar.gz` agents, materialize the tarball to its
-    # cached `.extracted/` dir first so a real main.py exists where kaggle-envs
-    # looks. ensure_extracted is a no-op for loose-source agents.
+    # `submission.tar.gz` agents are extracted to their cached dir; loose
+    # source agents are pass-through.
     resolved_paths = [ensure_extracted(p) for p in agent_paths]
+
+    # Load each agent function and wrap it so we can capture its per-turn
+    # stdout in a side channel. kaggle-envs does not redirect agent stdout
+    # into `env.logs` when agents are loaded via file paths, so we do the
+    # capture ourselves. Each agent's stdout is appended to
+    # `per_step_stdout[agent_idx]` once per call; the index aligns with the
+    # turn number from kaggle-envs' perspective.
+    per_step_stdout: list[list[str]] = [[] for _ in agent_ids]
+    wrapped_agents = []
+    for idx, path in enumerate(resolved_paths):
+        agent_fn = load_agent(str(path))
+        if agent_fn is None:
+            raise RuntimeError(f"No callable found in {path}/main.py")
+        argcount = _count_args(agent_fn)
+
+        def make_wrapped(fn, player_idx, count):
+            def wrapped(obs, config=None):
+                buf = _io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    args = [obs, config][:count] if count >= 1 else []
+                    res = fn(*args)
+                per_step_stdout[player_idx].append(buf.getvalue())
+                return res
+            return wrapped
+
+        wrapped_agents.append(make_wrapped(agent_fn, idx, argcount))
 
     start = time.monotonic()
     try:
-        env.run([str(p / "main.py") for p in resolved_paths])
+        env.run(wrapped_agents)
     except Exception as e:
         duration = time.monotonic() - start
-        # env.logs may hold partial per-turn timings even when run() raised
-        # (e.g. a deadline late in the match) — surface what we have rather
-        # than dropping every sample, so a flaky agent's stats still update.
         env_logs = getattr(env, "logs", []) or []
         partial_timings = _per_agent_durations_from_logs(env_logs, len(agent_ids))
         outs, errs = _per_agent_streams_from_logs(env_logs, len(agent_ids))
@@ -175,9 +289,17 @@ def run_match_fast(
         )
     duration = time.monotonic() - start
     replay = env.toJSON()
+    env_logs = env.logs or []
+    replay = _attach_debug_output_from_capture(
+        replay, per_step_stdout, len(agent_ids), env_logs
+    )
+    replay = _attach_durations(replay, env_logs, len(agent_ids))
     winner, scores, turns, status = _extract_outcome(replay, agent_ids)
-    per_agent_timings = _per_agent_durations_from_logs(env.logs, len(agent_ids))
-    outs, errs = _per_agent_streams_from_logs(env.logs, len(agent_ids))
+    per_agent_timings = _per_agent_durations_from_logs(env_logs, len(agent_ids))
+    # Build outs from per_step_stdout (joined) for log-file persistence so the
+    # log writer keeps working even without env.logs stdout.
+    outs = [["".join(chunks)] for chunks in per_step_stdout]
+    _, errs = _per_agent_streams_from_logs(env_logs, len(agent_ids))
     _write_agent_logs(log_dir, log_prefix, agent_ids, outs, errs)
     return MatchOutcome(
         agent_ids=agent_ids,
@@ -190,6 +312,65 @@ def run_match_fast(
         replay=replay,
         per_agent_turn_seconds=per_agent_timings,
     )
+
+
+def _attach_debug_output_from_capture(
+    replay: dict,
+    per_step_stdout: list[list[str]],
+    num_agents: int,
+    env_logs: list,
+) -> dict:
+    """Build `replay["debug"]["messages"]` from the per-call stdout captures.
+
+    `per_step_stdout[agent_idx]` is a list of stdout chunks — one per
+    invocation of that agent's function. The call index aligns with the
+    *observed* step the agent saw — i.e. the kaggle replay step the
+    playback bar is on when the agent makes that decision. So call 0
+    corresponds to step 0 (initial state — the agent is choosing its
+    first action). The action *result* shows up at step 1.
+
+    This convention matches the lab-side reference renderer (and apollo2's
+    own `self.current_turn`, which is incremented after each call). Viewer
+    step S then aligns with debug messages whose step == S, which in turn
+    aligns with the agent's `=== turn S ===` text marker.
+
+    Falls back to scanning `env_logs` for any extra stdout the engine may
+    have captured itself (e.g. in faithful mode).
+    """
+    messages: list[dict] = []
+    for agent_idx, chunks in enumerate(per_step_stdout):
+        if agent_idx >= num_agents:
+            continue
+        for call_idx, chunk in enumerate(chunks):
+            if not chunk:
+                continue
+            messages.extend(
+                _parse_debug_lines(chunk, player=agent_idx, step=call_idx)
+            )
+    # Also harvest any stdout kaggle did capture (faithful mode subprocess
+    # entries, etc.). env_logs[N] is the log row for the transition into
+    # state N — i.e. populated by the agents' (N-1)-th call. To keep this
+    # aligned with the call-indexed messages above (call 0 -> step 0), we
+    # subtract 1 here. env_logs[0] is the initial reset row with no agent
+    # output, so the off-by-one never produces a negative step in practice.
+    if env_logs:
+        for log_idx, step_entries in enumerate(env_logs):
+            if not isinstance(step_entries, list):
+                continue
+            step_idx = max(0, log_idx - 1)
+            for agent_idx, entry in enumerate(step_entries):
+                if agent_idx >= num_agents or not isinstance(entry, dict):
+                    continue
+                chunk = entry.get("stdout") or ""
+                if not chunk:
+                    continue
+                text = chunk if isinstance(chunk, str) else str(chunk)
+                messages.extend(
+                    _parse_debug_lines(text, player=agent_idx, step=step_idx)
+                )
+    if messages:
+        replay["debug"] = {"messages": messages}
+    return replay
 
 
 def _extract_outcome(
@@ -528,17 +709,29 @@ def run_match_ultrafast(
     crash_status: Optional[str] = None
     crash_msg = ""
 
+    import contextlib
+    import io as _io
+    # Captured stdout per agent per turn. Used both to silence ultrafast
+    # (otherwise debug-printing agents like apollo2 spam the tournament
+    # terminal) and to populate `replay["debug"]["messages"]` on the
+    # otherwise-empty ultrafast replay so a viewer can still render the
+    # overlay if the caller chooses to materialize the match.
+    per_step_stdout: list[list[str]] = [[] for _ in range(num_players)]
+
     while not done:
         actions: list[Any] = []
         for i, (fn, arity) in enumerate(zip(agent_fns, agent_arities)):
             t0 = time.perf_counter()
+            buf = _io.StringIO()
             try:
-                if arity >= 2:
-                    mv = fn(obs_list[i], config)
-                else:
-                    mv = fn(obs_list[i])
+                with contextlib.redirect_stdout(buf):
+                    if arity >= 2:
+                        mv = fn(obs_list[i], config)
+                    else:
+                        mv = fn(obs_list[i])
             except Exception as e:
                 per_agent_timings[i].append(time.perf_counter() - t0)
+                per_step_stdout[i].append(buf.getvalue())
                 crash_status = "crashed"
                 crash_msg = (
                     f"{agent_ids[i]} raised at turn {turns}: {e}\n"
@@ -546,6 +739,7 @@ def run_match_ultrafast(
                 )
                 break
             per_agent_timings[i].append(time.perf_counter() - t0)
+            per_step_stdout[i].append(buf.getvalue())
             actions.append(mv if mv is not None else [])
         if crash_status is not None:
             break
@@ -593,6 +787,15 @@ def run_match_ultrafast(
     winner = _winner_from_rewards(snap.get("rewards"), agent_ids)
     status: str = "ok" if winner is not None else "draw"
 
+    # Ultrafast skips the full kaggle-envs replay, but we still surface the
+    # captured agent stdout as `replay["debug"]["messages"]` so anything that
+    # *does* read this outcome (e.g. a per-match debug dump) gets the same
+    # `[LINE]`/`[DOT]`/`[TEXT]` markers the fast-mode viewer overlay uses.
+    ultrafast_replay: dict = {}
+    _attach_debug_output_from_capture(
+        ultrafast_replay, per_step_stdout, num_players, env_logs=[]
+    )
+
     return MatchOutcome(
         agent_ids=agent_ids,
         winner=winner,
@@ -601,7 +804,7 @@ def run_match_ultrafast(
         duration_s=duration,
         seed=seed,
         status=status,  # type: ignore[arg-type]
-        replay={},  # ultrafast intentionally produces no replay
+        replay=ultrafast_replay,
         per_agent_turn_seconds=per_agent_timings,
     )
 
@@ -670,8 +873,15 @@ def run_match_faithful(
             )
         duration = time.monotonic() - start
         replay = env.toJSON()
+        env_logs = env.logs or []
+        # Faithful mode runs each agent in a subprocess, so its stdout is not
+        # in env.logs; we still try, but the agent_subprocess path captures
+        # stdout in `h.stdout_lines` (handled below). Either way attach what
+        # we have so the viewer can show timings.
+        replay = _attach_debug_output(replay, env_logs, len(agent_ids))
+        replay = _attach_durations(replay, env_logs, len(agent_ids))
         winner, scores, turns, status = _extract_outcome(replay, agent_ids)
-        per_agent_timings = _per_agent_durations_from_logs(env.logs, len(agent_ids))
+        per_agent_timings = _per_agent_durations_from_logs(env_logs, len(agent_ids))
         return MatchOutcome(
             agent_ids=agent_ids,
             winner=winner,
