@@ -37,6 +37,14 @@ def test_ensure_extracted_returns_dir_unchanged_when_no_tarball(tmp_path: Path):
     assert ensure_extracted(tmp_path) == tmp_path
 
 
+def test_ensure_extracted_prefers_loose_main_py_over_tarball(tmp_path: Path):
+    (tmp_path / "main.py").write_text("def agent(obs):\n    return ['loose-agent']\n")
+    _make_tarball(tmp_path / "submission.tar.gz", {"main.py": AGENT_CODE})
+
+    assert ensure_extracted(tmp_path) == tmp_path
+    assert not (tmp_path / EXTRACT_DIRNAME).exists()
+
+
 def test_ensure_extracted_unpacks_tarball(tmp_path: Path):
     _make_tarball(tmp_path / "submission.tar.gz", {"main.py": AGENT_CODE})
 
@@ -113,6 +121,21 @@ def test_load_agent_extracts_and_runs_from_tarball(tmp_path: Path):
     agent_fn = load_agent(str(agent_dir))
     assert agent_fn is not None
     assert agent_fn({}) == ["tar-agent"]
+
+
+def test_load_agent_prefers_loose_main_py_over_tarball(tmp_path: Path):
+    """End-to-end: a working main.py wins over a packaged submission."""
+    agent_dir = tmp_path / "mine" / "dual-bot"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "main.py").write_text(
+        "def agent(obs):\n    return ['loose-agent']\n"
+    )
+    _make_tarball(agent_dir / "submission.tar.gz", {"main.py": AGENT_CODE})
+
+    agent_fn = load_agent(str(agent_dir))
+
+    assert agent_fn is not None
+    assert agent_fn({}) == ["loose-agent"]
 
 
 def test_fast_match_resolves_tarball_agents(tmp_path: Path):

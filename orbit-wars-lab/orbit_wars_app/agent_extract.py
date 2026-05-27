@@ -34,13 +34,17 @@ class TarballError(Exception):
 
 
 def ensure_extracted(agent_dir: Path) -> Path:
-    """If `agent_dir` has a submission.tar.gz, extract it and return the extract dir.
+    """Return the runnable agent dir, preferring loose source over tarballs.
 
-    Returns `agent_dir` unchanged when there is no tarball. When extraction
-    runs, the result lives at `agent_dir/.extracted/`. A marker file records
-    the source tarball's mtime so subsequent calls skip the extract if the
-    tarball is unchanged.
+    Returns `agent_dir` unchanged when it already has a loose `main.py`, even
+    if a stale or alternate `submission.tar.gz` is present. If there is no
+    loose `main.py`, a `submission.tar.gz` is extracted into
+    `agent_dir/.extracted/`. A marker file records the source tarball's mtime
+    so subsequent calls skip the extract if the tarball is unchanged.
     """
+    if (agent_dir / "main.py").is_file():
+        return agent_dir
+
     tarball = agent_dir / SUBMISSION_FILENAME
     if not tarball.is_file():
         return agent_dir
