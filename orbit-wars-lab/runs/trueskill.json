@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-26T17:44:31.552064+00:00",
+  "last_updated": "2026-05-27T16:55:38.936279+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
-        "mu": 361.69376772185257,
-        "sigma": 30.735956357760866,
-        "games_played": 66
+        "mu": 368.08057564821536,
+        "sigma": 29.84871317571691,
+        "games_played": 71
       }
     },
     "baselines/random": {
@@ -147,6 +147,20 @@
         "mu": 575.3516852240609,
         "sigma": 50.01139237625064,
         "games_played": 23
+      }
+    },
+    "mine/rl_ppo": {
+      "2p": {
+        "mu": 287.7980719381945,
+        "sigma": 81.18494734491956,
+        "games_played": 6
+      }
+    },
+    "baselines/hellburner": {
+      "2p": {
+        "mu": 636.4554005719724,
+        "sigma": 179.4170168847225,
+        "games_played": 1
       }
     }
   }

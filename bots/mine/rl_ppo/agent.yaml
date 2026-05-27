@@ -1,0 +1,4 @@
+name: rl_ppo
+description: PPO policy exported from rl_orbit_wars/export_submission.py
+entrypoint: main.py
+
