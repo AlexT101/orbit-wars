@@ -130,15 +130,6 @@ pub fn is_blocked(table: &BlockerTable, target_id: i64, aim: f64, flight_time: f
         .any(|e| entry_blocks(e, target_id, aim, flight_time))
 }
 
-/// Returns the first entry blocking `(aim, flight_time)`, or `None` if clear.
-/// Used by the obstacle-routing fallback to identify which arc to step around.
-fn first_blocker(table: &BlockerTable, target_id: i64, aim: f64, flight_time: f64) -> Option<BlockerEntry> {
-    table
-        .entries
-        .iter()
-        .find(|e| entry_blocks(e, target_id, aim, flight_time))
-        .copied()
-}
 
 /// Build the full blocker table for `(shooter_id, launch_turn_offset, v)`.
 /// `v` is the quantized fleet speed — see [`speed_bucket`] / [`bucket_to_speed`].
@@ -497,14 +488,37 @@ pub fn aim_with_prediction(
     // boundary, never under-rejection).
     let table = cache.blocker_table(shooter_id, launch_turn_offset, ships);
 
-    let blocker = match first_blocker(&table, target_id, angle, flight_time) {
-        None => return Some((angle, turns, tx, ty, flight_time)),
-        Some(b) => b,
-    };
+    // Find the extreme edges of the union of all blocking arcs in circular
+    // aim-angle space. Computed as signed deltas relative to `angle` via
+    // wrap_pi so entries from different bearings (including ones near ±π) are
+    // all compared in the same coordinate frame. For any blocking entry,
+    // entry_blocks guarantees aim_min ≤ angle ≤ aim_max (after bearing-
+    // relative wrapping), so wrap_pi(aim_min − angle) ≤ 0 ≤ wrap_pi(aim_max −
+    // angle) always holds. Comparing raw aim_min/aim_max across entries with
+    // different bearings would break when two entries sit on opposite sides of
+    // the ±π branch cut.
+    let (mut delta_lo, mut delta_hi) = (0.0_f64, 0.0_f64);
+    let mut any_blocked = false;
+    for e in table.entries.iter() {
+        if entry_blocks(e, target_id, angle, flight_time) {
+            let lo = wrap_pi(e.aim_min - angle);
+            let hi = wrap_pi(e.aim_max - angle);
+            if lo < delta_lo {
+                delta_lo = lo;
+            }
+            if hi > delta_hi {
+                delta_hi = hi;
+            }
+            any_blocked = true;
+        }
+    }
+    if !any_blocked {
+        return Some((angle, turns, tx, ty, flight_time));
+    }
 
-    // Direct path is blocked. Try the two angles just outside the blocker's arc
-    // edges — if either still lands on the target at the same arrival turn and
-    // clears all obstacles, use it rather than returning None.
+    // Direct path is blocked. Try the two angles just outside the full blocked
+    // arc's extreme edges — if either still lands on the target at the same
+    // arrival turn and clears all obstacles, use it rather than returning None.
     //
     // We check target validity by placing the fleet at `flight_time` along the
     // candidate angle and comparing its distance to the direct intercept point
@@ -522,7 +536,7 @@ pub fn aim_with_prediction(
     // within any real target's valid hit arc (target radii are several units,
     // angular shift of 1e-4 rad at typical ranges moves the fleet < 0.01 units).
     const STEP: f64 = 1e-4;
-    for &theta_try in &[blocker.aim_min - STEP, blocker.aim_max + STEP] {
+    for &theta_try in &[angle + delta_lo - STEP, angle + delta_hi + STEP] {
         let fx = lx + ring_d * theta_try.cos();
         let fy = ly + ring_d * theta_try.sin();
         let dx = fx - tx;

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-27T18:46:43.330600+00:00",
+  "last_updated": "2026-05-27T22:27:58.577887+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -81,9 +81,9 @@
     },
     "mine/apollo": {
       "2p": {
-        "mu": 836.6625610287406,
-        "sigma": 22.083480614855677,
-        "games_played": 296
+        "mu": 823.8721863411932,
+        "sigma": 20.596904815832822,
+        "games_played": 311
       }
     },
     "mine/bruteforcer": {
@@ -151,9 +151,9 @@
     },
     "mine/apollo_bf": {
       "2p": {
-        "mu": 762.9992920600438,
-        "sigma": 71.52977812187726,
-        "games_played": 4
+        "mu": 836.1261966375612,
+        "sigma": 34.83758863953454,
+        "games_played": 19
       }
     },
     "mine/apollo_backup": {
