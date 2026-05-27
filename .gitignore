@@ -188,3 +188,5 @@ cython_debug/
 node_modules/
 .pnpm-store/
 .extracted
+
+osteo_stuff/
