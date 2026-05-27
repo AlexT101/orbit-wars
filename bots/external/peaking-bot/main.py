@@ -2069,7 +2069,7 @@ def agent(obs, config=None):
     if not world.my_planets:
         return []
     deadline = start_time + 0.8 # give it a bit of time
-    print(f"Turn {world.step}: Planning moves...") # debug print
+    # print(f"Turn {world.step}: Planning moves...") # debug print
     return plan_moves(world, deadline=deadline)
 
 
