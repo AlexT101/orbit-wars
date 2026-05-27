@@ -130,6 +130,16 @@ pub fn is_blocked(table: &BlockerTable, target_id: i64, aim: f64, flight_time: f
         .any(|e| entry_blocks(e, target_id, aim, flight_time))
 }
 
+/// Returns the first entry blocking `(aim, flight_time)`, or `None` if clear.
+/// Used by the obstacle-routing fallback to identify which arc to step around.
+fn first_blocker(table: &BlockerTable, target_id: i64, aim: f64, flight_time: f64) -> Option<BlockerEntry> {
+    table
+        .entries
+        .iter()
+        .find(|e| entry_blocks(e, target_id, aim, flight_time))
+        .copied()
+}
+
 /// Build the full blocker table for `(shooter_id, launch_turn_offset, v)`.
 /// `v` is the quantized fleet speed — see [`speed_bucket`] / [`bucket_to_speed`].
 pub fn build_blocker_table(
@@ -486,10 +496,45 @@ pub fn aim_with_prediction(
     // which is the conservative direction (slight over-rejection at the
     // boundary, never under-rejection).
     let table = cache.blocker_table(shooter_id, launch_turn_offset, ships);
-    if is_blocked(&table, target_id, angle, flight_time) {
-        return None;
+
+    let blocker = match first_blocker(&table, target_id, angle, flight_time) {
+        None => return Some((angle, turns, tx, ty, flight_time)),
+        Some(b) => b,
+    };
+
+    // Direct path is blocked. Try the two angles just outside the blocker's arc
+    // edges — if either still lands on the target at the same arrival turn and
+    // clears all obstacles, use it rather than returning None.
+    //
+    // We check target validity by placing the fleet at `flight_time` along the
+    // candidate angle and comparing its distance to the direct intercept point
+    // (tx, ty). If that distance exceeds target_radius the angle falls outside
+    // the target's valid hit arc at this turn and we skip it. Otherwise we do a
+    // full is_blocked check (which catches secondary obstacles on that angle).
+    let [lx, ly] = cache.position(shooter_id, launch_turn_offset)?;
+    let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
+    let target_radius = cache.get(target_id).map(|e| e.radius).unwrap_or(0.0);
+    let launch_offset = shooter_radius + LAUNCH_CLEARANCE;
+    let ring_d = launch_offset + flight_time * v_true;
+    let r_sq = target_radius * target_radius;
+
+    // 1e-4 rad is enough to numerically clear the arc edge while staying well
+    // within any real target's valid hit arc (target radii are several units,
+    // angular shift of 1e-4 rad at typical ranges moves the fleet < 0.01 units).
+    const STEP: f64 = 1e-4;
+    for &theta_try in &[blocker.aim_min - STEP, blocker.aim_max + STEP] {
+        let fx = lx + ring_d * theta_try.cos();
+        let fy = ly + ring_d * theta_try.sin();
+        let dx = fx - tx;
+        let dy = fy - ty;
+        if dx * dx + dy * dy > r_sq {
+            continue; // outside target's valid arc at this turn
+        }
+        if !is_blocked(&table, target_id, theta_try, flight_time) {
+            return Some((theta_try, turns, tx, ty, flight_time));
+        }
     }
-    Some((angle, turns, tx, ty, flight_time))
+    None
 }
 
 /// Cheap revalidation of a previously-computed shot against the current
