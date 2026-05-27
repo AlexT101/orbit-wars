@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-27T18:46:43.363555+00:00",
+  "last_updated": "2026-05-27T22:27:58.629868+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 15488,
@@ -111,10 +111,10 @@
       "last_updated": "2026-05-27T18:43:14.727384+00:00"
     },
     "mine/apollo": {
-      "total_turns": 46887,
-      "total_seconds": 941.6461602869074,
-      "avg_ms": 20.083310092070455,
-      "last_updated": "2026-05-27T18:46:43.116482+00:00"
+      "total_turns": 53521,
+      "total_seconds": 1822.0283142869073,
+      "avg_ms": 34.0432412377741,
+      "last_updated": "2026-05-27T22:27:58.090812+00:00"
     },
     "mine/bruteforcer": {
       "total_turns": 7578,
@@ -129,10 +129,10 @@
       "last_updated": "2026-05-26T18:20:51.767226+00:00"
     },
     "mine/apollo_bf": {
-      "total_turns": 1996,
-      "total_seconds": 226.38186639799494,
-      "avg_ms": 113.41776873647042,
-      "last_updated": "2026-05-27T18:46:43.116504+00:00"
+      "total_turns": 8630,
+      "total_seconds": 1104.843280397995,
+      "avg_ms": 128.0235550866738,
+      "last_updated": "2026-05-27T22:27:58.090860+00:00"
     },
     "mine/apollo_backup": {
       "total_turns": 709,

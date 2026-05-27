@@ -3,8 +3,9 @@
 //! Built once per `Bot::compute_moves` call after the [`EntityCache`] is
 //! refreshed for the current step. Strategies receive `&WorldState` and read
 //! whichever pieces they need — observation snapshots, planet groupings by
-//! owner, aggregate strength/production, the `TimelineCache`, and per-planet
-//! timeline-derived maps (`keep_needed_map`, `fall_turn_map`, …).
+//! owner, aggregate strength/production, and the `TimelineCache`. Per-planet
+//! timeline metrics (keep_needed, fall_turn, …) are accessed via
+//! `ws.timeline_cache.baseline(planet_id)`.
 //!
 //! Anything strategy-flavoured (phase windows like "early"/"opening", scoring
 //! heuristics, solver memoization) belongs in the strategy module, not here.
@@ -54,11 +55,6 @@ pub struct WorldState<'a> {
     pub total_visible_ships: i64,
     pub total_production: i64,
 
-    pub keep_needed_map: HashMap<i64, i64>,
-    pub min_owned_map: HashMap<i64, i64>,
-    pub first_enemy_map: HashMap<i64, Option<i64>>,
-    pub fall_turn_map: HashMap<i64, Option<i64>>,
-    pub holds_full_map: HashMap<i64, bool>,
 }
 
 impl<'a> WorldState<'a> {
@@ -199,27 +195,6 @@ impl<'a> WorldState<'a> {
             .map(|(_, s)| *s)
             .sum();
 
-        let mut keep_needed_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
-        let mut min_owned_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
-        let mut first_enemy_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
-        let mut fall_turn_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
-        let mut holds_full_map = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
-        for planet in &planets {
-            if let Some(baseline) = timeline_cache.baseline(planet.id) {
-                keep_needed_map.insert(planet.id, baseline.keep_needed);
-                min_owned_map.insert(planet.id, baseline.min_owned);
-                first_enemy_map.insert(planet.id, baseline.first_enemy);
-                fall_turn_map.insert(planet.id, baseline.fall_turn);
-                holds_full_map.insert(planet.id, baseline.holds_full);
-            } else {
-                keep_needed_map.insert(planet.id, 0);
-                min_owned_map.insert(planet.id, 0);
-                first_enemy_map.insert(planet.id, None);
-                fall_turn_map.insert(planet.id, None);
-                holds_full_map.insert(planet.id, true);
-            }
-        }
-
         let total_visible_ships: i64 = planets.iter().map(|p| p.ships).sum::<i64>()
             + fleets.iter().map(|f| f.ships).sum::<i64>();
         let total_production: i64 = planets.iter().map(|p| p.production).sum();
@@ -250,11 +225,6 @@ impl<'a> WorldState<'a> {
             enemy_prod,
             total_visible_ships,
             total_production,
-            keep_needed_map,
-            min_owned_map,
-            first_enemy_map,
-            fall_turn_map,
-            holds_full_map,
         }
     }
 

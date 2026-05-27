@@ -177,7 +177,8 @@ impl EntityCache {
         let bucket = blockers::speed_bucket(ships);
         let abs_launch = self.current_turn + launch_turn_offset;
         let key = (shooter_id, abs_launch, bucket);
-        if let Some(t) = self.blocker_tables.lock().unwrap().get(&key) {
+        let mut guard = self.blocker_tables.lock().unwrap();
+        if let Some(t) = guard.get(&key) {
             return t.clone();
         }
         let v = blockers::bucket_to_speed(bucket);
@@ -187,10 +188,7 @@ impl EntityCache {
             launch_turn_offset,
             v,
         ));
-        self.blocker_tables
-            .lock()
-            .unwrap()
-            .insert(key, table.clone());
+        guard.insert(key, table.clone());
         table
     }
 
