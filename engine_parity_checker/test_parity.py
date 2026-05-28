@@ -8,19 +8,19 @@ modules:
   * TestRustStepParity   — turn pipeline before comet spawn at step 50.
   * TestRustCometParity  — crosses the first comet spawn window at step 50.
 
-Run: python -m unittest parity.test_parity -v
+Run: python -m unittest engine_parity_checker.test_parity -v
 """
 
 from __future__ import annotations
 
 import unittest
 
-from parity.agents import AGENTS
-from parity.harness import run_parity
-from parity.kaggle_engine import KaggleEngine
+from engine_parity_checker.agents import AGENTS
+from engine_parity_checker.harness import run_parity
+from engine_parity_checker.kaggle_engine import KaggleEngine
 
 try:
-    from parity.candidates.rust import RustEngine
+    from engine_parity_checker.candidates.rust import RustEngine
 except ImportError:
     RustEngine = None
 
