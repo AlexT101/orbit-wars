@@ -188,3 +188,12 @@ cython_debug/
 node_modules/
 .pnpm-store/
 .extracted
+
+osteo_stuff/
+
+# RL training artifacts
+rl_orbit_wars/checkpoints/
+rl_orbit_wars/runs/
+
+runs/
+wandb/
