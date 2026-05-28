@@ -18,18 +18,20 @@
 //! sweeps from `Q(t−1)` to `Q(t)` over the same `s ∈ [0, 1]` — same chord
 //! linearization the engine uses in `swept_pair_hit` for orbital motion.
 //!
-//! Per-turn collision is the relative-motion quadratic. For each turn we:
-//!   1. Compute the fleet-mass / blocker relative trajectory `R(s)` at probe
-//!      aim θ₀ = bearing(L → mid-turn blocker pos).
-//!   2. Solve the closed-form vertex `s*` minimizing `|R(s)|²` on `[0, 1]`.
-//!   3. Lock `s*` and find the exact arc of θ that keeps `|R(s*; θ)| ≤ r`
-//!      via the law of cosines on the (L, Q(s*), fleet) triangle. The arc
-//!      center is `bearing(L → Q(s*))` (refined from the mid-turn probe).
+//! Per-turn arc construction. For each turn `t` we compute the **envelope**
+//! of the per-`s` blocking arcs over `s ∈ [0, 1]`:
+//!   1. At each `s`, the law of cosines on the (L, Q(s), fleet) triangle
+//!      gives a per-`s` arc `θ ∈ [bearing(s) − α(s), bearing(s) + α(s)]`
+//!      with `α(s) = acos((K² + D² − r²) / (2 D K))`.
+//!   2. The union of those arcs over `s ∈ [0, 1]` is the set of aim angles
+//!      blocked during turn `t`. Since `bearing(s)` and `α(s)` are smooth,
+//!      the envelope edges are `max_s (bearing + α)` and `min_s (bearing − α)`
+//!      — located via a coarse scan + parabolic refinement (no closed form
+//!      since the critical-point equation is transcendental).
 //!
-//! Each [`BlockerEntry`] is one such arc: a single bearing, a single
-//! closest-approach flight time, and a single tight half-arc. No max-pooling
-//! across turns — adjacent turns produce adjacent entries, each as tight as
-//! the geometry allows.
+//! Each [`BlockerEntry`] is one such envelope: a single bearing, a single
+//! earliest-collision flight time, and a single tight half-arc per
+//! (obstacle, turn). No max-pooling across turns.
 
 #![allow(dead_code)]
 
@@ -270,25 +272,78 @@ fn add_static_band(
     });
 }
 
-/// Per-turn sub-sampling resolution for [`add_dynamic_bands`]. Each turn is
-/// split into `DYN_SAMPLES` evenly-spaced `s` values in `[0, 1]`, and one
-/// [`BlockerEntry`] is emitted per sample whose geometry can collide.
-///
-/// One entry per turn would be wrong: the law-of-cosines arc derived at a
-/// single `s` only describes which aim angles `l` satisfy
-/// `|fleet@s, l − Q(s)| ≤ r` for *that* `s`. For an off-`s` aim angle the
-/// fleet's true closest-approach moment is a different `s`, and the arc
-/// shifts. Sampling `s` and emitting an entry per sample lets the union of
-/// the per-`s` arcs cover the full set of blocking aim angles, with adjacent
-/// arcs overlapping for any reasonable obstacle motion (`Δθ` per sample
-/// `≪ α`).
-const DYN_SAMPLES: usize = 21;
+/// Number of `s ∈ [0, 1]` samples used to *bracket* the per-turn envelope
+/// extrema in [`add_dynamic_bands`]. The envelope `u(s) = bearing(s) + α(s)`
+/// is smooth in `s`, so a moderate scan locates each extremum's grid cell;
+/// a golden-section search over the surrounding cell then refines to the
+/// continuous extremum. 21 samples → step 0.05 in `s`, plenty fine to
+/// resolve which cell contains the peak.
+const ENVELOPE_SCAN: usize = 21;
 
-/// For each integer turn `t`, sample `s ∈ [0, 1]` at [`DYN_SAMPLES`] points
-/// and emit one [`BlockerEntry`] per sample whose triangle-inequality check
-/// passes. Each entry is the exact blocking arc at its sample `s`; the union
-/// of all entries' arcs covers the full set of aim angles whose chord during
-/// turn `t` intersects the blocker disk.
+/// Golden-section search iterations used by [`add_dynamic_bands`] to refine
+/// each extremum after the coarse scan. 32 iterations shrinks the bracket
+/// by factor `φ⁻³² ≈ 1e-7`, deep below any practical aim precision.
+const ENVELOPE_GSS_ITERS: usize = 32;
+
+/// Per-`s` blocking arc: aim bearings `θ` with `|fleet(s, θ) − Q(s)| ≤ r`.
+/// Returns `(bearing(s), α(s))` or `None` if the fleet ring cannot reach the
+/// blocker disk at this `s` (then the triangle inequality fails).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn arc_at(
+    lx: f64,
+    ly: f64,
+    q0x: f64,
+    q0y: f64,
+    dqx: f64,
+    dqy: f64,
+    d0: f64,
+    v: f64,
+    radius: f64,
+    s: f64,
+) -> Option<(f64, f64)> {
+    let kx = q0x + s * dqx - lx;
+    let ky = q0y + s * dqy - ly;
+    let k_sq = kx * kx + ky * ky;
+    if k_sq < 1e-18 {
+        return None;
+    }
+    let k_mag = k_sq.sqrt();
+    let d_s = d0 + s * v;
+    if (k_mag - d_s).abs() > radius {
+        return None;
+    }
+    let denom = 2.0 * d_s * k_mag;
+    let half = if denom < 1e-12 {
+        FRAC_PI_2
+    } else {
+        let cos_arg = ((k_sq + d_s * d_s - radius * radius) / denom).clamp(-1.0, 1.0);
+        cos_arg.acos()
+    };
+    Some((ky.atan2(kx), half))
+}
+
+/// For each integer turn `t`, emit a single [`BlockerEntry`] whose aim arc is
+/// the **per-turn envelope** of the per-`s` arcs over `s ∈ [0, 1]`:
+///
+///   `aim_max(t) = max_{s ∈ [0,1]} (bearing(s) + α(s))`
+///   `aim_min(t) = min_{s ∈ [0,1]} (bearing(s) − α(s))`
+///
+/// The earlier per-`s` sample union (DYN_SAMPLES entries per turn, plus
+/// analytical `K(s) = D(s)` ring-touch samples) had two bugs:
+///   1. *Tunneling*: the envelope peak `s*` falls between grid points; each
+///      grid sample's arc just barely misses the engine's swept-pair aim,
+///      while the continuous envelope covers it. Adding `K = D` samples
+///      didn't fix this — `K = D` maximizes `α(s)`, but the envelope edge is
+///      `bearing(s) + α(s)`, a different critical point.
+///   2. Bloated entry count: ~23 entries / turn / blocker, all hit on every
+///      `is_blocked` query.
+///
+/// The envelope is smooth (`bearing(s)` and `α(s)` are both C¹ on the
+/// feasibility range), so a coarse scan reliably brackets each extremum's
+/// grid cell. A golden-section search over the bracketing cell then
+/// refines to the continuous extremum, closing the tunneling gap that
+/// uniform sampling alone could not.
 fn add_dynamic_bands(
     out: &mut Vec<BlockerEntry>,
     cache: &EntityCache,
@@ -301,8 +356,8 @@ fn add_dynamic_bands(
     launch_offset: f64,
     v: f64,
 ) {
-    let r_sq = radius * radius;
-    let inv_samples = 1.0 / (DYN_SAMPLES - 1) as f64;
+    let scan_step = 1.0 / (ENVELOPE_SCAN - 1) as f64;
+
     for t in 1..=max_lookahead {
         let Some([q0x, q0y]) = cache.position(blocker_id, launch_turn_offset + t - 1) else {
             continue;
@@ -310,56 +365,121 @@ fn add_dynamic_bands(
         let Some([q1x, q1y]) = cache.position(blocker_id, launch_turn_offset + t) else {
             continue;
         };
-
-        let d0 = launch_offset + (t as f64 - 1.0) * v;
-        let d_step = v; // d1 − d0
         let dqx = q1x - q0x;
         let dqy = q1y - q0y;
+        let d0 = launch_offset + (t as f64 - 1.0) * v;
         let t_base = t as f64 - 1.0;
 
-        for i in 0..DYN_SAMPLES {
-            let s = i as f64 * inv_samples;
-            let qsx = q0x + s * dqx;
-            let qsy = q0y + s * dqy;
-            let kx = qsx - lx;
-            let ky = qsy - ly;
-            let k_sq = kx * kx + ky * ky;
-            if k_sq < 1e-18 {
-                continue;
-            }
-            let k_mag = k_sq.sqrt();
-            let d_s = d0 + s * d_step;
+        // Scan: sample upper and lower envelope values at uniform `s`.
+        // Track the discrete argmax / argmin and the earliest feasible `s`
+        // (used as the turn's `flight_t` — earliest instant any aim in the
+        // envelope collides, so shots arriving before this can't be blocked
+        // by this entry).
+        let mut scan_u = [f64::NAN; ENVELOPE_SCAN];
+        let mut scan_l = [f64::NAN; ENVELOPE_SCAN];
+        let mut bearing_ref = f64::NAN;
+        let mut s_feasible_min = f64::INFINITY;
+        let mut i_u: Option<usize> = None;
+        let mut i_l: Option<usize> = None;
 
-            // Triangle inequality: at this s, the fleet's circle of radius
-            // D(s) around L can't reach Q(s)'s disk of radius r. Skip — no
-            // aim angle collides at this instant.
-            if (k_mag - d_s).abs() > radius {
+        for i in 0..ENVELOPE_SCAN {
+            let s = i as f64 * scan_step;
+            let Some((b, h)) = arc_at(lx, ly, q0x, q0y, dqx, dqy, d0, v, radius, s) else {
                 continue;
-            }
-
-            // Law of cosines on (L, fleet@s, Q(s)): the half-arc of θ for
-            // which |fleet@s − Q(s)| ≤ r is exactly
-            //   acos((|K|² + D² − r²) / (2·D·|K|)).
-            let denom = 2.0 * d_s * k_mag;
-            let half_arc = if denom < 1e-12 {
-                FRAC_PI_2
-            } else {
-                let cos_arg = ((k_sq + d_s * d_s - r_sq) / denom).clamp(-1.0, 1.0);
-                cos_arg.acos()
             };
-
-            let bearing = ky.atan2(kx);
-            let flight_t = t_base + s;
-
-            out.push(BlockerEntry {
-                bearing,
-                flight_t,
-                half_arc,
-                aim_min: bearing - half_arc,
-                aim_max: bearing + half_arc,
-                blocker_id,
-            });
+            if !bearing_ref.is_finite() {
+                bearing_ref = b;
+            }
+            // Unwrap relative to bearing_ref so consecutive samples that
+            // straddle the ±π branch cut compare correctly.
+            let b_u = bearing_ref + wrap_pi(b - bearing_ref);
+            scan_u[i] = b_u + h;
+            scan_l[i] = b_u - h;
+            if s < s_feasible_min {
+                s_feasible_min = s;
+            }
+            if i_u.map_or(true, |j| scan_u[i] > scan_u[j]) {
+                i_u = Some(i);
+            }
+            if i_l.map_or(true, |j| scan_l[i] < scan_l[j]) {
+                i_l = Some(i);
+            }
         }
+
+        let Some(i_u) = i_u else { continue };
+        let i_l = i_l.expect("argmin_l exists when argmax_u exists");
+
+        // Golden-section refinement: the discrete extremum at index `i` lies
+        // within the cell `[s_lo, s_hi] = [(i-1)·step, (i+1)·step]` (clipped
+        // to [0, 1] at the boundaries). u(s) is smooth, so a golden-section
+        // search converges to the true continuous extremum.
+        //
+        // Why not parabolic interpolation: parabolic skips boundary cases
+        // (i=0, i=END), but a smooth envelope with peak in the first cell
+        // produces exactly that pattern — discrete max at i=0, true max in
+        // (0, step). Golden-section handles boundary brackets uniformly.
+        let eval = |s: f64, maximize: bool| -> f64 {
+            let Some((br, h)) = arc_at(lx, ly, q0x, q0y, dqx, dqy, d0, v, radius, s) else {
+                // Infeasible point — push the search away from it. (Feasibility
+                // is a connected interval in s for our quadratic constraint.)
+                return if maximize { f64::NEG_INFINITY } else { f64::INFINITY };
+            };
+            let b_u = bearing_ref + wrap_pi(br - bearing_ref);
+            if maximize { b_u + h } else { b_u - h }
+        };
+        let golden = |s_lo: f64, s_hi: f64, maximize: bool| -> f64 {
+            let phi = (5f64.sqrt() - 1.0) * 0.5; // ≈ 0.618
+            let mut a = s_lo;
+            let mut b = s_hi;
+            let mut c = b - phi * (b - a);
+            let mut d = a + phi * (b - a);
+            let mut fc = eval(c, maximize);
+            let mut fd = eval(d, maximize);
+            for _ in 0..ENVELOPE_GSS_ITERS {
+                if (b - a) < 1e-12 {
+                    break;
+                }
+                let pick_left = if maximize { fc > fd } else { fc < fd };
+                if pick_left {
+                    b = d;
+                    d = c;
+                    fd = fc;
+                    c = b - phi * (b - a);
+                    fc = eval(c, maximize);
+                } else {
+                    a = c;
+                    c = d;
+                    fc = fd;
+                    d = a + phi * (b - a);
+                    fd = eval(d, maximize);
+                }
+            }
+            if maximize { fc.max(fd) } else { fc.min(fd) }
+        };
+        let refine = |i: usize, f_b: f64, maximize: bool| -> f64 {
+            let s_lo = if i == 0 { 0.0 } else { (i - 1) as f64 * scan_step };
+            let s_hi = if i + 1 >= ENVELOPE_SCAN {
+                1.0
+            } else {
+                (i + 1) as f64 * scan_step
+            };
+            let refined = golden(s_lo, s_hi, maximize);
+            if maximize { refined.max(f_b) } else { refined.min(f_b) }
+        };
+
+        let aim_max = refine(i_u, scan_u[i_u], true);
+        let aim_min = refine(i_l, scan_l[i_l], false);
+        let bearing = 0.5 * (aim_min + aim_max);
+        let half_arc = 0.5 * (aim_max - aim_min);
+
+        out.push(BlockerEntry {
+            bearing,
+            flight_t: t_base + s_feasible_min,
+            half_arc,
+            aim_min,
+            aim_max,
+            blocker_id,
+        });
     }
 }
 
