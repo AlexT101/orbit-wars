@@ -1,5 +1,0 @@
-name: rl_poc
-description: "Orbit Wars RL proof of concept. Tiny actor-critic, action = per-planet target choice, ships = target.ships+1."
-author: Alex Thummalapalli
-license: "Apache 2.0"
-tags: [python, rl, ppo, poc]
