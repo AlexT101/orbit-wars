@@ -140,8 +140,20 @@ function getReplayParticipants(
   return names.map((name) => makeParticipant(name, agentsById, agentsByKey));
 }
 
-function renderParticipantHtml(participant: ReplayParticipant): string {
-  return `<span class="replay-name">${escapeHtml(participant.displayName)}</span>`;
+function renderParticipantHtml(
+  participant: ReplayParticipant,
+  winnerRawName?: string | null,
+): string {
+  let cls = "replay-name";
+  if (winnerRawName) {
+    cls += participant.rawName === winnerRawName ? " replay-name-winner" : " replay-name-loser";
+  }
+  return `<span class="${cls}">${escapeHtml(participant.displayName)}</span>`;
+}
+
+function formatRunId(id: string): string {
+  const m = id.match(/^\d{4}-(\d{2}-\d{2})-(.+)$/);
+  return m ? `${m[1]} (${m[2]})` : id;
 }
 
 function participantText(participant: ReplayParticipant): string {
@@ -431,8 +443,9 @@ export async function renderReplays(
           ? `<span class="replay-time" title="${absolute}">${relative}</span>`
           : "";
         const participants = getReplayParticipants(replay, agentsById, agentsByKey);
+        const winnerRaw = replay.winner ?? null;
         const agentsHtml = participants.length > 0
-          ? participants.map(renderParticipantHtml).join(`<span class="replay-vs">vs</span>`)
+          ? participants.map((p) => renderParticipantHtml(p, winnerRaw)).join(`<span class="replay-vs">vs</span>`)
           : "?";
 
         if (replay.source === "local") {
@@ -449,7 +462,7 @@ export async function renderReplays(
                 ${timeCell}
               </div>
               <div class="replay-meta-sub">
-                run ${escapeHtml(replay.run_id)} - match ${escapeHtml(replay.match_id)} - ${replay.turns} turns - ${replay.duration_s.toFixed(1)}s - ${escapeHtml(replay.status)}
+                run ${escapeHtml(formatRunId(replay.run_id))} - match ${escapeHtml(replay.match_id)} - ${replay.turns} turns - ${replay.duration_s.toFixed(1)}s - ${escapeHtml(replay.status)}
               </div>
               <button class="replay-delete" title="Delete replay">&times;</button>
             </div>

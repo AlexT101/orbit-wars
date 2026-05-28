@@ -124,6 +124,18 @@ def list_runs(exclude_quick_match: bool = False) -> list[dict]:
                 data = json.loads(run_json.read_text())
             except json.JSONDecodeError:
                 continue
+            config_json = p / "config.json"
+            if config_json.is_file():
+                try:
+                    config = json.loads(config_json.read_text())
+                except json.JSONDecodeError:
+                    config = {}
+                data["shape"] = config.get("shape", data.get("shape", "round-robin"))
+                data["challenger_id"] = config.get("challenger_id", data.get("challenger_id"))
+                data["is_quick_match"] = config.get(
+                    "is_quick_match",
+                    data.get("is_quick_match", False),
+                )
             if exclude_quick_match and data.get("is_quick_match", False):
                 continue
             summaries.append(data)

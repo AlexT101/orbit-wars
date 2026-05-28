@@ -94,6 +94,8 @@ class RunSummary(BaseModel):
     total_matches: int = 0
     matches_done: int = 0
     is_quick_match: bool = False  # Propagated from TournamentConfig, serialized into run.json
+    shape: TournamentShape = "round-robin"
+    challenger_id: Optional[str] = None
 
 
 class TournamentConfig(BaseModel):

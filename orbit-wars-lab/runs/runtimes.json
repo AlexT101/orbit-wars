@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-28T16:47:40.773254+00:00",
+  "last_updated": "2026-05-28T17:08:45.930897+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 16611,
@@ -27,10 +27,10 @@
       "last_updated": "2026-05-28T16:47:40.723775+00:00"
     },
     "external/hellburner": {
-      "total_turns": 34146,
-      "total_seconds": 604.4756530040204,
-      "avg_ms": 17.702678293329246,
-      "last_updated": "2026-05-28T16:46:25.235704+00:00"
+      "total_turns": 37175,
+      "total_seconds": 622.5524530040203,
+      "avg_ms": 16.746535386792747,
+      "last_updated": "2026-05-28T17:08:45.863371+00:00"
     },
     "baselines/starter": {
       "total_turns": 17463,
@@ -111,10 +111,10 @@
       "last_updated": "2026-05-28T04:25:34.720004+00:00"
     },
     "mine/apollo": {
-      "total_turns": 69337,
-      "total_seconds": 4089.546915286908,
-      "avg_ms": 58.98073056646391,
-      "last_updated": "2026-05-28T16:46:26.043564+00:00"
+      "total_turns": 90617,
+      "total_seconds": 4972.28034428691,
+      "avg_ms": 54.87138554892471,
+      "last_updated": "2026-05-28T17:08:45.863352+00:00"
     },
     "mine/bruteforcer": {
       "total_turns": 7578,
@@ -129,16 +129,16 @@
       "last_updated": "2026-05-28T16:05:14.428069+00:00"
     },
     "mine/apollo_bf": {
-      "total_turns": 14212,
-      "total_seconds": 3099.0014643979944,
-      "avg_ms": 218.05526768913555,
-      "last_updated": "2026-05-28T07:58:20.071594+00:00"
+      "total_turns": 28343,
+      "total_seconds": 3822.749295397993,
+      "avg_ms": 134.87454734495267,
+      "last_updated": "2026-05-28T17:02:10.974382+00:00"
     },
     "mine/apollo_fast": {
-      "total_turns": 24669,
-      "total_seconds": 30.375585630004696,
-      "avg_ms": 1.2313261838746887,
-      "last_updated": "2026-05-28T04:48:42.142854+00:00"
+      "total_turns": 28789,
+      "total_seconds": 47.96652963000468,
+      "avg_ms": 1.6661408742924269,
+      "last_updated": "2026-05-28T17:07:34.351189+00:00"
     },
     "mine/ow": {
       "total_turns": 7385,

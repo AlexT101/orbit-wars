@@ -5,9 +5,9 @@ import { api } from "../api";
 let pollInterval: number | null = null;
 
 const TITLES: Record<RatingsFormat, string> = {
-  "2p": "TrueSkill ratings — 2p",
-  "4p": "TrueSkill ratings — 4p",
-  all: "TrueSkill ratings — both",
+  "2p": "Leaderboard - 2 Player",
+  "4p": "Leaderboard - 4 Player",
+  "all": "Leaderboard - Overall",
 };
 
 export async function renderLeaderboard(root: HTMLElement): Promise<void> {

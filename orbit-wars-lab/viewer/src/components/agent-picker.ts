@@ -13,25 +13,16 @@ export type PickerSelection = (string | null)[];
 type BucketFilter =
   | "all"
   | "baselines"
-  | "ext-rule"
-  | "ext-nn"
+  | "external"
   | "mine";
 
-/**
- * Split "external" bucket into "ext-nn" (tagged neural-network) and
- * "ext-rule" (everything else). Baselines/mine buckets pass through.
- */
 function agentCategory(a: AgentInfo): Exclude<BucketFilter, "all"> {
-  if (a.bucket === "external") {
-    return a.tags.includes("neural-network") ? "ext-nn" : "ext-rule";
-  }
   return a.bucket;
 }
 
 const CATEGORY_LABELS: Record<Exclude<BucketFilter, "all">, string> = {
   baselines: "baselines",
-  "ext-rule": "ext · rule",
-  "ext-nn": "ext · nn",
+  external: "external",
   mine: "mine",
 };
 
@@ -77,6 +68,15 @@ export async function mountAgentPicker(
           return false;
       }
       return true;
+    }).sort((a, b) => {
+      const aMu = ratingMap.get(a.id);
+      const bMu = ratingMap.get(b.id);
+      const aKnown = aMu !== undefined;
+      const bKnown = bMu !== undefined;
+      if (aKnown !== bKnown) return aKnown ? 1 : -1;
+      if (!aKnown && !bKnown) return a.name.localeCompare(b.name);
+      if (aMu !== bMu) return (bMu ?? 0) - (aMu ?? 0);
+      return a.name.localeCompare(b.name);
     });
 
     const slotHtml = slots
@@ -88,7 +88,7 @@ export async function mountAgentPicker(
         const inner =
           id && agent
             ? `<span class="slot-name">${agent.name}</span>
-               <span class="slot-meta">${slotLabel(i)} · μ ${(ratingMap.get(id) ?? 0).toFixed(0)}</span>`
+               <span class="slot-meta">${slotLabel(i)} · ${(ratingMap.get(id) ?? 0).toFixed(0)} elo</span>`
             : `+ pick ${slotLabel(i)}`;
         return `<div class="${cls}" data-slot="${i}">${inner}</div>`;
       })
@@ -103,8 +103,7 @@ export async function mountAgentPicker(
         <div class="picker-tags">
           <button class="picker-pill ${bucketFilter === "all" ? "on" : ""}" data-bucket="all">all</button>
           <button class="picker-pill ${bucketFilter === "baselines" ? "on" : ""}" data-bucket="baselines">baselines</button>
-          <button class="picker-pill ${bucketFilter === "ext-rule" ? "on" : ""}" data-bucket="ext-rule">ext · rule</button>
-          <button class="picker-pill ${bucketFilter === "ext-nn" ? "on" : ""}" data-bucket="ext-nn">ext · nn</button>
+          <button class="picker-pill ${bucketFilter === "external" ? "on" : ""}" data-bucket="external">external</button>
           <button class="picker-pill ${bucketFilter === "mine" ? "on" : ""}" data-bucket="mine">mine</button>
         </div>
       </div>
@@ -115,7 +114,7 @@ export async function mountAgentPicker(
             : filtered
                 .map((a) => {
                   const mu = ratingMap.get(a.id);
-                  const muStr = mu !== undefined ? `μ ${mu.toFixed(0)}` : "—";
+                  const muStr = mu !== undefined ? `${mu.toFixed(0)} elo` : "—";
                   const picked = slots.includes(a.id);
                   return `
                     <li class="picker-agent ${picked ? "picked" : ""}" data-agent-id="${a.id}">
