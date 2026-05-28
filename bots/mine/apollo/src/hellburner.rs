@@ -424,46 +424,6 @@ fn target_timeline(
     world.projected_timeline(target_id, world.timeline_cache.horizon, planned, extras)
 }
 
-/// Trial timeline for attacking `target_id` — mirrors hellburner's
-/// `trial_destination_list` which halves every non-self enemy arrival ship
-/// count (Line 345-348 of main.py). Used only inside
-/// `evaluate_frontline_strategy` to decide whether our planned send wins;
-/// other timelines (e.g. baseline ownership for `evaluate_move_orders` or
-/// neighbor's exposure rollout) use the full-strength arrivals.
-fn target_timeline_halved(
-    world: &WorldState,
-    target_id: i64,
-    extras: &[ArrivalEvent],
-    plan: &PlanState,
-) -> PlanetTimeline {
-    let horizon = world.timeline_cache.horizon;
-    let base = world.timeline_cache.arrivals(target_id);
-    let planned: &[ArrivalEvent] = plan
-        .planned
-        .get(&target_id)
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-
-    let mut arrivals: Vec<ArrivalEvent> =
-        Vec::with_capacity(base.len() + planned.len() + extras.len());
-    for ev in base {
-        let ships = if ev.owner != world.player {
-            ev.ships / 2 // mirror Python's `int(s * 0.5)`
-        } else {
-            ev.ships
-        };
-        if ships > 0 {
-            arrivals.push(ArrivalEvent { turns: ev.turns, owner: ev.owner, ships });
-        }
-    }
-    arrivals.extend_from_slice(planned);
-    arrivals.extend_from_slice(extras);
-
-    let target = world.planet(target_id);
-    let expiry = world.timeline_cache.expiry(target_id);
-    simulate_planet_timeline(target, &arrivals, world.player, horizon, expiry)
-}
-
 fn final_owner(timeline: &PlanetTimeline) -> i64 {
     timeline.owner_at[timeline.horizon as usize]
 }
@@ -586,8 +546,8 @@ struct FrontlineWin {
 /// "launch this turn" — those orders are what `plan` actually emits. For
 /// `offset > 0`, source/target/obstacle positions are evaluated at the
 /// future launch turn via `plan_shot(..., offset)` and arrival times in
-/// the trial timeline are shifted by `offset` so the halved-arrivals
-/// ownership check stays correct.
+/// the trial timeline are shifted by `offset` so the ownership check
+/// stays correct.
 ///
 /// Source ship-availability and the worst-case defense reservation are
 /// computed at *current* state regardless of `offset` — a conservative
@@ -681,7 +641,7 @@ fn evaluate_frontline_strategy(
             });
             ships_total += c.ships_max;
         }
-        let tl = target_timeline_halved(world, target.id, &trial, plan);
+        let tl = target_timeline(world, target.id, &trial, plan);
         if final_owner(&tl) == world.player {
             consider(
                 &plan_orders, max_arrival_a, ships_total,
@@ -771,7 +731,7 @@ fn evaluate_frontline_strategy(
             if !feasible {
                 continue;
             }
-            let tl = target_timeline_halved(world, target.id, &trial, plan);
+            let tl = target_timeline(world, target.id, &trial, plan);
             if final_owner(&tl) == world.player {
                 consider(
                     &plan_orders, max_arrival_b, ships_total,
@@ -801,7 +761,7 @@ fn evaluate_frontline_strategy(
                 ships: o.ships,
             });
         }
-        let tl = target_timeline_halved(world, target.id, &trial, plan);
+        let tl = target_timeline(world, target.id, &trial, plan);
         let horizon = tl.horizon as usize;
         let arrival_idx = (best_max_arrival as usize).min(horizon);
         let mut excess: i64 = i64::MAX;
@@ -836,7 +796,7 @@ fn evaluate_frontline_strategy(
                     owner: world.player,
                     ships: trimmed,
                 };
-                let tl2 = target_timeline_halved(world, target.id, &trial, plan);
+                let tl2 = target_timeline(world, target.id, &trial, plan);
                 if final_owner(&tl2) == world.player {
                     best_orders[best_marginal_in_orders] = PlannedOrder {
                         src_id,
