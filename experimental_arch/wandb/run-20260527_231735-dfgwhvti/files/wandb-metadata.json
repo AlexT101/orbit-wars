@@ -1,0 +1,50 @@
+{
+  "os": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "python": "CPython 3.12.12",
+  "startedAt": "2026-05-28T05:17:35.660463Z",
+  "args": [
+    "--total-steps",
+    "100000",
+    "--rollout-steps",
+    "256",
+    "--opponent",
+    "nearest,hellburner,heuristic,snapshot_sample",
+    "--snapshot-every-updates",
+    "25",
+    "--snapshot-pool-size",
+    "4",
+    "--eval-opponents",
+    "noop,random,nearest,hellburner,heuristic,self",
+    "--eval-games",
+    "16",
+    "--checkpoint-dir",
+    "checkpoints/run1",
+    "--wandb-project",
+    "orbit-wars-rl-experimental",
+    "--wandb-name",
+    "run1-mlp-mixed"
+  ],
+  "program": "/home/sunrise/orbitwars/pantheow/experimental_arch/train.py",
+  "codePath": "experimental_arch/train.py",
+  "codePathLocal": "train.py",
+  "git": {
+    "remote": "https://github.com/AlexT101/orbit-wars",
+    "commit": "5cb67e49f4da52b0d65ef39fa31420037d426886"
+  },
+  "email": "kenny.chau@ucalgary.ca",
+  "root": "/home/sunrise/orbitwars/pantheow/experimental_arch",
+  "host": "ThisDevice",
+  "executable": "/usr/bin/python",
+  "cpu_count": 6,
+  "cpu_count_logical": 12,
+  "disk": {
+    "/": {
+      "total": "1081101176832",
+      "used": "225402667008"
+    }
+  },
+  "memory": {
+    "total": "12542115840"
+  },
+  "writerId": "oxun9l2jfm1tezcv81db19ku49ixlvws"
+}

@@ -1,0 +1,17 @@
+[package]
+name = "orbit_wars_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Self-contained Orbit Wars engine with configurable reward shaping (for training)"
+
+[lib]
+name = "orbit_wars_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

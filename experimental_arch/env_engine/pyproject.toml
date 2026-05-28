@@ -1,0 +1,9 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "orbit-wars-engine"
+version = "0.1.0"
+description = "Self-contained Orbit Wars engine with configurable reward shaping"
+requires-python = ">=3.9"
