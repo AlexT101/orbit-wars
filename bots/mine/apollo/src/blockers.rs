@@ -86,103 +86,15 @@ pub struct BlockerEntry {
     pub blocker_id: i64,
 }
 
-/// Number of bearing buckets used to index [`BlockerTable::entries`] for
-/// fast `is_blocked` lookups. The 2π aim space is partitioned into
-/// `BLOCKER_BUCKETS` equal slices; each entry is filed into every bucket
-/// whose slice overlaps the entry's blocking arc. A query at aim `θ`
-/// scans only the bucket containing `θ`, turning the linear scan into
-/// `O(bucket size)` ≈ `O(N / BUCKETS · max_arc_width)`.
-///
-/// 32 buckets → step ≈ 0.196 rad ≈ 11°. Typical half-arcs are ~0.05-0.2 rad,
-/// so most entries land in 1-3 buckets (modest duplication factor).
-const BLOCKER_BUCKETS: usize = 32;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct BlockerTable {
     pub entries: Vec<BlockerEntry>,
-    /// Cumulative offsets into [`bucket_entry_idx`]. Bucket `b`'s entry
-    /// indices live at `bucket_entry_idx[bucket_offsets[b]..bucket_offsets[b+1]]`.
-    bucket_offsets: [u32; BLOCKER_BUCKETS + 1],
-    /// Flat list of entry indices, partitioned by bucket. An entry can
-    /// appear in multiple buckets if its arc straddles bucket boundaries.
-    bucket_entry_idx: Vec<u32>,
-}
-
-impl Default for BlockerTable {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            bucket_offsets: [0; BLOCKER_BUCKETS + 1],
-            bucket_entry_idx: Vec::new(),
-        }
-    }
 }
 
 /// Branchless wrap of `a` into `(-π, π]`.
 #[inline]
 fn wrap_pi(a: f64) -> f64 {
     a - 2.0 * PI * ((a + PI) * (1.0 / (2.0 * PI))).floor()
-}
-
-/// Bucket index for an aim angle. The 2π aim space (`[-π, π)`) maps to
-/// `[0, BLOCKER_BUCKETS)`.
-#[inline]
-fn bearing_bucket(angle: f64) -> usize {
-    let wrapped = wrap_pi(angle);
-    let normalized = (wrapped + PI) / (2.0 * PI);
-    let idx = (normalized * BLOCKER_BUCKETS as f64) as usize;
-    idx.min(BLOCKER_BUCKETS - 1)
-}
-
-/// Invoke `f` once per bucket index whose angular slice intersects the
-/// arc `[bearing − half_arc, bearing + half_arc]`. Handles arcs that wrap
-/// the `±π` branch cut by splitting into two ranges. The arc width is
-/// bounded by `2·half_arc ≤ π` (entries with `half_arc = π/2` arise only in
-/// the launcher-on-blocker degenerate case), so we never need more than
-/// half the buckets.
-#[inline]
-fn arc_buckets(bearing: f64, half_arc: f64, mut f: impl FnMut(usize)) {
-    let center = wrap_pi(bearing);
-    let start_b = bearing_bucket(center - half_arc);
-    let end_b = bearing_bucket(center + half_arc);
-    if end_b >= start_b {
-        for b in start_b..=end_b {
-            f(b);
-        }
-    } else {
-        for b in start_b..BLOCKER_BUCKETS {
-            f(b);
-        }
-        for b in 0..=end_b {
-            f(b);
-        }
-    }
-}
-
-/// Populate `bucket_offsets` and `bucket_entry_idx` from `entries`. Two
-/// passes: count per bucket, then place entry indices.
-fn build_buckets(entries: &[BlockerEntry]) -> ([u32; BLOCKER_BUCKETS + 1], Vec<u32>) {
-    let mut counts = [0u32; BLOCKER_BUCKETS];
-    for e in entries {
-        arc_buckets(e.bearing, e.half_arc, |b| counts[b] += 1);
-    }
-    let mut offsets = [0u32; BLOCKER_BUCKETS + 1];
-    let mut sum = 0u32;
-    for i in 0..BLOCKER_BUCKETS {
-        offsets[i] = sum;
-        sum += counts[i];
-    }
-    offsets[BLOCKER_BUCKETS] = sum;
-
-    let mut cursors = offsets;
-    let mut bucket_entry_idx = vec![0u32; sum as usize];
-    for (i, e) in entries.iter().enumerate() {
-        arc_buckets(e.bearing, e.half_arc, |b| {
-            bucket_entry_idx[cursors[b] as usize] = i as u32;
-            cursors[b] += 1;
-        });
-    }
-    (offsets, bucket_entry_idx)
 }
 
 /// Map a raw fleet speed to a quantized bucket key.
@@ -213,15 +125,11 @@ fn entry_blocks(e: &BlockerEntry, target_id: i64, aim: f64, flight_time: f64) ->
 }
 
 /// `true` iff any non-target blocker in `table` blocks `(aim, flight_time)`.
-/// Uses the bearing-bucket index: only entries whose arc could contain
-/// `aim` are checked.
 pub fn is_blocked(table: &BlockerTable, target_id: i64, aim: f64, flight_time: f64) -> bool {
-    let b = bearing_bucket(aim);
-    let start = table.bucket_offsets[b] as usize;
-    let end = table.bucket_offsets[b + 1] as usize;
-    table.bucket_entry_idx[start..end]
+    table
+        .entries
         .iter()
-        .any(|&idx| entry_blocks(&table.entries[idx as usize], target_id, aim, flight_time))
+        .any(|e| entry_blocks(e, target_id, aim, flight_time))
 }
 
 
@@ -324,12 +232,7 @@ pub fn build_blocker_table(
         }
     }
 
-    let (bucket_offsets, bucket_entry_idx) = build_buckets(&entries);
-    BlockerTable {
-        entries,
-        bucket_offsets,
-        bucket_entry_idx,
-    }
+    BlockerTable { entries }
 }
 
 /// One entry for a stationary disk: aim cone of half-width `asin(r/d)`,
@@ -888,11 +791,7 @@ pub fn aim_with_prediction(
     // the ±π branch cut.
     let (mut delta_lo, mut delta_hi) = (0.0_f64, 0.0_f64);
     let mut any_blocked = false;
-    let b = bearing_bucket(angle);
-    let start = table.bucket_offsets[b] as usize;
-    let end = table.bucket_offsets[b + 1] as usize;
-    for &idx in &table.bucket_entry_idx[start..end] {
-        let e = &table.entries[idx as usize];
+    for e in table.entries.iter() {
         if entry_blocks(e, target_id, angle, flight_time) {
             let lo = wrap_pi(e.aim_min - angle);
             let hi = wrap_pi(e.aim_max - angle);
