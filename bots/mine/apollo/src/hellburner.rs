@@ -21,18 +21,17 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::constants::CENTER;
+use crate::constants::HORIZON;
 use crate::engine::Planet;
-use crate::entity_cache::{AimCacheVerdict, Entity};
+use crate::entity_cache::{AimCacheVerdict};
 use crate::helpers::{
-    aim_with_prediction, dist, fleet_speed, simulate_planet_timeline, AimResult, ArrivalEvent,
+    aim_with_prediction, dist, simulate_planet_timeline, AimResult, ArrivalEvent,
     PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
 
 // ── Constants ────────────────────────────────────────────────────────────
 const EARLY_ROUNDS: i64 = 3;
-const EARLY_LOOK_AHEAD: i64 = 33;
 const MAX_DISTANCE: f64 = 38.0;
 const ROTATION_LOOK_AHEAD: i64 = 10;
 const REINFORCEMENT_SIZE: i64 = 17;
@@ -59,99 +58,6 @@ const MAX_COORD_DELAY: i64 = 5;
 const A_S_LOOKAHEAD: i64 = 3;
 
 type FleetOrder = (i64, f64, i64); // (src_id, angle, ships)
-
-// ── Iterative intercept ──────────────────────────────────────────────────
-
-/// Continuous-time orbital position. `t_abs` is the absolute game step
-/// (allowed to be non-integer). Static planets return their fixed position.
-fn planet_pos_at(entity: &Entity, omega: f64, t_abs: f64) -> [f64; 2] {
-    if entity.is_static() {
-        return entity.positions[0].unwrap_or([CENTER, CENTER]);
-    }
-    let r = entity.orbital_radius;
-    let initial_pos = entity.positions[0].unwrap_or([CENTER + r, CENTER]);
-    let ia = (initial_pos[1] - CENTER).atan2(initial_pos[0] - CENTER);
-    let a = ia + omega * t_abs;
-    [CENTER + r * a.cos(), CENTER + r * a.sin()]
-}
-
-/// Iterative damped fixed-point on travel time for orbital targets. Returns
-/// `(angle, tx, ty, travel)`; `travel` is `+inf` if the iteration diverges
-/// (fleet too slow to catch orbital target). `scene_step` is the absolute
-/// game step at which the fleet *launches*.
-fn intercept_from(
-    world: &WorldState,
-    sx: f64,
-    sy: f64,
-    target_id: i64,
-    ships: i64,
-    scene_step: f64,
-) -> (f64, f64, f64, f64) {
-    let target = world.planet(target_id);
-    let speed = fleet_speed(ships);
-    let entity = match world.entity_cache.get(target_id) {
-        Some(e) => e,
-        None => {
-            let travel = dist(sx, sy, target.x, target.y) / speed;
-            let angle = (target.y - sy).atan2(target.x - sx);
-            return (angle, target.x, target.y, travel);
-        }
-    };
-    let omega = world.entity_cache.angular_velocity;
-
-    if entity.is_static() || entity.is_comet() {
-        let tx = target.x;
-        let ty = target.y;
-        let travel = dist(sx, sy, tx, ty) / speed;
-        let angle = (ty - sy).atan2(tx - sx);
-        return (angle, tx, ty, travel);
-    }
-
-    let r = entity.orbital_radius;
-    let initial_pos = entity.positions[0].unwrap_or([CENTER + r, CENTER]);
-    let ia = (initial_pos[1] - CENTER).atan2(initial_pos[0] - CENTER);
-
-    let mut travel = dist(sx, sy, target.x, target.y) / speed;
-    let mut converged = false;
-    for _ in 0..30 {
-        let a = ia + omega * (scene_step + travel - 0.5);
-        let nx = CENTER + r * a.cos();
-        let ny = CENTER + r * a.sin();
-        let raw_new = dist(sx, sy, nx, ny) / speed;
-        let new_travel = 0.5 * (travel + raw_new - 0.5);
-        if (new_travel - travel).abs() < 1e-6 {
-            travel = new_travel;
-            converged = true;
-            break;
-        }
-        travel = new_travel;
-    }
-    if !converged {
-        return (0.0, target.x, target.y, f64::INFINITY);
-    }
-    let a = ia + omega * (scene_step + travel - 0.5);
-    let tx = CENTER + r * a.cos();
-    let ty = CENTER + r * a.sin();
-    let angle = (ty - sy).atan2(tx - sx);
-    (angle, tx, ty, travel)
-}
-
-/// Source position at fractional absolute step `t_abs`. Uses the
-/// `launch_turn - 0.5` convention for orbiting sources.
-fn source_pos_at(world: &WorldState, source_id: i64, t_abs: f64) -> (f64, f64) {
-    let entity = match world.entity_cache.get(source_id) {
-        Some(e) => e,
-        None => {
-            let s = world.planet(source_id);
-            return (s.x, s.y);
-        }
-    };
-    let omega = world.entity_cache.angular_velocity;
-    let p = planet_pos_at(entity, omega, t_abs);
-    (p[0], p[1])
-}
-
-// ── HellburnerModel ──────────────────────────────────────────────────────
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -1114,12 +1020,12 @@ fn early_find_capture_turn(
     target: &Planet,
 ) -> Option<i64> {
     let garrison_size = target.ships;
-    let horizon = state.turn + EARLY_LOOK_AHEAD;
+    let horizon = state.turn + HORIZON;
     let mut best: Option<i64> = None;
     for &source in &state.owned {
         let current_ships = *state.garrison.get(&source).unwrap_or(&0.0);
         let production_rate = *state.production.get(&source).unwrap_or(&0) as f64;
-        for wait_turns in 0..EARLY_LOOK_AHEAD {
+        for wait_turns in 0..HORIZON {
             let fleet_size = (current_ships + production_rate * (wait_turns as f64)) as i64;
             if fleet_size <= garrison_size {
                 continue;
@@ -1150,15 +1056,18 @@ fn early_find_capture_turn(
     best
 }
 
-/// (source_id, fleet_size, launch_turn, arrival_turn)
+/// (source_id, fleet_size, launch_turn). Arrival equals `capture_turn` by
+/// construction: this mirrors `early_find_capture_turn`'s per-source search
+/// (same break-on-first-viable-fleet rule), so the source that produced the
+/// minimum arrival there is rediscovered here.
 fn early_assign_fleet(
     model: &HellburnerModel,
     state: &EarlyState,
     target: &Planet,
     capture_turn: i64,
-) -> Option<(i64, i64, i64, i64)> {
+) -> Option<(i64, i64, i64)> {
     let garrison_size = target.ships;
-    let mut best: Option<(i64, i64, i64, i64)> = None;
+    let mut best: Option<(i64, i64, i64)> = None;
     let mut best_arrival = i64::MAX;
     for &source in &state.owned {
         let current_ships = *state.garrison.get(&source).unwrap_or(&0.0);
@@ -1177,7 +1086,7 @@ fn early_assign_fleet(
             let arrival = launch_turn + travel.ceil() as i64;
             if arrival <= capture_turn && arrival < best_arrival {
                 best_arrival = arrival;
-                best = Some((source, fleet_size, launch_turn, arrival));
+                best = Some((source, fleet_size, launch_turn));
             }
             break;
         }
@@ -1220,10 +1129,10 @@ fn early_execute(
     state: &mut EarlyState,
     world: &WorldState,
     target: &Planet,
-    assign: (i64, i64, i64, i64),
+    assign: (i64, i64, i64),
     capture_turn: i64,
 ) {
-    let (source, fleet_size, launch_turn, _arrival) = assign;
+    let (source, fleet_size, launch_turn) = assign;
     early_advance(state, world, state.turn, launch_turn);
     *state.garrison.entry(source).or_insert(0.0) -= fleet_size as f64;
     let garrison_size = target.ships;
@@ -1238,7 +1147,7 @@ fn early_execute(
 }
 
 fn early_score(state: &EarlyState, world: &WorldState) -> i64 {
-    let horizon = state.turn + EARLY_LOOK_AHEAD;
+    let horizon = state.turn + HORIZON;
     let mut total: i64 = 0;
     for &pid in &state.owned {
         let g = *state.garrison.get(&pid).unwrap_or(&0.0);
@@ -1322,7 +1231,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
         let Some(ct) = early_find_capture_turn(model, state, planet) else {
             return f64::NEG_INFINITY;
         };
-        let horizon = state.turn + EARLY_LOOK_AHEAD;
+        let horizon = state.turn + HORIZON;
         (planet.production * (horizon - ct) - planet.ships) as f64
     };
 
@@ -1339,17 +1248,17 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
     }
 
     let mut best_score = early_score(&initial_state, world);
-    let mut best_sequence: Vec<(Planet, (i64, i64, i64, i64), i64)> = Vec::new();
-    let mut sequence: Vec<(Planet, (i64, i64, i64, i64), i64)> = Vec::new();
+    let mut best_sequence: Vec<(Planet, (i64, i64, i64), i64)> = Vec::new();
+    let mut sequence: Vec<(Planet, (i64, i64, i64), i64)> = Vec::new();
 
     fn dfs(
         world: &WorldState,
         model: &HellburnerModel,
         state: &EarlyState,
         remaining: &[Planet],
-        sequence: &mut Vec<(Planet, (i64, i64, i64, i64), i64)>,
+        sequence: &mut Vec<(Planet, (i64, i64, i64), i64)>,
         best_score: &mut i64,
-        best_sequence: &mut Vec<(Planet, (i64, i64, i64, i64), i64)>,
+        best_sequence: &mut Vec<(Planet, (i64, i64, i64), i64)>,
     ) {
         let cur_score = early_score(state, world);
         if cur_score > *best_score {
@@ -1357,7 +1266,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
             *best_sequence = sequence.clone();
         }
 
-        let horizon = state.turn + EARLY_LOOK_AHEAD;
+        let horizon = state.turn + HORIZON;
         let mut bound = cur_score;
         for planet in remaining {
             if let Some(ct) = early_find_capture_turn(model, state, planet) {
@@ -1420,7 +1329,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
 
     // Emit only moves whose launch_turn == current step.
     let mut moves: Vec<FleetOrder> = Vec::new();
-    for (target_planet, (source_id, fleet_size, launch_turn, _), _) in &best_sequence {
+    for (target_planet, (source_id, fleet_size, launch_turn), _) in &best_sequence {
         if *launch_turn != world.step {
             continue;
         }
