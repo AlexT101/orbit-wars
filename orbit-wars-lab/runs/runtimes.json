@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-28T07:58:20.220126+00:00",
+  "last_updated": "2026-05-28T16:05:14.457902+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 16224,
@@ -39,10 +39,10 @@
       "last_updated": "2026-05-28T05:48:52.462140+00:00"
     },
     "external/owproto": {
-      "total_turns": 23074,
-      "total_seconds": 509.88328914000044,
-      "avg_ms": 22.097741576666397,
-      "last_updated": "2026-05-28T07:45:22.169203+00:00"
+      "total_turns": 23216,
+      "total_seconds": 510.45603314000044,
+      "avg_ms": 21.987251599758803,
+      "last_updated": "2026-05-28T16:05:14.428100+00:00"
     },
     "external/peaking-bot": {
       "total_turns": 10331,
@@ -123,10 +123,10 @@
       "last_updated": "2026-05-27T18:43:24.895847+00:00"
     },
     "mine/osteo": {
-      "total_turns": 21805,
-      "total_seconds": 2478.6765050000004,
-      "avg_ms": 113.67468493464804,
-      "last_updated": "2026-05-28T07:47:28.660817+00:00"
+      "total_turns": 21947,
+      "total_seconds": 2479.9144920000003,
+      "avg_ms": 112.99560267918169,
+      "last_updated": "2026-05-28T16:05:14.428069+00:00"
     },
     "mine/apollo_bf": {
       "total_turns": 14212,

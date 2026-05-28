@@ -144,7 +144,13 @@ def get_run(run_id: str) -> dict:
     ]:
         path = run_dir / fname
         if path.is_file():
-            out[key] = json.loads(path.read_text())
+            # Skip half-written files — the tournament writer races with
+            # the UI's poll loop; a partial truncate-then-write would
+            # otherwise propagate as a 500.
+            try:
+                out[key] = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                pass
     return out
 
 
@@ -153,7 +159,12 @@ def get_run_progress(run_id: str) -> dict:
     run_json = _runs_root() / run_id / "run.json"
     if not run_json.is_file():
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
-    data = json.loads(run_json.read_text())
+    try:
+        data = json.loads(run_json.read_text())
+    except json.JSONDecodeError:
+        # In-flight write; return a soft "still running" probe state so the
+        # poller retries on the next tick instead of getting a 500.
+        return {"status": "running", "matches_done": 0, "total_matches": 0}
     return {
         "status": data.get("status"),
         "matches_done": data.get("matches_done", 0),

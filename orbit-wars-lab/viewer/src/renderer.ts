@@ -29,6 +29,71 @@ const SUN_RADIUS = 10;
 // (won't rotate). Only orbiting ones get an orbit line.
 const ROTATION_RADIUS_LIMIT = 50.0;
 
+// --- Agent debug overlay ---
+// Agents print lines to stdout in known formats; the runner tags each with
+// the player + step (see orbit_wars_app/match.py:_attach_debug_output) and
+// attaches them as `replay.debug.messages`. We parse them here for canvas
+// overlays + per-team log panels.
+type DebugMessage =
+  | { kind: 'line'; raw: string; step: number; player?: number; x1: number; y1: number; x2: number; y2: number; color?: string }
+  | { kind: 'dot'; raw: string; step: number; player?: number; x: number; y: number; radius?: number; color?: string }
+  | { kind: 'text'; raw: string; step: number; player?: number; text: string }
+  | { kind: 'log'; raw: string; step: number; player?: number; text: string };
+
+function parseDebugMessage(msg: any): DebugMessage | null {
+  const raw = String(msg?.raw ?? msg ?? '').trim();
+  if (!raw) return null;
+  // Step comes from the runner (env.logs structure); fall back to 0 so the
+  // overlay still renders something on unstamped messages.
+  const step =
+    typeof msg?.step === 'number' && Number.isFinite(msg.step) ? msg.step : 0;
+  const player =
+    typeof msg?.player === 'number' && Number.isFinite(msg.player)
+      ? msg.player
+      : undefined;
+  const parts = raw.split(/\s+/);
+  const tag = parts[0];
+  const rest = parts.slice(1);
+  if (tag === '[LINE]' && rest.length >= 4) {
+    // `[LINE] <x1> <y1> <x2> <y2> [color]`
+    const [x1, y1, x2, y2] = rest.slice(0, 4).map(Number);
+    if ([x1, y1, x2, y2].every(Number.isFinite)) {
+      return { kind: 'line', raw, step, player, x1, y1, x2, y2, color: rest[4] };
+    }
+  }
+  if (tag === '[DOT]' && rest.length >= 2) {
+    // `[DOT] <x> <y> [radius] [color]`
+    const x = Number(rest[0]);
+    const y = Number(rest[1]);
+    const r = rest[2] !== undefined ? Number(rest[2]) : NaN;
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return {
+        kind: 'dot',
+        raw,
+        step,
+        player,
+        x,
+        y,
+        radius: Number.isFinite(r) ? r : undefined,
+        color: rest[3],
+      };
+    }
+  }
+  if (tag === '[TEXT]') {
+    return { kind: 'text', raw, step, player, text: rest.join(' ') };
+  }
+  return { kind: 'log', raw, step, player, text: raw };
+}
+
+function getAllDebugMessages(replay: any): DebugMessage[] {
+  const messages = replay?.debug?.messages || [];
+  const out: DebugMessage[] = [];
+  for (const m of messages) {
+    const parsed = parseDebugMessage(m);
+    if (parsed) out.push(parsed);
+  }
+  return out;
+}
 
 // --- Settings persistence. Fleet/production/text-size are fixed defaults.
 //     User-controlled toggles (orbits + trajectories) persist in localStorage. ---
@@ -39,14 +104,22 @@ interface Settings {
   showOrbits: boolean;
   showTrajectories: boolean;
   showGrid: boolean;
+  showDebug: boolean;
+  // Per-player visibility for debug indicators. Index = player number.
+  // A player toggle controls both their canvas lines/dots and their log lines.
+  showPlayerIndicators: boolean[];
 }
 
-function getSettings(_parent: HTMLElement): Settings {
+function getSettings(_parent: HTMLElement, numAgents = 2): Settings {
   const ls = (k: string, fallback: boolean) => {
     const v = localStorage.getItem(k);
     if (v === null) return fallback;
     return v === 'true';
   };
+  const showPlayerIndicators: boolean[] = [];
+  for (let i = 0; i < numAgents; i++) {
+    showPlayerIndicators.push(ls(`ow-show-player-${i}-indicators`, true));
+  }
   return {
     showFleetNumbers: true,
     showProductionDots: true,
@@ -54,6 +127,8 @@ function getSettings(_parent: HTMLElement): Settings {
     showOrbits: ls('ow-show-orbits', true),
     showTrajectories: ls('ow-show-trajectories', false),
     showGrid: ls('ow-show-grid', true),
+    showDebug: ls('ow-show-debug', true),
+    showPlayerIndicators,
   };
 }
 
@@ -98,10 +173,6 @@ export function renderer(options: RendererOptions) {
   const stepData = getStepData(replay, step);
   if (!stepData || !(stepData as any)[0]?.observation) return;
 
-  const settings = getSettings(parent);
-  const palette = getCanvasPalette();
-  const textScale = TEXT_SIZES[settings.textSize] || 1.0;
-
   const obs = (stepData as any)[0].observation;
   const planets: Planet[] = (obs.planets || []).map(parsePlanet);
   const fleets: Fleet[] = (obs.fleets || []).map(parseFleet);
@@ -118,6 +189,17 @@ export function renderer(options: RendererOptions) {
     for (const f of fleets) if (f.owner > maxOwner) maxOwner = f.owner;
     numAgents = maxOwner + 1;
   }
+
+  const settings = getSettings(parent, numAgents);
+  const palette = getCanvasPalette();
+  const textScale = TEXT_SIZES[settings.textSize] || 1.0;
+
+  // Pull all debug messages once, then filter by current step.
+  const debugMessagesAll = getAllDebugMessages(replay);
+  const debugMessagesForStep = debugMessagesAll.filter(
+    (m) => m.step === step,
+  );
+  const hasAnyDebug = debugMessagesAll.length > 0;
 
   // Previous step for diff detection
   let prevObs: any = null;
@@ -177,6 +259,37 @@ export function renderer(options: RendererOptions) {
           </svg>
         </button>`;
   const canvasLight = localStorage.getItem('ow-canvas-theme') === 'light';
+
+  // Resolve player names up-front so both the (later) header cards AND
+  // the per-player pills below can use them. Kaggle uses `Name`, our
+  // local runs use `name`; replay.info.TeamNames is the final fallback.
+  const _teamNames = (replay as any)?.info?.TeamNames as string[] | undefined;
+  const _playerNames: string[] = [];
+  for (let i = 0; i < numAgents; i++) {
+    const agent: any = agents?.[i];
+    const name = agent?.name || agent?.Name || _teamNames?.[i] || `P${i + 1}`;
+    _playerNames.push(name);
+  }
+  const _shortName = (n: string, max = 20) => {
+    const last = n.includes('/') ? n.split('/').pop()! : n;
+    return last.length > max ? last.slice(0, max - 1) + '…' : last;
+  };
+
+  // Per-player indicator pills — one per agent, colored swatch + the
+  // agent's short name (e.g. "● apollo2"). Rendered inside the debug
+  // panel header so they're visible in *both* embedded mode (Quick Match
+  // iframe) and standalone replay view — i.e. always reachable when the
+  // replay has debug data.
+  let playerPillsHtml = '';
+  if (hasAnyDebug) {
+    for (let i = 0; i < numAgents; i++) {
+      const on = settings.showPlayerIndicators[i];
+      const color = PLAYER_COLORS[i % PLAYER_COLORS.length];
+      const label = _shortName(_playerNames[i], 12);
+      playerPillsHtml += `<button class="settings-pill${on ? ' on' : ''}" data-toggle="player-${i}-indicators" title="Toggle ${label} debug indicators"><span class="player-pill-dot" style="background:${color}"></span>${label}</button>`;
+    }
+  }
+
   const settingsRowHtml = isEmbedded
     ? ''
     : `<div class="settings-row">
@@ -184,7 +297,49 @@ export function renderer(options: RendererOptions) {
         <button class="settings-pill${settings.showOrbits ? ' on' : ''}" data-toggle="orbits">orbits</button>
         <button class="settings-pill${settings.showTrajectories ? ' on' : ''}" data-toggle="trajectories">trajectories</button>
         <button class="settings-pill${canvasLight ? ' on' : ''}" data-toggle="canvas">light canvas</button>
+        ${hasAnyDebug ? `<button class="settings-pill${settings.showDebug ? ' on' : ''}" data-toggle="debug">debug</button>` : ''}
       </div>`;
+
+  // Debug log panel — anchored to the top-right of the canvas wrapper.
+  // Shown in BOTH embedded and standalone modes so Quick Match users
+  // see the per-player toggles + log stream without needing a gear icon.
+  let debugPanelHtml = '';
+  if (hasAnyDebug && settings.showDebug) {
+    const renderLogLine = (m: DebugMessage) => {
+      const text = m.kind === 'text' ? m.text : m.raw;
+      const escaped = text.replace(
+        /[&<>]/g,
+        (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch] as string),
+      );
+      const color =
+        m.player !== undefined && m.player >= 0
+          ? PLAYER_COLORS[m.player % PLAYER_COLORS.length]
+          : '#888';
+      return `<div style="border-left-color: ${color}">${escaped}</div>`;
+    };
+    const visibleMsgs = debugMessagesForStep.filter((m) => {
+      // `[LINE]` / `[DOT]` messages are rendered on the canvas overlay —
+      // dumping their raw form into the log panel is just noise. Keep
+      // only text / log lines here.
+      if (m.kind === 'line' || m.kind === 'dot') return false;
+      if (
+        m.player !== undefined &&
+        m.player >= 0 &&
+        m.player < settings.showPlayerIndicators.length
+      ) {
+        return settings.showPlayerIndicators[m.player];
+      }
+      return true;
+    });
+    const lines = visibleMsgs.length === 0
+      ? '<div class="debug-panel-empty">No debug for this turn</div>'
+      : visibleMsgs.map(renderLogLine).join('');
+    debugPanelHtml = `<div class="debug-panel-container">
+         <div class="debug-panel-header">Turn ${step} debug</div>
+         ${playerPillsHtml ? `<div class="debug-panel-pills">${playerPillsHtml}</div>` : ''}
+         <div class="debug-panel">${lines}</div>
+       </div>`;
+  }
 
   const headerHtml = isEmbedded
     ? ''
@@ -192,15 +347,31 @@ export function renderer(options: RendererOptions) {
          <div class="header-players"></div>
          ${gearAndRow}
        </div>`;
+  // When the debug panel is present, canvas + panel share horizontal
+  // space (flex-row) so the panel never covers the play area. When the
+  // panel is absent, the canvas-wrapper alone fills the row and behaves
+  // exactly as it did before debug was a thing.
   parent.innerHTML = `
     <div class="renderer-container${settingsOpen ? ' settings-open' : ''}">
       ${headerHtml}
       ${settingsRowHtml}
-      <div class="canvas-wrapper">
-        <canvas></canvas>
+      <div class="main-layout">
+        <div class="canvas-wrapper">
+          <canvas></canvas>
+        </div>
+        ${debugPanelHtml}
       </div>
     </div>
   `;
+
+  // Reset the debug panel's scroll on every render so navigating to a new
+  // turn always shows the `=== turn N ===` header first. Without this the
+  // previous turn's bottom scroll position sticks and the new turn header
+  // starts off-screen, which reads as "logs got cut off".
+  const debugPanelEl = parent.querySelector<HTMLDivElement>('.debug-panel');
+  if (debugPanelEl) {
+    debugPanelEl.scrollTop = 0;
+  }
 
   const header = parent.querySelector('.header-players') as HTMLDivElement | null;
   const canvas = parent.querySelector('canvas') as HTMLCanvasElement;
@@ -215,27 +386,50 @@ export function renderer(options: RendererOptions) {
       localStorage.setItem('ow-settings-open', nextOpen.toString());
       renderer(options);
     });
-    parent.querySelectorAll<HTMLButtonElement>('.settings-pill[data-toggle]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const key = btn.dataset.toggle;
-        if (key === 'canvas') {
-          const cur = localStorage.getItem('ow-canvas-theme') === 'light';
-          localStorage.setItem('ow-canvas-theme', cur ? 'dark' : 'light');
-          renderer(options);
-          return;
-        }
-        let current = false;
-        if (key === 'orbits') current = settings.showOrbits;
-        else if (key === 'trajectories') current = settings.showTrajectories;
-        else if (key === 'grid') current = settings.showGrid;
-        const next = !current;
-        if (key === 'orbits') localStorage.setItem('ow-show-orbits', next.toString());
-        else if (key === 'trajectories') localStorage.setItem('ow-show-trajectories', next.toString());
-        else if (key === 'grid') localStorage.setItem('ow-show-grid', next.toString());
-        renderer(options);
-      });
-    });
   }
+
+  // Pill click handlers — attached unconditionally so the per-player
+  // pills (which live inside the debug panel and therefore exist even in
+  // embedded mode) actually toggle. The gear-only pills (orbits, grid,
+  // etc.) live in the hidden settings-row in standalone view; they
+  // simply won't be present in embedded mode and the selector picks up
+  // nothing, which is fine.
+  parent.querySelectorAll<HTMLButtonElement>('.settings-pill[data-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.toggle;
+      if (key === 'canvas') {
+        const cur = localStorage.getItem('ow-canvas-theme') === 'light';
+        localStorage.setItem('ow-canvas-theme', cur ? 'dark' : 'light');
+        renderer(options);
+        return;
+      }
+      let current = false;
+      let storageKey: string | null = null;
+      if (key === 'orbits') {
+        current = settings.showOrbits;
+        storageKey = 'ow-show-orbits';
+      } else if (key === 'trajectories') {
+        current = settings.showTrajectories;
+        storageKey = 'ow-show-trajectories';
+      } else if (key === 'grid') {
+        current = settings.showGrid;
+        storageKey = 'ow-show-grid';
+      } else if (key === 'debug') {
+        current = settings.showDebug;
+        storageKey = 'ow-show-debug';
+      } else if (key && key.startsWith('player-') && key.endsWith('-indicators')) {
+        const idx = parseInt(key.split('-')[1], 10);
+        if (Number.isFinite(idx) && idx >= 0 && idx < settings.showPlayerIndicators.length) {
+          current = settings.showPlayerIndicators[idx];
+          storageKey = `ow-show-player-${idx}-indicators`;
+        }
+      }
+      if (storageKey) {
+        localStorage.setItem(storageKey, (!current).toString());
+      }
+      renderer(options);
+    });
+  });
 
   // Size canvas: always a square that fills the wrapper. DOM inspection
   // confirms Kaggle's playback bar sits as a SIBLING below the wrapper
@@ -359,24 +553,12 @@ export function renderer(options: RendererOptions) {
   }
 
   // --- Header: player cards ---
-  // Kaggle uses `Name` (capital), our local runs pass `name`. Also fall back
-  // to replay.info.TeamNames if agents[] is missing (Kaggle replays sometimes
-  // only set it there).
-  const teamNames = (replay as any)?.info?.TeamNames as string[] | undefined;
-  const playerNames: string[] = [];
-  for (let i = 0; i < numAgents; i++) {
-    const agent: any = agents?.[i];
-    const name =
-      agent?.name || agent?.Name || teamNames?.[i] || `P${i + 1}`;
-    playerNames.push(name);
-  }
+  // `playerNames` + `shortName` are already declared above (the debug
+  // panel needs them too), so reuse them here as aliases.
+  const playerNames = _playerNames;
+  const shortName = _shortName;
 
   const headerParts: string[] = [];
-  const shortName = (n: string, max = 20) => {
-    // Drop bucket prefix like "baselines/" or "external/"
-    const last = n.includes('/') ? n.split('/').pop()! : n;
-    return last.length > max ? last.slice(0, max - 1) + '…' : last;
-  };
   // When rendered inside the Quick Match iframe, the sidebar's Match
   // accordion shows players + live scores + step — no need for the
   // canvas-top header, so free up vertical room for a bigger play area.
@@ -736,6 +918,54 @@ export function renderer(options: RendererOptions) {
       c.fillStyle = getPlayerColor(fleet.owner);
       c.fillText(Math.floor(fleet.ships).toString(), fx, fy + labelOffset);
     }
+  }
+
+  // --- Agent debug overlay ---
+  // `[LINE]` and `[DOT]` messages emitted by agents on this turn.
+  if (settings.showDebug && debugMessagesForStep.length > 0) {
+    c.save();
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    for (const msg of debugMessagesForStep) {
+      // Per-player toggle: messages with a known player index are hidden
+      // when their pill is off. Messages without a player (player-less log
+      // lines) are always shown.
+      if (
+        msg.player !== undefined &&
+        msg.player >= 0 &&
+        msg.player < settings.showPlayerIndicators.length &&
+        !settings.showPlayerIndicators[msg.player]
+      ) {
+        continue;
+      }
+      // Default to the player's color if no explicit color was specified.
+      const fallback =
+        msg.player !== undefined
+          ? PLAYER_COLORS[msg.player % PLAYER_COLORS.length]
+          : '#ff4fd8';
+      if (msg.kind === 'line') {
+        c.beginPath();
+        c.moveTo(msg.x1 * scale, msg.y1 * scale);
+        c.lineTo(msg.x2 * scale, msg.y2 * scale);
+        c.strokeStyle = msg.color || fallback;
+        c.lineWidth = 1.5;
+        c.globalAlpha = 0.6;
+        c.stroke();
+      } else if (msg.kind === 'dot') {
+        c.beginPath();
+        c.arc(
+          msg.x * scale,
+          msg.y * scale,
+          Math.max(1.4, (msg.radius ?? 1.2) * scale),
+          0,
+          Math.PI * 2,
+        );
+        c.fillStyle = msg.color || fallback;
+        c.globalAlpha = 0.6;
+        c.fill();
+      }
+    }
+    c.restore();
   }
 
   // Selection highlights — rings around every currently-selected entity.
