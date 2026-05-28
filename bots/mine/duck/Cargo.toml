@@ -1,0 +1,30 @@
+[package]
+name = "duck-bot"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "duck_bot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "duck-bot"
+path = "src/main.rs"
+
+[[bin]]
+name = "validator"
+path = "src/bin/validator.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustc-hash = "1.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
