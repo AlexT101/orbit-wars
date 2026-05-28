@@ -86,15 +86,103 @@ pub struct BlockerEntry {
     pub blocker_id: i64,
 }
 
-#[derive(Debug, Default, Clone)]
+/// Number of bearing buckets used to index [`BlockerTable::entries`] for
+/// fast `is_blocked` lookups. The 2π aim space is partitioned into
+/// `BLOCKER_BUCKETS` equal slices; each entry is filed into every bucket
+/// whose slice overlaps the entry's blocking arc. A query at aim `θ`
+/// scans only the bucket containing `θ`, turning the linear scan into
+/// `O(bucket size)` ≈ `O(N / BUCKETS · max_arc_width)`.
+///
+/// 32 buckets → step ≈ 0.196 rad ≈ 11°. Typical half-arcs are ~0.05-0.2 rad,
+/// so most entries land in 1-3 buckets (modest duplication factor).
+const BLOCKER_BUCKETS: usize = 32;
+
+#[derive(Debug, Clone)]
 pub struct BlockerTable {
     pub entries: Vec<BlockerEntry>,
+    /// Cumulative offsets into [`bucket_entry_idx`]. Bucket `b`'s entry
+    /// indices live at `bucket_entry_idx[bucket_offsets[b]..bucket_offsets[b+1]]`.
+    bucket_offsets: [u32; BLOCKER_BUCKETS + 1],
+    /// Flat list of entry indices, partitioned by bucket. An entry can
+    /// appear in multiple buckets if its arc straddles bucket boundaries.
+    bucket_entry_idx: Vec<u32>,
+}
+
+impl Default for BlockerTable {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            bucket_offsets: [0; BLOCKER_BUCKETS + 1],
+            bucket_entry_idx: Vec::new(),
+        }
+    }
 }
 
 /// Branchless wrap of `a` into `(-π, π]`.
 #[inline]
 fn wrap_pi(a: f64) -> f64 {
     a - 2.0 * PI * ((a + PI) * (1.0 / (2.0 * PI))).floor()
+}
+
+/// Bucket index for an aim angle. The 2π aim space (`[-π, π)`) maps to
+/// `[0, BLOCKER_BUCKETS)`.
+#[inline]
+fn bearing_bucket(angle: f64) -> usize {
+    let wrapped = wrap_pi(angle);
+    let normalized = (wrapped + PI) / (2.0 * PI);
+    let idx = (normalized * BLOCKER_BUCKETS as f64) as usize;
+    idx.min(BLOCKER_BUCKETS - 1)
+}
+
+/// Invoke `f` once per bucket index whose angular slice intersects the
+/// arc `[bearing − half_arc, bearing + half_arc]`. Handles arcs that wrap
+/// the `±π` branch cut by splitting into two ranges. The arc width is
+/// bounded by `2·half_arc ≤ π` (entries with `half_arc = π/2` arise only in
+/// the launcher-on-blocker degenerate case), so we never need more than
+/// half the buckets.
+#[inline]
+fn arc_buckets(bearing: f64, half_arc: f64, mut f: impl FnMut(usize)) {
+    let center = wrap_pi(bearing);
+    let start_b = bearing_bucket(center - half_arc);
+    let end_b = bearing_bucket(center + half_arc);
+    if end_b >= start_b {
+        for b in start_b..=end_b {
+            f(b);
+        }
+    } else {
+        for b in start_b..BLOCKER_BUCKETS {
+            f(b);
+        }
+        for b in 0..=end_b {
+            f(b);
+        }
+    }
+}
+
+/// Populate `bucket_offsets` and `bucket_entry_idx` from `entries`. Two
+/// passes: count per bucket, then place entry indices.
+fn build_buckets(entries: &[BlockerEntry]) -> ([u32; BLOCKER_BUCKETS + 1], Vec<u32>) {
+    let mut counts = [0u32; BLOCKER_BUCKETS];
+    for e in entries {
+        arc_buckets(e.bearing, e.half_arc, |b| counts[b] += 1);
+    }
+    let mut offsets = [0u32; BLOCKER_BUCKETS + 1];
+    let mut sum = 0u32;
+    for i in 0..BLOCKER_BUCKETS {
+        offsets[i] = sum;
+        sum += counts[i];
+    }
+    offsets[BLOCKER_BUCKETS] = sum;
+
+    let mut cursors = offsets;
+    let mut bucket_entry_idx = vec![0u32; sum as usize];
+    for (i, e) in entries.iter().enumerate() {
+        arc_buckets(e.bearing, e.half_arc, |b| {
+            bucket_entry_idx[cursors[b] as usize] = i as u32;
+            cursors[b] += 1;
+        });
+    }
+    (offsets, bucket_entry_idx)
 }
 
 /// Map a raw fleet speed to a quantized bucket key.
@@ -108,6 +196,14 @@ pub fn speed_bucket(ships: i64) -> i64 {
 #[inline]
 pub fn bucket_to_speed(bucket: i64) -> f64 {
     bucket as f64 / V_QUANT
+}
+
+/// Recover the bucket index from an already-quantized speed (i.e., a value
+/// produced by [`bucket_to_speed`]). Used by callers that hold `v` but need
+/// to key a cache by bucket without recomputing from `ships`.
+#[inline]
+pub fn speed_bucket_from_speed(v: f64) -> i64 {
+    (v * V_QUANT).round() as i64
 }
 
 /// True iff `(aim, flight_time)` lies inside the entry's blocking arc.
@@ -125,11 +221,15 @@ fn entry_blocks(e: &BlockerEntry, target_id: i64, aim: f64, flight_time: f64) ->
 }
 
 /// `true` iff any non-target blocker in `table` blocks `(aim, flight_time)`.
+/// Uses the bearing-bucket index: only entries whose arc could contain
+/// `aim` are checked.
 pub fn is_blocked(table: &BlockerTable, target_id: i64, aim: f64, flight_time: f64) -> bool {
-    table
-        .entries
+    let b = bearing_bucket(aim);
+    let start = table.bucket_offsets[b] as usize;
+    let end = table.bucket_offsets[b + 1] as usize;
+    table.bucket_entry_idx[start..end]
         .iter()
-        .any(|e| entry_blocks(e, target_id, aim, flight_time))
+        .any(|&idx| entry_blocks(&table.entries[idx as usize], target_id, aim, flight_time))
 }
 
 
@@ -154,19 +254,12 @@ pub fn build_blocker_table(
     let mut entries: Vec<BlockerEntry> =
         Vec::with_capacity((max_lookahead as usize + 1) * cache.entities.len());
 
-    // Sun — stationary disk at the board center.
-    add_static_band(
-        &mut entries,
-        SUN_BLOCKER_ID,
-        lx,
-        ly,
-        CENTER,
-        CENTER,
-        SUN_RADIUS,
-        launch_offset,
-        v,
-        max_lookahead as f64,
-    );
+    // Static portion (sun + static planets). For a static shooter the
+    // shooter position doesn't depend on `launch_turn_offset`, so these
+    // entries are reusable across launch turns and are cached by
+    // `(shooter_id, speed_bucket)` in [`EntityCache::static_band_entries`].
+    let static_entries = cache.static_band_entries(shooter_id, launch_turn_offset, v);
+    entries.extend_from_slice(&static_entries);
 
     for (&bid, ent) in cache.entities.iter() {
         if bid == shooter_id {
@@ -197,46 +290,37 @@ pub fn build_blocker_table(
             }
             continue;
         }
-        match ent.kind {
-            EntityKind::StaticPlanet => {
-                let Some([bx, by]) = cache.position(bid, launch_turn_offset) else {
-                    continue;
-                };
-                add_static_band(
-                    &mut entries,
-                    bid,
-                    lx,
-                    ly,
-                    bx,
-                    by,
-                    ent.radius,
-                    launch_offset,
-                    v,
-                    max_lookahead as f64,
-                );
-            }
-            EntityKind::OrbitingPlanet | EntityKind::Comet => {
-                add_dynamic_bands(
-                    &mut entries,
-                    cache,
-                    bid,
-                    ent.radius,
-                    lx,
-                    ly,
-                    launch_turn_offset,
-                    max_lookahead,
-                    launch_offset,
-                    v,
-                );
-            }
+        if matches!(ent.kind, EntityKind::OrbitingPlanet | EntityKind::Comet) {
+            add_dynamic_bands(
+                &mut entries,
+                cache,
+                bid,
+                ent.radius,
+                lx,
+                ly,
+                launch_turn_offset,
+                max_lookahead,
+                launch_offset,
+                v,
+            );
         }
     }
 
-    BlockerTable { entries }
+    let (bucket_offsets, bucket_entry_idx) = build_buckets(&entries);
+    BlockerTable {
+        entries,
+        bucket_offsets,
+        bucket_entry_idx,
+    }
 }
 
 /// One entry for a stationary disk: aim cone of half-width `asin(r/d)`,
 /// `flight_t` = time fleet ring first reaches the disk's near edge.
+///
+/// No `max_flight_time` filter — `entry_blocks` already rejects entries whose
+/// `flight_t` exceeds the query's flight time. Skipping that filter here
+/// lets the static-band entries be cached and reused across launch turns of
+/// a static shooter (see [`EntityCache::static_band_entries`]).
 fn add_static_band(
     out: &mut Vec<BlockerEntry>,
     blocker_id: i64,
@@ -247,7 +331,6 @@ fn add_static_band(
     r: f64,
     launch_offset: f64,
     v: f64,
-    max_flight_time: f64,
 ) {
     let dx = cx - lx;
     let dy = cy - ly;
@@ -256,9 +339,6 @@ fn add_static_band(
         return;
     }
     let near = (d - r - launch_offset) / v;
-    if near > max_flight_time {
-        return;
-    }
     let t_lo = near.max(0.0);
     let bearing = dy.atan2(dx);
     let half = if d > r { (r / d).asin() } else { FRAC_PI_2 };
@@ -272,6 +352,57 @@ fn add_static_band(
     });
 }
 
+/// Build the static-band portion (sun + static planets) of a blocker table.
+/// Shared between [`build_blocker_table`] and the per-shooter static-band
+/// cache in [`EntityCache::static_band_entries`].
+pub fn compute_static_band_entries(
+    cache: &EntityCache,
+    shooter_id: i64,
+    launch_turn_offset: i64,
+    v: f64,
+) -> Vec<BlockerEntry> {
+    let Some([lx, ly]) = cache.position(shooter_id, launch_turn_offset) else {
+        return Vec::new();
+    };
+    let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
+    let launch_offset = shooter_radius + LAUNCH_CLEARANCE;
+
+    let mut entries = Vec::with_capacity(8);
+    add_static_band(
+        &mut entries,
+        SUN_BLOCKER_ID,
+        lx,
+        ly,
+        CENTER,
+        CENTER,
+        SUN_RADIUS,
+        launch_offset,
+        v,
+    );
+    for (&bid, ent) in cache.entities.iter() {
+        if bid == shooter_id {
+            continue;
+        }
+        if matches!(ent.kind, EntityKind::StaticPlanet) {
+            let Some([bx, by]) = cache.position(bid, launch_turn_offset) else {
+                continue;
+            };
+            add_static_band(
+                &mut entries,
+                bid,
+                lx,
+                ly,
+                bx,
+                by,
+                ent.radius,
+                launch_offset,
+                v,
+            );
+        }
+    }
+    entries
+}
+
 /// Number of `s ∈ [0, 1]` samples used to *bracket* the per-turn envelope
 /// extrema in [`add_dynamic_bands`]. The envelope `u(s) = bearing(s) + α(s)`
 /// is smooth in `s`, so a moderate scan locates each extremum's grid cell;
@@ -280,10 +411,17 @@ fn add_static_band(
 /// resolve which cell contains the peak.
 const ENVELOPE_SCAN: usize = 21;
 
-/// Golden-section search iterations used by [`add_dynamic_bands`] to refine
-/// each extremum after the coarse scan. 32 iterations shrinks the bracket
-/// by factor `φ⁻³² ≈ 1e-7`, deep below any practical aim precision.
-const ENVELOPE_GSS_ITERS: usize = 32;
+/// Golden-section search precision used by [`add_dynamic_bands`] to refine
+/// each extremum after the coarse scan. Iteration stops when the bracket
+/// shrinks below this width in `s`; with envelope sensitivity bounded by the
+/// fleet's chord speed (`v ≲ 6`/turn), 1e-5 in `s` corresponds to <1e-4 rad
+/// in aim — well below any practical aim quantization.
+const ENVELOPE_GSS_TOL: f64 = 1e-5;
+
+/// Hard cap on golden-section iterations in case the bracket fails to shrink
+/// (degenerate or numerically pathological envelope). With `φ ≈ 0.618`,
+/// 50 iters gives `φ⁵⁰ ≈ 7e-11` — far below any geometry we'll see.
+const ENVELOPE_GSS_MAX_ITERS: usize = 50;
 
 /// Per-`s` blocking arc: aim bearings `θ` with `|fleet(s, θ) − Q(s)| ≤ r`.
 /// Returns `(bearing(s), α(s))` or `None` if the fleet ring cannot reach the
@@ -313,12 +451,18 @@ fn arc_at(
     if (k_mag - d_s).abs() > radius {
         return None;
     }
-    let denom = 2.0 * d_s * k_mag;
+    // Haversine form of the half-arc: from `2·sin²(α/2) = 1 − cos α =
+    // (r² − (K−D)²)/(2DK)`, we get `α = 2·asin(√((r + D − K)(r + K − D) /
+    // (4DK)))`. Equivalent to `acos((K² + D² − r²)/(2DK))` but numerically
+    // robust near the common case `α → 0` (where `cos α → 1` and `acos`
+    // loses precision to cancellation in `1 − cos α`).
+    let factor_a = (radius + d_s - k_mag).max(0.0);
+    let factor_b = (radius + k_mag - d_s).max(0.0);
+    let denom = 4.0 * d_s * k_mag;
     let half = if denom < 1e-12 {
         FRAC_PI_2
     } else {
-        let cos_arg = ((k_sq + d_s * d_s - radius * radius) / denom).clamp(-1.0, 1.0);
-        cos_arg.acos()
+        2.0 * (factor_a * factor_b / denom).sqrt().min(1.0).asin()
     };
     Some((ky.atan2(kx), half))
 }
@@ -461,11 +605,61 @@ fn add_dynamic_bands(
     launch_offset: f64,
     v: f64,
 ) {
-    for t in 1..=max_lookahead {
-        let Some([q0x, q0y]) = cache.position(blocker_id, launch_turn_offset + t - 1) else {
+    // Hoist the entity lookup once (saves one HashMap.get per turn) and
+    // bound the *latest* feasible turn from `K(s)`'s integer-turn maximum.
+    // We do **not** prune the earliest turn: `K²(s)` is convex on each
+    // chord (an upward parabola in `s`), so its *maximum* over `[0,1]` is
+    // always at an endpoint, making `k_max` from integer turns a true
+    // upper bound. Its *minimum*, though, can be interior — a fast comet
+    // passing near the launcher can have a chord whose closest point to
+    // `L` is well below both endpoint distances, so an integer-turn
+    // `k_min` would over-estimate the true minimum and wrongly skip
+    // feasible early turns. `feasibility_range` handles the early-turn
+    // case correctly, so the inner loop starts at `t = 1` as before.
+    let Some(entity) = cache.get(blocker_id) else {
+        return;
+    };
+    let positions = &entity.positions;
+    let abs_base = cache.current_turn + launch_turn_offset;
+
+    let mut k_max_sq = 0.0_f64;
+    let mut any_position = false;
+    for t in 0..=max_lookahead {
+        let abs = abs_base + t;
+        if abs < 0 || (abs as usize) >= positions.len() {
+            continue;
+        }
+        let Some([qx, qy]) = positions[abs as usize] else {
             continue;
         };
-        let Some([q1x, q1y]) = cache.position(blocker_id, launch_turn_offset + t) else {
+        any_position = true;
+        let dx = qx - lx;
+        let dy = qy - ly;
+        let d_sq = dx * dx + dy * dy;
+        if d_sq > k_max_sq {
+            k_max_sq = d_sq;
+        }
+    }
+    if !any_position {
+        return;
+    }
+    let k_max = k_max_sq.sqrt();
+
+    // `D(start of turn t) = launch_offset + (t-1)·v`. If at the *start* of
+    // turn `t` the fleet ring is already past the farthest blocker position
+    // (`D ≥ k_max + r`), then for every `s ∈ [0,1]` of this and later
+    // turns, `D > K + r`, no collision possible. So we cap at
+    // `t_max = ⌈(k_max + r − launch_offset)/v⌉ + 1`.
+    let t_max_raw = ((k_max + radius - launch_offset) / v).ceil() + 1.0;
+    let t_max = (t_max_raw as i64).min(max_lookahead).max(1);
+
+    for t in 1..=t_max {
+        let abs_t0 = (abs_base + t - 1) as usize;
+        let abs_t1 = (abs_base + t) as usize;
+        let Some([q0x, q0y]) = positions[abs_t0] else {
+            continue;
+        };
+        let Some([q1x, q1y]) = positions[abs_t1] else {
             continue;
         };
         let dqx = q1x - q0x;
@@ -536,8 +730,8 @@ fn add_dynamic_bands(
             let mut d = a + phi * (b - a);
             let mut fc = eval(c, maximize);
             let mut fd = eval(d, maximize);
-            for _ in 0..ENVELOPE_GSS_ITERS {
-                if (b - a) < 1e-12 {
+            for _ in 0..ENVELOPE_GSS_MAX_ITERS {
+                if (b - a) < ENVELOPE_GSS_TOL {
                     break;
                 }
                 let pick_left = if maximize { fc > fd } else { fc < fd };
@@ -645,13 +839,18 @@ pub fn lead_target(
         let dqy = q1y - q0y;
         let d0 = launch_offset + (t as f64 - 1.0) * v;
 
+        // Replace `hypot` with `sqrt(a² + b²)`: coordinates are bounded by
+        // `BOARD_SIZE ≈ 100`, so `a² + b²` cannot overflow `f64` and the
+        // hypot overflow guards are pure dead weight here. ~3-4× faster
+        // than `hypot`, and the loop body's sequential `if` chain keeps the
+        // compiler honest about the argmin reduction.
         let mut best_gap = f64::INFINITY;
         let mut best_s = 0.0_f64;
         for i in 0..LEAD_SAMPLES {
             let s = i as f64 * inv_samples;
-            let qx = q0x + s * dqx;
-            let qy = q0y + s * dqy;
-            let k = (qx - lx).hypot(qy - ly);
+            let qx = q0x + s * dqx - lx;
+            let qy = q0y + s * dqy - ly;
+            let k = (qx * qx + qy * qy).sqrt();
             let d = d0 + s * v;
             let gap = (k - d).abs();
             if gap < best_gap {
@@ -668,10 +867,12 @@ pub fn lead_target(
         let qy = q0y + best_s * dqy;
         // Skip pathological cases where the target's chord passes through the
         // launcher position — bearing is undefined.
-        if (qx - lx).hypot(qy - ly) < 1e-9 {
+        let kx = qx - lx;
+        let ky = qy - ly;
+        if kx * kx + ky * ky < 1e-18 {
             continue;
         }
-        let angle = (qy - ly).atan2(qx - lx);
+        let angle = ky.atan2(kx);
         let flight_time = t as f64 - 1.0 + best_s;
         return Some((angle, t, qx, qy, flight_time));
     }
@@ -721,7 +922,11 @@ pub fn aim_with_prediction(
     // the ±π branch cut.
     let (mut delta_lo, mut delta_hi) = (0.0_f64, 0.0_f64);
     let mut any_blocked = false;
-    for e in table.entries.iter() {
+    let b = bearing_bucket(angle);
+    let start = table.bucket_offsets[b] as usize;
+    let end = table.bucket_offsets[b + 1] as usize;
+    for &idx in &table.bucket_entry_idx[start..end] {
+        let e = &table.entries[idx as usize];
         if entry_blocks(e, target_id, angle, flight_time) {
             let lo = wrap_pi(e.aim_min - angle);
             let hi = wrap_pi(e.aim_max - angle);
