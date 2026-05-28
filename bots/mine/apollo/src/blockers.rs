@@ -323,6 +323,111 @@ fn arc_at(
     Some((ky.atan2(kx), half))
 }
 
+/// Analytic feasibility window `[s_lo, s_hi] ⊆ [0, 1]` where the fleet ring
+/// can collide with the blocker disk: the set of `s` satisfying
+/// `|K(s) − D(s)| ≤ r`. Equivalent to `(D − r)² ≤ K² ≤ (D + r)²`, two
+/// quadratics in `s` (since `K²` is quadratic and `(D ± r)²` is quadratic).
+///
+/// Returns `None` if no `s ∈ [0, 1]` is feasible — the caller can skip the
+/// turn entirely. The exact `s_lo` becomes the entry's `flight_t` so engine
+/// collisions arriving slightly before the first discrete scan sample are
+/// not falsely pruned.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn feasibility_range(
+    lx: f64,
+    ly: f64,
+    q0x: f64,
+    q0y: f64,
+    dqx: f64,
+    dqy: f64,
+    d0: f64,
+    v: f64,
+    radius: f64,
+) -> Option<(f64, f64)> {
+    let ux = q0x - lx;
+    let uy = q0y - ly;
+    let a = ux * ux + uy * uy; // K²(0)
+    let b = ux * dqx + uy * dqy; // ½ d/ds K² at s=0
+    let c = dqx * dqx + dqy * dqy; // ½ d²/ds² K² (constant)
+    let big_a = c - v * v;
+
+    // Boundary candidates: roots of K²(s) = (D(s) ± r)² clipped to [0, 1],
+    // plus the [0, 1] endpoints. Max 6 candidates (2 endpoints + 2 roots × 2
+    // sign choices).
+    let mut bounds = [0.0_f64; 6];
+    bounds[0] = 0.0;
+    bounds[1] = 1.0;
+    let mut n = 2usize;
+
+    for &r_signed in &[radius, -radius] {
+        let dr = d0 + r_signed;
+        let big_b = b - dr * v;
+        let big_c = a - dr * dr;
+        if big_a.abs() < 1e-12 {
+            // Degenerate (blocker chord speed equals fleet speed): linear.
+            if big_b.abs() >= 1e-12 {
+                let s = -big_c / (2.0 * big_b);
+                if (0.0..=1.0).contains(&s) {
+                    bounds[n] = s;
+                    n += 1;
+                }
+            }
+        } else {
+            let disc = big_b * big_b - big_a * big_c;
+            if disc >= 0.0 {
+                let sq = disc.sqrt();
+                for &root in &[(-big_b - sq) / big_a, (-big_b + sq) / big_a] {
+                    if (0.0..=1.0).contains(&root) {
+                        bounds[n] = root;
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    bounds[..n].sort_by(|x, y| x.partial_cmp(y).unwrap());
+
+    // Test feasibility at each interval midpoint using sqrt-free comparisons.
+    let feasible_at = |s: f64| -> bool {
+        let k_sq = a + 2.0 * b * s + c * s * s;
+        if k_sq < 0.0 {
+            return false;
+        }
+        let d_s = d0 + s * v;
+        let d_plus = d_s + radius;
+        if k_sq > d_plus * d_plus {
+            return false;
+        }
+        let d_minus = d_s - radius;
+        // If D ≤ r, lower bound K ≥ D − r is trivially satisfied (K ≥ 0).
+        d_minus <= 0.0 || k_sq >= d_minus * d_minus
+    };
+
+    let mut s_lo = f64::INFINITY;
+    let mut s_hi = f64::NEG_INFINITY;
+    for i in 0..n.saturating_sub(1) {
+        let lo = bounds[i];
+        let hi = bounds[i + 1];
+        if (hi - lo) < 1e-15 {
+            continue;
+        }
+        if feasible_at(0.5 * (lo + hi)) {
+            if lo < s_lo {
+                s_lo = lo;
+            }
+            if hi > s_hi {
+                s_hi = hi;
+            }
+        }
+    }
+    if s_lo <= s_hi {
+        Some((s_lo, s_hi))
+    } else {
+        None
+    }
+}
+
 /// For each integer turn `t`, emit a single [`BlockerEntry`] whose aim arc is
 /// the **per-turn envelope** of the per-`s` arcs over `s ∈ [0, 1]`:
 ///
@@ -356,8 +461,6 @@ fn add_dynamic_bands(
     launch_offset: f64,
     v: f64,
 ) {
-    let scan_step = 1.0 / (ENVELOPE_SCAN - 1) as f64;
-
     for t in 1..=max_lookahead {
         let Some([q0x, q0y]) = cache.position(blocker_id, launch_turn_offset + t - 1) else {
             continue;
@@ -370,20 +473,29 @@ fn add_dynamic_bands(
         let d0 = launch_offset + (t as f64 - 1.0) * v;
         let t_base = t as f64 - 1.0;
 
-        // Scan: sample upper and lower envelope values at uniform `s`.
-        // Track the discrete argmax / argmin and the earliest feasible `s`
-        // (used as the turn's `flight_t` — earliest instant any aim in the
-        // envelope collides, so shots arriving before this can't be blocked
-        // by this entry).
+        // Analytic feasibility window for this turn — exact roots of
+        // `K²(s) = (D(s) ± r)²`. Empty means the fleet ring never reaches
+        // the blocker disk during this turn; skip without scanning.
+        let Some((s_lo, s_hi)) =
+            feasibility_range(lx, ly, q0x, q0y, dqx, dqy, d0, v, radius)
+        else {
+            continue;
+        };
+
+        // Scan: sample envelope values at uniform `s` within the feasibility
+        // window. Restricting the scan tightens the effective resolution
+        // (step shrinks with the window) and ensures every sample yields a
+        // valid arc.
+        let span = s_hi - s_lo;
+        let scan_step = span / (ENVELOPE_SCAN - 1) as f64;
         let mut scan_u = [f64::NAN; ENVELOPE_SCAN];
         let mut scan_l = [f64::NAN; ENVELOPE_SCAN];
         let mut bearing_ref = f64::NAN;
-        let mut s_feasible_min = f64::INFINITY;
         let mut i_u: Option<usize> = None;
         let mut i_l: Option<usize> = None;
 
         for i in 0..ENVELOPE_SCAN {
-            let s = i as f64 * scan_step;
+            let s = s_lo + i as f64 * scan_step;
             let Some((b, h)) = arc_at(lx, ly, q0x, q0y, dqx, dqy, d0, v, radius, s) else {
                 continue;
             };
@@ -395,9 +507,6 @@ fn add_dynamic_bands(
             let b_u = bearing_ref + wrap_pi(b - bearing_ref);
             scan_u[i] = b_u + h;
             scan_l[i] = b_u - h;
-            if s < s_feasible_min {
-                s_feasible_min = s;
-            }
             if i_u.map_or(true, |j| scan_u[i] > scan_u[j]) {
                 i_u = Some(i);
             }
@@ -409,28 +518,20 @@ fn add_dynamic_bands(
         let Some(i_u) = i_u else { continue };
         let i_l = i_l.expect("argmin_l exists when argmax_u exists");
 
-        // Golden-section refinement: the discrete extremum at index `i` lies
-        // within the cell `[s_lo, s_hi] = [(i-1)·step, (i+1)·step]` (clipped
-        // to [0, 1] at the boundaries). u(s) is smooth, so a golden-section
-        // search converges to the true continuous extremum.
-        //
-        // Why not parabolic interpolation: parabolic skips boundary cases
-        // (i=0, i=END), but a smooth envelope with peak in the first cell
-        // produces exactly that pattern — discrete max at i=0, true max in
-        // (0, step). Golden-section handles boundary brackets uniformly.
+        // Golden-section refinement on the cell bracketing each discrete
+        // extremum. Clipped to the feasibility window so the search never
+        // wanders into infeasible `s`.
         let eval = |s: f64, maximize: bool| -> f64 {
             let Some((br, h)) = arc_at(lx, ly, q0x, q0y, dqx, dqy, d0, v, radius, s) else {
-                // Infeasible point — push the search away from it. (Feasibility
-                // is a connected interval in s for our quadratic constraint.)
                 return if maximize { f64::NEG_INFINITY } else { f64::INFINITY };
             };
             let b_u = bearing_ref + wrap_pi(br - bearing_ref);
             if maximize { b_u + h } else { b_u - h }
         };
-        let golden = |s_lo: f64, s_hi: f64, maximize: bool| -> f64 {
+        let golden = |a0: f64, b0: f64, maximize: bool| -> f64 {
             let phi = (5f64.sqrt() - 1.0) * 0.5; // ≈ 0.618
-            let mut a = s_lo;
-            let mut b = s_hi;
+            let mut a = a0;
+            let mut b = b0;
             let mut c = b - phi * (b - a);
             let mut d = a + phi * (b - a);
             let mut fc = eval(c, maximize);
@@ -457,13 +558,13 @@ fn add_dynamic_bands(
             if maximize { fc.max(fd) } else { fc.min(fd) }
         };
         let refine = |i: usize, f_b: f64, maximize: bool| -> f64 {
-            let s_lo = if i == 0 { 0.0 } else { (i - 1) as f64 * scan_step };
-            let s_hi = if i + 1 >= ENVELOPE_SCAN {
-                1.0
+            let bracket_lo = if i == 0 { s_lo } else { s_lo + (i - 1) as f64 * scan_step };
+            let bracket_hi = if i + 1 >= ENVELOPE_SCAN {
+                s_hi
             } else {
-                (i + 1) as f64 * scan_step
+                s_lo + (i + 1) as f64 * scan_step
             };
-            let refined = golden(s_lo, s_hi, maximize);
+            let refined = golden(bracket_lo, bracket_hi, maximize);
             if maximize { refined.max(f_b) } else { refined.min(f_b) }
         };
 
@@ -471,6 +572,7 @@ fn add_dynamic_bands(
         let aim_min = refine(i_l, scan_l[i_l], false);
         let bearing = 0.5 * (aim_min + aim_max);
         let half_arc = 0.5 * (aim_max - aim_min);
+        let s_feasible_min = s_lo;
 
         out.push(BlockerEntry {
             bearing,
