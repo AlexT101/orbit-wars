@@ -1,120 +1,120 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-27T22:27:58.629868+00:00",
+  "last_updated": "2026-05-28T05:50:08.930459+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
-      "total_turns": 15488,
-      "total_seconds": 3.6198669309959195,
-      "avg_ms": 0.23372074709426133,
-      "last_updated": "2026-05-27T18:44:15.698683+00:00"
+      "total_turns": 16224,
+      "total_seconds": 3.8098939309959188,
+      "avg_ms": 0.23483074032272677,
+      "last_updated": "2026-05-28T05:38:40.565008+00:00"
     },
     "baselines/random": {
-      "total_turns": 12585,
-      "total_seconds": 1.230799343997552,
-      "avg_ms": 0.09779891489849439,
-      "last_updated": "2026-05-27T18:44:17.583220+00:00"
+      "total_turns": 13075,
+      "total_seconds": 1.4009473439975522,
+      "avg_ms": 0.10714702439751833,
+      "last_updated": "2026-05-28T05:38:31.016367+00:00"
     },
     "external/ykhnkf-distance-prioritized": {
-      "total_turns": 11626,
-      "total_seconds": 2472.6568411219964,
-      "avg_ms": 212.68336840891075,
-      "last_updated": "2026-05-27T18:44:00.733349+00:00"
+      "total_turns": 12633,
+      "total_seconds": 2541.493984121996,
+      "avg_ms": 201.1789744417,
+      "last_updated": "2026-05-28T05:49:55.347109+00:00"
     },
     "external/yuriygreben-architect": {
-      "total_turns": 10928,
-      "total_seconds": 2200.8108877889986,
-      "avg_ms": 201.39191872154086,
-      "last_updated": "2026-05-27T18:44:12.946297+00:00"
+      "total_turns": 12464,
+      "total_seconds": 2273.8323277889986,
+      "avg_ms": 182.43199035534326,
+      "last_updated": "2026-05-28T05:49:39.037788+00:00"
     },
     "external/hellburner": {
-      "total_turns": 28530,
-      "total_seconds": 550.3841200040205,
-      "avg_ms": 19.291416754434646,
-      "last_updated": "2026-05-27T18:42:23.486766+00:00"
+      "total_turns": 33672,
+      "total_seconds": 603.3033460040205,
+      "avg_ms": 17.91706301983905,
+      "last_updated": "2026-05-28T05:43:37.086957+00:00"
     },
     "baselines/starter": {
-      "total_turns": 16151,
-      "total_seconds": 3.2956387230015407,
-      "avg_ms": 0.20405168243461957,
-      "last_updated": "2026-05-27T18:44:15.842424+00:00"
+      "total_turns": 16937,
+      "total_seconds": 3.7183467230015403,
+      "avg_ms": 0.21953986674154458,
+      "last_updated": "2026-05-28T05:48:52.462140+00:00"
     },
     "external/owproto": {
-      "total_turns": 21845,
-      "total_seconds": 497.6610371400005,
-      "avg_ms": 22.781461988555755,
-      "last_updated": "2026-05-27T18:42:55.050555+00:00"
+      "total_turns": 22717,
+      "total_seconds": 507.1946261400005,
+      "avg_ms": 22.32665519830966,
+      "last_updated": "2026-05-28T05:41:07.824622+00:00"
     },
     "external/peaking-bot": {
-      "total_turns": 9552,
-      "total_seconds": 1143.8716389529948,
-      "avg_ms": 119.75205600429175,
-      "last_updated": "2026-05-27T18:44:22.581555+00:00"
+      "total_turns": 10331,
+      "total_seconds": 1180.398651952995,
+      "avg_ms": 114.25792778559625,
+      "last_updated": "2026-05-28T04:26:16.179240+00:00"
     },
     "external/obnext": {
-      "total_turns": 12365,
-      "total_seconds": 3230.5259961270167,
-      "avg_ms": 261.2637279520434,
-      "last_updated": "2026-05-27T18:44:01.236478+00:00"
+      "total_turns": 13257,
+      "total_seconds": 3304.6899871270166,
+      "avg_ms": 249.2788705685311,
+      "last_updated": "2026-05-28T05:40:23.742804+00:00"
     },
     "external/ppo": {
-      "total_turns": 11423,
-      "total_seconds": 2060.8611206729956,
-      "avg_ms": 180.41329954241405,
-      "last_updated": "2026-05-27T18:42:55.833176+00:00"
+      "total_turns": 12246,
+      "total_seconds": 2099.381472672996,
+      "avg_ms": 171.43405786975308,
+      "last_updated": "2026-05-28T05:41:21.479084+00:00"
     },
     "external/structured-v4": {
-      "total_turns": 9514,
-      "total_seconds": 1904.5759993769973,
-      "avg_ms": 200.18667220695787,
-      "last_updated": "2026-05-27T18:44:15.409573+00:00"
+      "total_turns": 10784,
+      "total_seconds": 2031.7439323769975,
+      "avg_ms": 188.4035545601815,
+      "last_updated": "2026-05-28T05:49:02.216123+00:00"
     },
     "external/heuristic": {
-      "total_turns": 15485,
-      "total_seconds": 39.974363696002804,
-      "avg_ms": 2.5814894217631776,
-      "last_updated": "2026-05-27T18:43:36.541370+00:00"
+      "total_turns": 15955,
+      "total_seconds": 40.58160969600281,
+      "avg_ms": 2.543504211595287,
+      "last_updated": "2026-05-28T05:40:01.777943+00:00"
     },
     "external/sigmaborov-reinforce": {
-      "total_turns": 12489,
-      "total_seconds": 492.06920826100526,
-      "avg_ms": 39.40020884466373,
-      "last_updated": "2026-05-27T18:44:18.130567+00:00"
+      "total_turns": 13821,
+      "total_seconds": 511.7501652610053,
+      "avg_ms": 37.02699987417736,
+      "last_updated": "2026-05-28T05:49:10.860612+00:00"
     },
     "external/tamrazov-starwars": {
-      "total_turns": 3239,
-      "total_seconds": 389.73522352199535,
-      "avg_ms": 120.32578682370959,
-      "last_updated": "2026-05-27T18:43:28.314491+00:00"
+      "total_turns": 4223,
+      "total_seconds": 466.1670975219954,
+      "avg_ms": 110.38766221217035,
+      "last_updated": "2026-05-28T05:40:51.680125+00:00"
     },
     "external/pilkwang-structured": {
-      "total_turns": 13294,
-      "total_seconds": 2980.287795163995,
-      "avg_ms": 224.18292426387805,
-      "last_updated": "2026-05-27T18:44:02.764828+00:00"
+      "total_turns": 14361,
+      "total_seconds": 3059.3015461639948,
+      "avg_ms": 213.02844830889177,
+      "last_updated": "2026-05-28T05:49:24.365590+00:00"
     },
     "external/smart-baseline": {
-      "total_turns": 16325,
-      "total_seconds": 3018.2232552169935,
-      "avg_ms": 184.88350721084188,
-      "last_updated": "2026-05-27T18:43:49.891996+00:00"
+      "total_turns": 17347,
+      "total_seconds": 3079.9045392169937,
+      "avg_ms": 177.54681150729195,
+      "last_updated": "2026-05-28T05:50:08.901741+00:00"
     },
     "external/sim-search": {
-      "total_turns": 5236,
-      "total_seconds": 1087.3765016719974,
-      "avg_ms": 207.67312866157323,
-      "last_updated": "2026-05-27T18:43:30.388364+00:00"
+      "total_turns": 6239,
+      "total_seconds": 1191.2854356719974,
+      "avg_ms": 190.94172714729885,
+      "last_updated": "2026-05-28T05:40:38.308555+00:00"
     },
     "external/marco-dg": {
-      "total_turns": 12449,
-      "total_seconds": 3976.639077362999,
-      "avg_ms": 319.4344186169973,
-      "last_updated": "2026-05-27T18:43:14.727384+00:00"
+      "total_turns": 13280,
+      "total_seconds": 4046.394190362999,
+      "avg_ms": 304.69835770805713,
+      "last_updated": "2026-05-28T04:25:34.720004+00:00"
     },
     "mine/apollo": {
-      "total_turns": 53521,
-      "total_seconds": 1822.0283142869073,
-      "avg_ms": 34.0432412377741,
-      "last_updated": "2026-05-27T22:27:58.090812+00:00"
+      "total_turns": 62061,
+      "total_seconds": 3109.571857286907,
+      "avg_ms": 50.10508785367472,
+      "last_updated": "2026-05-28T05:35:14.867905+00:00"
     },
     "mine/bruteforcer": {
       "total_turns": 7578,
@@ -123,22 +123,28 @@
       "last_updated": "2026-05-27T18:43:24.895847+00:00"
     },
     "mine/osteo": {
-      "total_turns": 10954,
-      "total_seconds": 1150.0779489999998,
-      "avg_ms": 104.99159658572209,
-      "last_updated": "2026-05-26T18:20:51.767226+00:00"
+      "total_turns": 18650,
+      "total_seconds": 2106.1627759999997,
+      "avg_ms": 112.93097994638069,
+      "last_updated": "2026-05-28T05:43:11.116726+00:00"
     },
     "mine/apollo_bf": {
-      "total_turns": 8630,
-      "total_seconds": 1104.843280397995,
-      "avg_ms": 128.0235550866738,
-      "last_updated": "2026-05-27T22:27:58.090860+00:00"
+      "total_turns": 10308,
+      "total_seconds": 2187.4263893979946,
+      "avg_ms": 212.20667339910696,
+      "last_updated": "2026-05-28T04:16:11.943646+00:00"
     },
-    "mine/apollo_backup": {
-      "total_turns": 709,
-      "total_seconds": 3.6829696300046852,
-      "avg_ms": 5.194597503532702,
-      "last_updated": "2026-05-27T18:43:55.373544+00:00"
+    "mine/apollo_fast": {
+      "total_turns": 24669,
+      "total_seconds": 30.375585630004696,
+      "avg_ms": 1.2313261838746887,
+      "last_updated": "2026-05-28T04:48:42.142854+00:00"
+    },
+    "mine/ow": {
+      "total_turns": 7118,
+      "total_seconds": 443.42750599999994,
+      "avg_ms": 62.29664315819049,
+      "last_updated": "2026-05-28T05:50:08.901716+00:00"
     }
   }
 }
