@@ -18,7 +18,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
-use crate::constants::COMET_SPAWN_STEPS;
+use crate::constants::{COMET_SPAWN_STEPS, TOTAL_OVERAGE_TIME};
 use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
 use crate::entity_cache::EntityCache;
 use crate::rollout::pick_plan_by_rollout;
@@ -33,6 +33,7 @@ struct Observation {
     comets: Vec<CometGroup>,
     comet_planet_ids: Vec<i64>,
     angular_velocity: f64,
+    remaining_overage_time: f64,
 }
 
 fn get_item<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -125,6 +126,10 @@ impl Observation {
         let comet_planet_ids: Vec<i64> =
             get_item(obs, "comet_planet_ids")?.extract()?;
         let angular_velocity: f64 = get_item(obs, "angular_velocity")?.extract()?;
+        let remaining_overage_time: f64 = match obs.get_item("remainingOverageTime")? {
+            Some(v) => v.extract().unwrap_or(TOTAL_OVERAGE_TIME),
+            None => TOTAL_OVERAGE_TIME,
+        };
         Ok(Self {
             player,
             planets,
@@ -133,6 +138,7 @@ impl Observation {
             comets,
             comet_planet_ids,
             angular_velocity,
+            remaining_overage_time,
         })
     }
 }
@@ -166,7 +172,7 @@ impl Bot {
         self.refresh_cache(&obs);
         let cache = self.cache.as_ref().expect("entity cache populated above");
 
-        let world = WorldState::build(
+        let mut world = WorldState::build(
             obs.player,
             self.current_turn,
             obs.planets,
@@ -177,6 +183,7 @@ impl Bot {
             obs.angular_velocity,
             cache,
         );
+        world.remaining_overage_time = obs.remaining_overage_time;
 
         let moves = crate::hellburner::plan(&world);
         self.current_turn += 1;
@@ -216,7 +223,8 @@ impl Bot {
         // on the cache ends before the rollout reborrows it mutably.
         let candidates = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
-            let world = WorldState::from_engine(player, &initial_state, cache_ref);
+            let mut world = WorldState::from_engine(player, &initial_state, cache_ref);
+            world.remaining_overage_time = obs.remaining_overage_time;
             crate::hellburner::search_candidates(&world)
         };
 
@@ -228,6 +236,7 @@ impl Bot {
             crate::hellburner::plan,
             crate::hellburner::search_candidates,
             cache_mut,
+            obs.remaining_overage_time,
         );
         self.current_turn += 1;
         Ok(moves)

@@ -31,6 +31,7 @@ _OBS_FIELDS = (
     "initial_planets",
     "comets",
     "comet_planet_ids",
+    "remainingOverageTime"
 )
 
 
