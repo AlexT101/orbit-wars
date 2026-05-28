@@ -31,6 +31,7 @@ pub fn pick_plan_by_rollout(
     reply_plan_fn: PlanFn,
     opponent_candidate_fn: CandidateFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
 ) -> Vec<PlannedMove> {
     if candidates.is_empty() {
         return Vec::new();
@@ -42,6 +43,7 @@ pub fn pick_plan_by_rollout(
         reply_plan_fn,
         opponent_candidate_fn,
         cache,
+        remaining_overage_time,
     );
 
     let mut best_idx = 0;
@@ -49,7 +51,10 @@ pub fn pick_plan_by_rollout(
     for (i, moves) in candidates.iter().enumerate() {
         let mut worst = f64::INFINITY;
         for opp in &opp_variants {
-            let score = rollout_score(initial_state, my_player, moves, opp, reply_plan_fn, cache);
+            let score = rollout_score(
+                initial_state, my_player, moves, opp, reply_plan_fn, cache,
+                remaining_overage_time,
+            );
             if score < worst {
                 worst = score;
             }
@@ -74,6 +79,7 @@ pub fn rollout_score(
     turn0_opponents: &[Vec<MoveAction>],
     reply_plan_fn: PlanFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
 ) -> f64 {
     let saved_turn = cache.current_turn;
     let num_players = initial_state.num_players;
@@ -106,7 +112,8 @@ pub fn rollout_score(
                 continue;
             }
             let ledger = ledger.as_ref().expect("ledger built for t >= 1");
-            let ws = WorldState::from_simprobe_with_ledger(pid, &probe, ledger, cache);
+            let mut ws = WorldState::from_simprobe_with_ledger(pid, &probe, ledger, cache);
+            ws.remaining_overage_time = remaining_overage_time;
             actions[p] = to_move_actions(&reply_plan_fn(&ws));
         }
         let action_slices: Vec<&[MoveAction]> = actions.iter().map(|v| v.as_slice()).collect();
@@ -133,6 +140,7 @@ pub fn opponent_turn0_actions(
     my_player: i64,
     reply_plan_fn: PlanFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
 ) -> Vec<Vec<MoveAction>> {
     let saved_turn = cache.current_turn;
     cache.set_current_turn(initial_state.step);
@@ -145,7 +153,8 @@ pub fn opponent_turn0_actions(
         if pid == my_player {
             continue;
         }
-        let ws = WorldState::from_simprobe_with_ledger(pid, &probe, &ledger, cache);
+        let mut ws = WorldState::from_simprobe_with_ledger(pid, &probe, &ledger, cache);
+        ws.remaining_overage_time = remaining_overage_time;
         actions[p] = to_move_actions(&reply_plan_fn(&ws));
     }
     cache.set_current_turn(saved_turn);
@@ -162,6 +171,7 @@ pub fn opponent_turn0_variants(
     reply_plan_fn: PlanFn,
     opponent_candidate_fn: CandidateFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
 ) -> Vec<Vec<Vec<MoveAction>>> {
     let num_players = initial_state.num_players;
     if num_players != 2 {
@@ -170,6 +180,7 @@ pub fn opponent_turn0_variants(
             my_player,
             reply_plan_fn,
             cache,
+            remaining_overage_time,
         )];
     }
     let Some(opp_player) = (0..num_players as i64).find(|&p| p != my_player) else {
@@ -178,13 +189,15 @@ pub fn opponent_turn0_variants(
             my_player,
             reply_plan_fn,
             cache,
+            remaining_overage_time,
         )];
     };
 
     let saved_turn = cache.current_turn;
     cache.set_current_turn(initial_state.step);
 
-    let opp_ws = WorldState::from_engine(opp_player, initial_state, cache);
+    let mut opp_ws = WorldState::from_engine(opp_player, initial_state, cache);
+    opp_ws.remaining_overage_time = remaining_overage_time;
 
     if opp_ws.my_planets.is_empty() {
         cache.set_current_turn(saved_turn);

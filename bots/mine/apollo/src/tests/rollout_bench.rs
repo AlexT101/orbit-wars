@@ -61,7 +61,7 @@ fn rollout_score_throughput() {
             let ws = WorldState::from_engine(my_player, &state, &cache);
             hellburner::plan(&ws)
         };
-        let opp_actions = opponent_turn0_actions(&state, my_player, hellburner::plan, &mut cache);
+        let opp_actions = opponent_turn0_actions(&state, my_player, hellburner::plan, &mut cache, f64::INFINITY);
 
         for _ in 0..iters_per_seed {
             let t = Instant::now();
@@ -72,6 +72,7 @@ fn rollout_score_throughput() {
                 &opp_actions,
                 hellburner::plan,
                 &mut cache,
+                f64::INFINITY,
             );
             total += t.elapsed();
             runs += 1;
@@ -114,6 +115,7 @@ fn pick_plan_throughput() {
                 hellburner::plan,
                 hellburner::search_candidates,
                 &mut cache,
+                f64::INFINITY,
             );
             total += t.elapsed();
             runs += 1;
@@ -146,7 +148,7 @@ fn rollout_score_throughput_4p() {
             let ws = WorldState::from_engine(my_player, &state, &cache);
             hellburner::plan(&ws)
         };
-        let opp_actions = opponent_turn0_actions(&state, my_player, hellburner::plan, &mut cache);
+        let opp_actions = opponent_turn0_actions(&state, my_player, hellburner::plan, &mut cache, f64::INFINITY);
 
         for _ in 0..iters_per_seed {
             let t = Instant::now();
@@ -157,6 +159,7 @@ fn rollout_score_throughput_4p() {
                 &opp_actions,
                 hellburner::plan,
                 &mut cache,
+                f64::INFINITY,
             );
             total += t.elapsed();
             runs += 1;

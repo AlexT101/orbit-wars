@@ -33,6 +33,16 @@ use crate::world::{merge_arrivals, WorldState};
 // ── Constants ────────────────────────────────────────────────────────────
 const EARLY_ROUNDS: i64 = 3;
 const MAX_DISTANCE: f64 = 38.0;
+/// Wider threshold used only for enumerating owned sources that can attack a
+/// target (and for filtering which targets `evaluate_move_orders` considers).
+/// Frontline detection, defensive worst-case, and reinforcement BFS all stay
+/// on `MAX_DISTANCE`
+const ATTACK_MAX_DISTANCE: f64 = 60.0;
+/// Minimum remaining overage time to opt into the wider
+/// attack proximity graph. Below this we fall back to the 38-distance edges
+/// — the wider graph is cheap per-turn thanks to the `MAX_SUBSET_SOURCES`
+/// early-break, but extra `plan_shot` calls still add up under budget pressure.
+const ATTACK_WIDE_GRAPH_MIN_OVERAGE: f64 = 2.0;
 const ROTATION_LOOK_AHEAD: i64 = 10;
 const REINFORCEMENT_SIZE: i64 = 17;
 const GARRISON_SIZE: i64 = 11;
@@ -67,6 +77,10 @@ pub struct HellburnerModel<'a> {
     pub future_pos: HashMap<i64, [f64; 2]>,
     pub inbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub outbound_edges: HashMap<i64, Vec<(i64, f64)>>,
+    /// Wider proximity graph used only by attack-source enumeration in
+    /// [`collect_source_candidates`] and target filtering in
+    /// [`evaluate_move_orders`]. Built at `ATTACK_MAX_DISTANCE`.
+    pub attack_inbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub reinforcement_target: HashMap<i64, i64>,
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
     /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
@@ -101,11 +115,16 @@ impl<'a> HellburnerModel<'a> {
             future_pos.insert(p.id, pos);
         }
 
+        let wide_attack_graph = state.remaining_overage_time >= ATTACK_WIDE_GRAPH_MIN_OVERAGE;
+        let attack_threshold = if wide_attack_graph { ATTACK_MAX_DISTANCE } else { MAX_DISTANCE };
+
         let mut inbound_edges: HashMap<i64, Vec<(i64, f64)>> = HashMap::default();
         let mut outbound_edges: HashMap<i64, Vec<(i64, f64)>> = HashMap::default();
+        let mut attack_inbound_edges: HashMap<i64, Vec<(i64, f64)>> = HashMap::default();
         for &pid in &non_comet_ids {
             inbound_edges.insert(pid, Vec::new());
             outbound_edges.insert(pid, Vec::new());
+            attack_inbound_edges.insert(pid, Vec::new());
         }
         for src in &state.planets {
             if !non_comet_ids.contains(&src.id) {
@@ -127,6 +146,12 @@ impl<'a> HellburnerModel<'a> {
                         .unwrap()
                         .push((dst.id, travel));
                 }
+                if travel <= attack_threshold {
+                    attack_inbound_edges
+                        .get_mut(&dst.id)
+                        .unwrap()
+                        .push((src.id, travel));
+                }
             }
         }
 
@@ -139,6 +164,7 @@ impl<'a> HellburnerModel<'a> {
             future_pos,
             inbound_edges,
             outbound_edges,
+            attack_inbound_edges,
             reinforcement_target,
             shot_cache: RefCell::new(HashMap::default()),
         }
@@ -743,7 +769,7 @@ fn collect_source_candidates(
 ) -> Vec<SourceCandidate> {
     let empty: Vec<(i64, f64)> = Vec::new();
     let mut origins: Vec<(i64, f64)> = model
-        .inbound_edges
+        .attack_inbound_edges
         .get(&target.id)
         .unwrap_or(&empty)
         .iter()
@@ -812,6 +838,12 @@ fn collect_source_candidates(
             not_doomed,
             production: src.production,
         });
+        // `origins` is distance-sorted; `evaluate_frontline_strategy` truncates
+        // to `MAX_SUBSET_SOURCES` anyway. Stop here to avoid `plan_shot` calls
+        // on sources that would be discarded
+        if out.len() >= MAX_SUBSET_SOURCES {
+            break;
+        }
     }
     out
 }
@@ -872,7 +904,7 @@ fn evaluate_move_orders(
         .filter(|p| model.non_comet_ids.contains(&p.id))
         .filter(|p| {
             model
-                .inbound_edges
+                .attack_inbound_edges
                 .get(&p.id)
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)

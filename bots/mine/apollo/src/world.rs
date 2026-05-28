@@ -55,6 +55,9 @@ pub struct WorldState<'a> {
     pub total_visible_ships: i64,
     pub total_production: i64,
 
+    /// defaults to 0.0 for rollout-internal and test-built worlds so they take the cheap
+    /// path through cost-gated logic.
+    pub remaining_overage_time: f64,
 }
 
 impl<'a> WorldState<'a> {
@@ -223,6 +226,7 @@ impl<'a> WorldState<'a> {
             enemy_prod,
             total_visible_ships,
             total_production,
+            remaining_overage_time: 0.0,
         }
     }
 
