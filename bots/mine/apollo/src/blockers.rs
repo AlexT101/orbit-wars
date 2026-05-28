@@ -198,14 +198,6 @@ pub fn bucket_to_speed(bucket: i64) -> f64 {
     bucket as f64 / V_QUANT
 }
 
-/// Recover the bucket index from an already-quantized speed (i.e., a value
-/// produced by [`bucket_to_speed`]). Used by callers that hold `v` but need
-/// to key a cache by bucket without recomputing from `ships`.
-#[inline]
-pub fn speed_bucket_from_speed(v: f64) -> i64 {
-    (v * V_QUANT).round() as i64
-}
-
 /// True iff `(aim, flight_time)` lies inside the entry's blocking arc.
 /// `target_id` is skipped (the target isn't a blocker of itself).
 #[inline]
@@ -254,12 +246,19 @@ pub fn build_blocker_table(
     let mut entries: Vec<BlockerEntry> =
         Vec::with_capacity((max_lookahead as usize + 1) * cache.entities.len());
 
-    // Static portion (sun + static planets). For a static shooter the
-    // shooter position doesn't depend on `launch_turn_offset`, so these
-    // entries are reusable across launch turns and are cached by
-    // `(shooter_id, speed_bucket)` in [`EntityCache::static_band_entries`].
-    let static_entries = cache.static_band_entries(shooter_id, launch_turn_offset, v);
-    entries.extend_from_slice(&static_entries);
+    // Sun — stationary disk at the board center.
+    add_static_band(
+        &mut entries,
+        SUN_BLOCKER_ID,
+        lx,
+        ly,
+        CENTER,
+        CENTER,
+        SUN_RADIUS,
+        launch_offset,
+        v,
+        max_lookahead as f64,
+    );
 
     for (&bid, ent) in cache.entities.iter() {
         if bid == shooter_id {
@@ -290,19 +289,38 @@ pub fn build_blocker_table(
             }
             continue;
         }
-        if matches!(ent.kind, EntityKind::OrbitingPlanet | EntityKind::Comet) {
-            add_dynamic_bands(
-                &mut entries,
-                cache,
-                bid,
-                ent.radius,
-                lx,
-                ly,
-                launch_turn_offset,
-                max_lookahead,
-                launch_offset,
-                v,
-            );
+        match ent.kind {
+            EntityKind::StaticPlanet => {
+                let Some([bx, by]) = cache.position(bid, launch_turn_offset) else {
+                    continue;
+                };
+                add_static_band(
+                    &mut entries,
+                    bid,
+                    lx,
+                    ly,
+                    bx,
+                    by,
+                    ent.radius,
+                    launch_offset,
+                    v,
+                    max_lookahead as f64,
+                );
+            }
+            EntityKind::OrbitingPlanet | EntityKind::Comet => {
+                add_dynamic_bands(
+                    &mut entries,
+                    cache,
+                    bid,
+                    ent.radius,
+                    lx,
+                    ly,
+                    launch_turn_offset,
+                    max_lookahead,
+                    launch_offset,
+                    v,
+                );
+            }
         }
     }
 
@@ -316,11 +334,6 @@ pub fn build_blocker_table(
 
 /// One entry for a stationary disk: aim cone of half-width `asin(r/d)`,
 /// `flight_t` = time fleet ring first reaches the disk's near edge.
-///
-/// No `max_flight_time` filter — `entry_blocks` already rejects entries whose
-/// `flight_t` exceeds the query's flight time. Skipping that filter here
-/// lets the static-band entries be cached and reused across launch turns of
-/// a static shooter (see [`EntityCache::static_band_entries`]).
 fn add_static_band(
     out: &mut Vec<BlockerEntry>,
     blocker_id: i64,
@@ -331,6 +344,7 @@ fn add_static_band(
     r: f64,
     launch_offset: f64,
     v: f64,
+    max_flight_time: f64,
 ) {
     let dx = cx - lx;
     let dy = cy - ly;
@@ -339,6 +353,9 @@ fn add_static_band(
         return;
     }
     let near = (d - r - launch_offset) / v;
+    if near > max_flight_time {
+        return;
+    }
     let t_lo = near.max(0.0);
     let bearing = dy.atan2(dx);
     let half = if d > r { (r / d).asin() } else { FRAC_PI_2 };
@@ -350,57 +367,6 @@ fn add_static_band(
         aim_max: bearing + half,
         blocker_id,
     });
-}
-
-/// Build the static-band portion (sun + static planets) of a blocker table.
-/// Shared between [`build_blocker_table`] and the per-shooter static-band
-/// cache in [`EntityCache::static_band_entries`].
-pub fn compute_static_band_entries(
-    cache: &EntityCache,
-    shooter_id: i64,
-    launch_turn_offset: i64,
-    v: f64,
-) -> Vec<BlockerEntry> {
-    let Some([lx, ly]) = cache.position(shooter_id, launch_turn_offset) else {
-        return Vec::new();
-    };
-    let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
-    let launch_offset = shooter_radius + LAUNCH_CLEARANCE;
-
-    let mut entries = Vec::with_capacity(8);
-    add_static_band(
-        &mut entries,
-        SUN_BLOCKER_ID,
-        lx,
-        ly,
-        CENTER,
-        CENTER,
-        SUN_RADIUS,
-        launch_offset,
-        v,
-    );
-    for (&bid, ent) in cache.entities.iter() {
-        if bid == shooter_id {
-            continue;
-        }
-        if matches!(ent.kind, EntityKind::StaticPlanet) {
-            let Some([bx, by]) = cache.position(bid, launch_turn_offset) else {
-                continue;
-            };
-            add_static_band(
-                &mut entries,
-                bid,
-                lx,
-                ly,
-                bx,
-                by,
-                ent.radius,
-                launch_offset,
-                v,
-            );
-        }
-    }
-    entries
 }
 
 /// Number of `s ∈ [0, 1]` samples used to *bracket* the per-turn envelope

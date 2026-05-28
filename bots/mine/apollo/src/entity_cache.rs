@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::blockers::{self, BlockerEntry, BlockerTable};
+use crate::blockers::{self, BlockerTable};
 use crate::constants::{CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, ROTATION_LIMIT};
 use crate::engine::{CometGroup, Planet};
 
@@ -90,13 +90,6 @@ pub struct EntityCache {
     /// geometry is permanent but a fresh comet may have introduced entries
     /// not in the cached table.
     blocker_tables: Mutex<HashMap<(i64, i64, i64), Arc<BlockerTable>>>,
-    /// Per-shooter static-band entries (sun + static planets) keyed by
-    /// `(shooter_id, speed_bucket)`. Only populated for static shooters,
-    /// whose position doesn't depend on launch turn — so the same static
-    /// bands serve every `launch_turn_offset` for a given shooter and
-    /// speed. Survives `refresh_comets` since static blockers and static
-    /// shooter positions don't depend on comet state.
-    static_band_cache: Mutex<HashMap<(i64, i64), Arc<Vec<BlockerEntry>>>>,
 }
 
 impl EntityCache {
@@ -132,47 +125,7 @@ impl EntityCache {
             entities,
             aim_cache: Mutex::new(aim_cache),
             blocker_tables: Mutex::new(HashMap::default()),
-            static_band_cache: Mutex::new(HashMap::default()),
         }
-    }
-
-    /// Static-band entries (sun + static planets, excluding `shooter_id`)
-    /// for the given shooter at `launch_turn_offset`, at the canonical
-    /// speed for `speed_bucket`. Cached per `(shooter_id, speed_bucket)`
-    /// for static shooters; computed fresh on each call for orbiting
-    /// shooters (whose position varies with launch turn).
-    pub fn static_band_entries(
-        &self,
-        shooter_id: i64,
-        launch_turn_offset: i64,
-        v: f64,
-    ) -> Arc<Vec<BlockerEntry>> {
-        let Some(shooter) = self.get(shooter_id) else {
-            return Arc::new(Vec::new());
-        };
-        if !shooter.is_static() {
-            return Arc::new(blockers::compute_static_band_entries(
-                self,
-                shooter_id,
-                launch_turn_offset,
-                v,
-            ));
-        }
-        let bucket = blockers::speed_bucket_from_speed(v);
-        let key = (shooter_id, bucket);
-        let mut guard = self.static_band_cache.lock().unwrap();
-        if let Some(arc) = guard.get(&key) {
-            return arc.clone();
-        }
-        // Launch turn offset is irrelevant for static shooters (position
-        // constant), but `compute_static_band_entries` needs a value to do
-        // the position lookup. Use the caller's so any out-of-range
-        // shenanigans (e.g. negative offsets in tests) still bail out
-        // consistently.
-        let entries = blockers::compute_static_band_entries(self, shooter_id, launch_turn_offset, v);
-        let arc = Arc::new(entries);
-        guard.insert(key, arc.clone());
-        arc
     }
 
     /// Drop expired comet entries and add newly-spawned ones. Also clears the
