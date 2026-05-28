@@ -1,5 +1,5 @@
 //! Bridge between alphaow's `GameState` and the vendored apollo engine, so
-//! alphaow's MCTS can use apollo's `hellburner::search_candidates` as its child
+//! alphaow's MCTS can use apollo's `strategy::search_candidates` as its child
 //! candidate generator.
 //!
 //! Conversions:
@@ -12,9 +12,13 @@
 //!   - apollo `FleetOrder = (from_id, angle, ships)` -> alphaow
 //!     `Action = (from_id, angle, ships, owner)` with `owner = player`.
 
-use crate::apollo::engine::{CometGroup as ACometGroup, Fleet as AFleet, Planet as APlanet};
-use crate::apollo::entity_cache::EntityCache;
-use crate::apollo::hellburner;
+use crate::apollo::constants::HORIZON;
+use crate::apollo::engine::{
+    CometGroup as ACometGroup, EngineState, Fleet as AFleet, Planet as APlanet, Simulator,
+};
+use crate::apollo::cache::EntityCache;
+use crate::apollo::strategy;
+use crate::apollo::helpers::{count_players, ArrivalLedger};
 use crate::apollo::world::WorldState;
 use crate::sim::Action;
 use crate::{GameState, Planet, CENTER_X, CENTER_Y};
@@ -106,11 +110,113 @@ pub fn rollout_cache(state: &GameState) -> EntityCache {
 }
 
 /// Sync the cache's comet entities with the current state (adds spawned comets,
-/// drops expired ones, clears the blocker-table cache). Only call when the comet
-/// id set actually changed — it discards cached blocker tables.
+/// drops expired ones). Only updates `entities`; the aim cache is left intact
+/// (it is keyed by absolute launch turn, and new comets are handled by
+/// `aim_cache_lookup`'s post-spawn re-verification). Call only when the comet id
+/// set actually changed (i.e. on a `COMET_SPAWN_STEPS` boundary).
 pub fn refresh_cache_comets(cache: &mut EntityCache, state: &GameState) {
     let (comets, comet_planet_ids) = to_apollo_comets(state);
     cache.refresh_comets(&comets, &comet_planet_ids, state.step);
+}
+
+/// Convert the alphaow `GameState` into apollo's **player-agnostic**
+/// `EngineState` (planet/fleet/comet conversion + player count + next fleet id).
+/// This plus the `Simulator` and `ArrivalLedger` derived from it are identical
+/// for every player, so building them once and deriving each player's
+/// `WorldState` via [`WorldState::from_simulator_with_ledger`] avoids repeating
+/// the expensive `HORIZON`-turn ledger walk per player — mirroring apollo's
+/// ledger sharing in `rollout::rollout_score` / `pick_plan_by_rollout`.
+fn build_engine(state: &GameState) -> EngineState {
+    let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
+    let initial_planets: Vec<APlanet> =
+        state.planets.iter().map(to_apollo_planet_initial).collect();
+    let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
+    let (comets, comet_planet_ids) = to_apollo_comets(state);
+    let num_players = count_players(&planets, &fleets);
+    let next_fleet_id = fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
+    EngineState::from_observation_parts(
+        state.step,
+        state.angular_velocity,
+        planets,
+        initial_planets,
+        fleets,
+        next_fleet_id,
+        comet_planet_ids,
+        comets,
+        num_players,
+    )
+}
+
+#[inline]
+fn plan_from_ledger(
+    sim: &Simulator,
+    ledger: &ArrivalLedger,
+    player: i32,
+    cache: &EntityCache,
+) -> Vec<Action> {
+    let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
+    strategy::plan(&world)
+        .into_iter()
+        .map(|m| (m.from_id, m.angle, m.ships, player))
+        .collect()
+}
+
+#[inline]
+fn candidates_from_ledger(
+    sim: &Simulator,
+    ledger: &ArrivalLedger,
+    player: i32,
+    cache: &EntityCache,
+) -> Vec<Vec<Action>> {
+    let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
+    strategy::search_candidates(&world)
+        .into_iter()
+        .map(|orders| {
+            orders
+                .into_iter()
+                .map(|m| (m.from_id, m.angle, m.ships, player))
+                .collect::<Vec<Action>>()
+        })
+        .collect()
+}
+
+/// Greedy hellburner plans for `me` and (optionally) `opp` from a single shared
+/// `Simulator` + `ArrivalLedger`. Use this instead of two [`apollo_plan`] calls
+/// when planning both players at the same state (e.g. a rollout reactive tick) —
+/// it pays the `HORIZON`-turn ledger walk once. Caller must
+/// `cache.set_current_turn(state.step)` first.
+pub fn apollo_plan_pair(
+    state: &GameState,
+    me: i32,
+    opp: Option<i32>,
+    cache: &EntityCache,
+) -> (Vec<Action>, Vec<Action>) {
+    let engine = build_engine(state);
+    let sim = Simulator::new(&engine);
+    let ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+    let my = plan_from_ledger(&sim, &ledger, me, cache);
+    let op = opp
+        .map(|o| plan_from_ledger(&sim, &ledger, o, cache))
+        .unwrap_or_default();
+    (my, op)
+}
+
+/// Hellburner child candidates for `me` and `opp` from a single shared
+/// `Simulator` + `ArrivalLedger` (one `HORIZON`-turn walk for both players).
+/// Caller must `cache.set_current_turn(state.step)` first.
+pub fn apollo_candidates_pair(
+    state: &GameState,
+    me: i32,
+    opp: i32,
+    cache: &EntityCache,
+) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
+    let engine = build_engine(state);
+    let sim = Simulator::new(&engine);
+    let ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+    (
+        candidates_from_ledger(&sim, &ledger, me, cache),
+        candidates_from_ledger(&sim, &ledger, opp, cache),
+    )
 }
 
 /// apollo's greedy hellburner plan for `player` as an alphaow launch list,
@@ -133,42 +239,43 @@ pub fn apollo_plan(state: &GameState, player: i32, cache: &EntityCache) -> Vec<A
         state.angular_velocity,
         cache,
     );
-    hellburner::plan(&world)
+    strategy::plan(&world)
         .into_iter()
-        .map(|(from_id, angle, ships)| (from_id, angle, ships, player))
+        .map(|m| (m.from_id, m.angle, m.ships, player))
         .collect()
 }
 
 /// Generate apollo's hellburner child candidates for `player`, each converted to
 /// an alphaow launch list. Returns one `Vec<Action>` per candidate strategy.
-pub fn apollo_candidates(state: &GameState, player: i32) -> Vec<Vec<Action>> {
+///
+/// Reuses a prebuilt, shared `cache` (the obstacle/aim geometry is owner-agnostic
+/// and game-static, so one cache serves every node of every turn). Caller must
+/// `cache.set_current_turn(state.step)` (and refresh comets if needed) first,
+/// exactly like [`apollo_plan`].
+pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) -> Vec<Vec<Action>> {
     let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
     let initial_planets: Vec<APlanet> =
         state.planets.iter().map(to_apollo_planet_initial).collect();
     let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
     let (comets, comet_planet_ids) = to_apollo_comets(state);
-    let av = state.angular_velocity;
-    let step = state.step;
-
-    let cache = EntityCache::build(&initial_planets, &comets, &comet_planet_ids, av, step);
     let world = WorldState::build(
         player as i64,
-        step,
+        state.step,
         planets,
         fleets,
         initial_planets,
         comets,
         comet_planet_ids,
-        av,
-        &cache,
+        state.angular_velocity,
+        cache,
     );
 
-    hellburner::search_candidates(&world)
+    strategy::search_candidates(&world)
         .into_iter()
         .map(|orders| {
             orders
                 .into_iter()
-                .map(|(from_id, angle, ships)| (from_id, angle, ships, player))
+                .map(|m| (m.from_id, m.angle, m.ships, player))
                 .collect::<Vec<Action>>()
         })
         .collect()

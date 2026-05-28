@@ -1,0 +1,1 @@
+/home/sunrise/orbitwars/pantheow/experimental_arch/train/checkpoints/galaxy_selfplay_a2_g2_t44/self_play/opponent_gen_000000.zip

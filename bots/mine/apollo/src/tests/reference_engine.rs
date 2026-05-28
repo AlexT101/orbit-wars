@@ -21,9 +21,9 @@ use std::f64::consts::PI;
 use sha2::{Digest, Sha512};
 
 use crate::constants::{
-    ANG_VEL_MAX, ANG_VEL_MIN, BOARD_SIZE, CENTER, COMET_PRODUCTION, COMET_RADIUS, COMET_SPAWN_STEPS,
-    MAX_PLANET_GROUPS, MAX_PLAYERS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
-    ROTATION_LIMIT, SUN_RADIUS,
+    ANG_VEL_MAX, ANG_VEL_MIN, BOARD_SIZE, CENTER, COMET_PRODUCTION, COMET_RADIUS,
+    COMET_SPAWN_STEPS, MAX_PLANET_GROUPS, MAX_PLAYERS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS,
+    PLANET_CLEARANCE, ROTATION_LIMIT, SUN_RADIUS,
 };
 use crate::engine::{
     distance, fleet_speed, point_to_segment_distance, swept_pair_hit, CometGroup, Configuration,
@@ -104,10 +104,9 @@ impl PyRandom {
         let mut j = 0usize;
         let mut k = MT_N.max(key.len());
         while k > 0 {
-            mt[i] = (mt[i]
-                ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)).wrapping_mul(1_664_525u32)))
-            .wrapping_add(key[j])
-            .wrapping_add(j as u32);
+            mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)).wrapping_mul(1_664_525u32)))
+                .wrapping_add(key[j])
+                .wrapping_add(j as u32);
             i += 1;
             j += 1;
             if i >= MT_N {
@@ -122,9 +121,8 @@ impl PyRandom {
 
         k = MT_N - 1;
         while k > 0 {
-            mt[i] = (mt[i]
-                ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)).wrapping_mul(1_566_083_941u32)))
-            .wrapping_sub(i as u32);
+            mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)).wrapping_mul(1_566_083_941u32)))
+                .wrapping_sub(i as u32);
             i += 1;
             if i >= MT_N {
                 mt[0] = mt[MT_N - 1];
@@ -172,9 +170,8 @@ impl PyRandom {
             }
             for kk in (MT_N - MT_M)..(MT_N - 1) {
                 let y = (self.mt[kk] & MT_UPPER_MASK) | (self.mt[kk + 1] & MT_LOWER_MASK);
-                self.mt[kk] = self.mt[kk + MT_M - MT_N]
-                    ^ (y >> 1)
-                    ^ if y & 1 != 0 { MT_MATRIX_A } else { 0 };
+                self.mt[kk] =
+                    self.mt[kk + MT_M - MT_N] ^ (y >> 1) ^ if y & 1 != 0 { MT_MATRIX_A } else { 0 };
             }
             let y = (self.mt[MT_N - 1] & MT_UPPER_MASK) | (self.mt[0] & MT_LOWER_MASK);
             self.mt[MT_N - 1] =
@@ -646,7 +643,8 @@ impl RefEngine {
 
     pub fn remove_comets(&mut self, expired_ids: &[i64]) {
         let expired_set: HashSet<i64> = expired_ids.iter().copied().collect();
-        self.planets.retain(|planet| !expired_set.contains(&planet.id));
+        self.planets
+            .retain(|planet| !expired_set.contains(&planet.id));
         self.initial_planets
             .retain(|planet| !expired_set.contains(&planet.id));
         self.comet_planet_ids
@@ -679,10 +677,7 @@ impl RefEngine {
             .max()
             .unwrap_or(-1)
             + 1;
-        let comet_ships = (0..4)
-            .map(|_| comet_rng.randint(1, 99))
-            .min()
-            .unwrap_or(1);
+        let comet_ships = (0..4).map(|_| comet_rng.randint(1, 99)).min().unwrap_or(1);
         let mut group = CometGroup {
             planet_ids: Vec::new(),
             paths: comet_paths,
@@ -722,10 +717,8 @@ impl RefEngine {
             }
 
             from_planet.ships -= move_action.ships;
-            let start_x =
-                from_planet.x + move_action.angle.cos() * (from_planet.radius + 0.1);
-            let start_y =
-                from_planet.y + move_action.angle.sin() * (from_planet.radius + 0.1);
+            let start_x = from_planet.x + move_action.angle.cos() * (from_planet.radius + 0.1);
+            let start_y = from_planet.y + move_action.angle.sin() * (from_planet.radius + 0.1);
             self.fleets.push(Fleet {
                 id: self.next_fleet_id,
                 owner: player_id,
@@ -753,7 +746,13 @@ impl RefEngine {
         let max_score = *scores.iter().max().unwrap_or(&0);
         scores
             .into_iter()
-            .map(|score| if score == max_score && max_score > 0 { 1.0 } else { -1.0 })
+            .map(|score| {
+                if score == max_score && max_score > 0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            })
             .collect()
     }
 }
@@ -1021,10 +1020,7 @@ fn generate_comet_paths(
         }
 
         let paths = vec![
-            visible
-                .iter()
-                .map(|&(x, y)| [y, x])
-                .collect::<Vec<_>>(),
+            visible.iter().map(|&(x, y)| [y, x]).collect::<Vec<_>>(),
             visible
                 .iter()
                 .map(|&(x, y)| [BOARD_SIZE - x, y])

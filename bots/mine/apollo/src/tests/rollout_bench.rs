@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use super::reference_engine::RefEngine;
 use crate::engine::{Configuration, MoveAction};
-use crate::entity_cache::EntityCache;
-use crate::hellburner;
+use crate::cache::EntityCache;
+use crate::strategy;
 use crate::rollout::{opponent_turn0_actions, pick_plan_by_rollout, rollout_score};
 use crate::world::WorldState;
 
@@ -32,8 +32,8 @@ fn advance(state: &mut RefEngine, cache: &mut EntityCache, turns: i64) {
         let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); state.num_players];
         for p in 0..state.num_players {
             let ws = WorldState::from_engine(p as i64, &snap, cache);
-            for (from_id, angle, ships) in hellburner::plan(&ws) {
-                actions[p].push(MoveAction { from_id, angle, ships });
+            for ma in strategy::plan(&ws) {
+                actions[p].push(ma);
             }
         }
         if state.step_with_actions(&actions).is_err() {
@@ -64,10 +64,19 @@ fn rollout_score_throughput() {
         let my_player = 0i64;
         let candidate = {
             let ws = WorldState::from_engine(my_player, &snap, &cache);
-            hellburner::plan(&ws)
+            strategy::plan(&ws)
         };
-        let opp_actions = opponent_turn0_actions(&snap, my_player, hellburner::plan, &mut cache, f64::INFINITY, None);
+        let opp_actions = opponent_turn0_actions(
+            &snap,
+            my_player,
+            strategy::plan,
+            &mut cache,
+            f64::INFINITY,
+            None,
+            None,
+        );
 
+        crate::aim::counters::reset();
         for _ in 0..iters_per_seed {
             let t = Instant::now();
             let _ = rollout_score(
@@ -75,13 +84,18 @@ fn rollout_score_throughput() {
                 my_player,
                 &candidate,
                 &opp_actions,
-                hellburner::plan,
+                strategy::plan,
                 &mut cache,
                 f64::INFINITY,
+                None,
             );
             total += t.elapsed();
             runs += 1;
         }
+        println!(
+            "  seed {seed} TIMED-LOOP counters ({iters_per_seed} iters): {}",
+            crate::aim::counters::report()
+        );
     }
 
     let dt = total.as_secs_f64();
@@ -109,7 +123,7 @@ fn pick_plan_throughput() {
         let my_player = 0i64;
         let candidates = {
             let ws = WorldState::from_engine(my_player, &snap, &cache);
-            hellburner::search_candidates(&ws)
+            strategy::search_candidates(&ws)
         };
 
         for _ in 0..iters_per_seed {
@@ -118,10 +132,11 @@ fn pick_plan_throughput() {
                 &snap,
                 my_player,
                 candidates.clone(),
-                hellburner::plan,
-                hellburner::search_candidates,
+                strategy::plan,
+                strategy::search_candidates,
                 &mut cache,
                 f64::INFINITY,
+                None,
                 None,
             );
             total += t.elapsed();
@@ -154,9 +169,17 @@ fn rollout_score_throughput_4p() {
         let my_player = 0i64;
         let candidate = {
             let ws = WorldState::from_engine(my_player, &snap, &cache);
-            hellburner::plan(&ws)
+            strategy::plan(&ws)
         };
-        let opp_actions = opponent_turn0_actions(&snap, my_player, hellburner::plan, &mut cache, f64::INFINITY, None);
+        let opp_actions = opponent_turn0_actions(
+            &snap,
+            my_player,
+            strategy::plan,
+            &mut cache,
+            f64::INFINITY,
+            None,
+            None,
+        );
 
         for _ in 0..iters_per_seed {
             let t = Instant::now();
@@ -165,9 +188,10 @@ fn rollout_score_throughput_4p() {
                 my_player,
                 &candidate,
                 &opp_actions,
-                hellburner::plan,
+                strategy::plan,
                 &mut cache,
                 f64::INFINITY,
+                None,
             );
             total += t.elapsed();
             runs += 1;

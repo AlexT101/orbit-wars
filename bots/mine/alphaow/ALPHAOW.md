@@ -53,7 +53,7 @@ exploit (it minimizes MY value). Priors are rank-based:
 **Candidates** (`ensure_candidates` → `enumerate_alternatives`): K candidates per
 player (`OW_K_ROOT`=5 at root, `OW_K_NON_ROOT`=4 elsewhere). The opponent is
 `dominant_enemy` (highest-score non-me player; handles 4P). By default candidates
-come from **apollo's `hellburner::search_candidates`** (`apollo_bridge::apollo_candidates`);
+come from **apollo's `strategy::search_candidates`** (`apollo_bridge::apollo_candidates`);
 `OW_APOLLO_CANDIDATES=0` falls back to the ow2 enumerators (`enumerate_alternatives_strong`,
 which is the greedy ow2 plan plus per-target exclusion variants, or `fast` via
 `OW_DUCT_ENUMERATE=fast`).

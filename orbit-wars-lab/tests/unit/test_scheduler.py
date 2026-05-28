@@ -6,12 +6,18 @@ never runs — these exercise the scheduling/lifecycle machinery, not matches.
 from __future__ import annotations
 
 import json
+import random
 import time
 from pathlib import Path
 
 import pytest
 
-from orbit_wars_app.scheduler import QueuedMatch, Scheduler, match_timeout_for
+from orbit_wars_app.scheduler import (
+    QueuedMatch,
+    Scheduler,
+    match_timeout_for,
+    side_order_for_seed,
+)
 from orbit_wars_app.schemas import TournamentConfig
 from tests.scheduler_fakes import crash_job, ok_job, slow_job
 
@@ -21,6 +27,11 @@ def test_match_timeout_formula():
     assert match_timeout_for(2) == 1140
     assert match_timeout_for(4) == 2260
     assert match_timeout_for(1) == 580  # floor at 1 player
+
+
+def test_side_order_for_seed_two_player_parity():
+    assert side_order_for_seed(2, 2) == [0, 1]
+    assert side_order_for_seed(3, 2) == [1, 0]
 
 
 def _make_zoo(tmp_path: Path, names: list[str]) -> Path:
@@ -76,6 +87,51 @@ def test_fair_round_robin_interleaves_tournaments(tmp_path: Path, zoo: Path):
 
     # One match from each tournament in turn, FIFO within each.
     assert picked == [(a, 1), (b, 1), (a, 2), (b, 2)]
+
+
+def test_tournament_queue_shuffles_sides_from_match_seed(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)  # pool NOT started -> inspect queue
+    run_id = sched.submit(
+        TournamentConfig(
+            agents=["baselines/a", "baselines/b"],
+            games_per_pair=2,
+            mode="fast",
+            seed_base=42,
+        )
+    )
+
+    jobs = list(sched._tournaments[run_id].pending)
+    base = ["baselines/a", "baselines/b"]
+    for job in jobs:
+        expected = [base[i] for i in side_order_for_seed(job.seed, len(base))]
+        assert job.agent_ids == expected
+
+
+def test_quick_match_queue_keeps_requested_side_order(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    # Pick a seed base whose first generated match seed would flip a 2p match.
+    seed_base = next(
+        base
+        for base in range(100)
+        if side_order_for_seed(random.Random(base).randrange(10**9), 2) == [1, 0]
+    )
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)  # pool NOT started -> inspect queue
+    run_id = sched.submit(
+        TournamentConfig(
+            agents=["baselines/a", "baselines/b"],
+            games_per_pair=1,
+            mode="fast",
+            seed_base=seed_base,
+            is_quick_match=True,
+        )
+    )
+
+    job = sched._tournaments[run_id].pending[0]
+    assert side_order_for_seed(job.seed, len(job.agent_ids)) == [1, 0]
+    assert job.agent_ids == ["baselines/a", "baselines/b"]
 
 
 # --------------------------------------------------------------------------

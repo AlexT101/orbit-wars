@@ -9,9 +9,9 @@ mysteriously stopped being called — a near-textbook symptom of subtle
 runtime-mismatch breakage. Building in the runtime image rules that out.
 
 Usage:
-    python bots/apollo/build_submission.py
+    python bots/mine/apollo/build_submission.py
 
-Requires Docker. Output: bots/apollo/submission.tar.gz
+Requires Docker. Output: bots/mine/apollo/submission.tar.gz
 """
 
 import os

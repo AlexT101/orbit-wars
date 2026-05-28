@@ -6,13 +6,12 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::constants::{CENTER, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED, SUN_RADIUS};
 
-use crate::blockers;
-pub use crate::blockers::AimResult;
-use crate::engine::{Fleet, Planet};
-use crate::entity_cache::EntityCache;
-use crate::engine::Simulator;
+use crate::aim;
+pub use crate::aim::AimResult;
 pub use crate::engine::ArrivalEvent;
-
+use crate::engine::Simulator;
+use crate::engine::{Fleet, Planet};
+use crate::cache::EntityCache;
 
 // ── Basic Helpers ────────────────────────────────────────────────────
 
@@ -27,42 +26,26 @@ pub fn fleet_speed(ships: i64) -> f64 {
     crate::engine::fleet_speed(ships.max(1), MAX_SHIP_SPEED)
 }
 
-
 #[inline]
-pub fn point_to_segment_distance_sq(
-    px: f64, py: f64,
-    x1: f64, y1: f64,
-    x2: f64, y2: f64,
-) -> f64 {
-    let dx = x2 - x1;
-    let dy = y2 - y1;
-    let l2 = dx * dx + dy * dy;
-    let (qx, qy) = if l2 == 0.0 {
-        (x1, y1)
-    } else {
-        let t = (((px - x1) * dx + (py - y1) * dy) / l2).clamp(0.0, 1.0);
-        (x1 + t * dx, y1 + t * dy)
-    };
-    let ex = px - qx;
-    let ey = py - qy;
-    ex * ex + ey * ey
+pub fn point_to_segment_distance_sq(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+    crate::engine::point_to_segment_distance_sq((px, py), (x1, y1), (x2, y2))
 }
 
 #[inline]
 pub fn segment_intersects_circle(
-    ax: f64, ay: f64,
-    bx: f64, by: f64,
-    cx: f64, cy: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    cx: f64,
+    cy: f64,
     r: f64,
 ) -> bool {
     point_to_segment_distance_sq(cx, cy, ax, ay, bx, by) <= r * r
 }
 
 #[inline]
-pub fn segment_hits_sun(
-    x1: f64, y1: f64,
-    x2: f64, y2: f64,
-) -> bool {
+pub fn segment_hits_sun(x1: f64, y1: f64, x2: f64, y2: f64) -> bool {
     point_to_segment_distance_sq(CENTER, CENTER, x1, y1, x2, y2) < SUN_RADIUS * SUN_RADIUS
 }
 
@@ -74,7 +57,7 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
 }
 
 /// Public aim entry point. Delegates to the parametric blocker pipeline in
-/// [`crate::blockers`]: lead the target with Newton iteration, then reject
+/// [`crate::aim`]: lead the target with Newton iteration, then reject
 /// the shot if any blocker (sun, static planet, orbiter, comet) covers the
 /// resulting `(angle, flight_time)` pair. Pass `launch_turn_offset = 0` to
 /// launch now; non-zero offsets evaluate source/target/obstacle positions
@@ -87,7 +70,20 @@ pub fn aim_with_prediction(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    blockers::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
+    aim::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
+}
+
+/// Comet-free aim used to compute the turn-invariant base for the invariant-aim
+/// cache; see [`crate::aim::aim_ignoring_comets`].
+#[inline]
+pub fn aim_ignoring_comets(
+    cache: &EntityCache,
+    shooter_id: i64,
+    target_id: i64,
+    ships: i64,
+    launch_turn_offset: i64,
+) -> Option<AimResult> {
+    aim::aim_ignoring_comets(cache, shooter_id, target_id, ships, launch_turn_offset)
 }
 
 /// Returns the engine's player-slot count: `max_owner + 1` across all
@@ -102,10 +98,14 @@ pub fn aim_with_prediction(
 pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
     let mut max_owner: i64 = -1;
     for p in planets {
-        if p.owner > max_owner { max_owner = p.owner; }
+        if p.owner > max_owner {
+            max_owner = p.owner;
+        }
     }
     for f in fleets {
-        if f.owner > max_owner { max_owner = f.owner; }
+        if f.owner > max_owner {
+            max_owner = f.owner;
+        }
     }
     if max_owner < 0 {
         return 2;
@@ -123,10 +123,7 @@ pub fn nearest_distance_to_set(px: f64, py: f64, set: &[Planet]) -> f64 {
 }
 
 /// `(planet, distance)` pairs sorted ascending by distance from `(tx, ty)`.
-pub fn sorted_by_distance_to(
-    planets: &[Planet],
-    tx: f64, ty: f64,
-) -> Vec<(Planet, f64)> {
+pub fn sorted_by_distance_to(planets: &[Planet], tx: f64, ty: f64) -> Vec<(Planet, f64)> {
     let mut out: Vec<(Planet, f64)> = planets
         .iter()
         .map(|p| (p.clone(), dist(p.x, p.y, tx, ty)))
@@ -134,7 +131,6 @@ pub fn sorted_by_distance_to(
     out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     out
 }
-
 
 // ── Timeline Helpers ──────────────────────────────────────────────────────────
 // Forward simulation with initial timeline and hypothetical queries
@@ -149,11 +145,7 @@ pub type ArrivalsByPlanet = HashMap<i64, Vec<ArrivalEvent>>;
 /// [`Simulator`] uses), so the projection can never silently drift from the
 /// simulator's combat. Neutral (`-1`) arrivals are ignored — real fleets always
 /// have an owner `>= 0`.
-pub fn resolve_arrival_event(
-    owner: i64,
-    garrison: i64,
-    arrivals: &[ArrivalEvent],
-) -> (i64, i64) {
+pub fn resolve_arrival_event(owner: i64, garrison: i64, arrivals: &[ArrivalEvent]) -> (i64, i64) {
     let mut incoming = [0i64; MAX_PLAYERS];
     for ev in arrivals {
         if ev.owner >= 0 && (ev.owner as usize) < MAX_PLAYERS {
@@ -293,7 +285,11 @@ pub fn finish_timeline(
     let by_turn = &traj.by_turn;
     let effective_horizon = traj.effective_horizon;
 
-    let mut min_owned: i64 = if owner_at[0] == player { ships_at[0] } else { 0 };
+    let mut min_owned: i64 = if owner_at[0] == player {
+        ships_at[0]
+    } else {
+        0
+    };
     let mut first_enemy: Option<i64> = None;
     let mut fall_turn: Option<i64> = None;
 
@@ -329,8 +325,7 @@ pub fn finish_timeline(
                 }
                 let group = &by_turn[turn as usize];
                 if !group.is_empty() {
-                    let (no, ng) =
-                        resolve_arrival_event(sim_owner, sim_garrison, group);
+                    let (no, ng) = resolve_arrival_event(sim_owner, sim_garrison, group);
                     sim_owner = no;
                     sim_garrison = ng;
                     if sim_owner != player {
@@ -502,23 +497,31 @@ impl ArrivalLedger {
     /// arrivals plus expiry turns and the player-agnostic trajectories.
     /// `O(horizon * |planets|)`. This is the expensive step that gets shared
     /// across players in [`rollout`].
-    pub fn build(parent: &Simulator, horizon: i64, entity_cache: &EntityCache) -> Self {
+    pub fn build(parent: &Simulator, horizon: i64, cache: &EntityCache) -> Self {
         let mut sim = parent.fork();
-        sim.step_n(horizon, Some(entity_cache));
+        sim.step_n(horizon, Some(cache));
         let mut ledger = sim.collect_arrivals();
         let mut expiry_at: HashMap<i64, i64> = HashMap::default();
         let mut trajectories: HashMap<i64, Trajectory> =
             HashMap::with_capacity_and_hasher(parent.planets().len(), Default::default());
         for planet in parent.planets() {
             ledger.entry(planet.id).or_default();
-            let expiry = expiry_within_horizon(entity_cache, planet.id, horizon);
+            let expiry = expiry_within_horizon(cache, planet.id, horizon);
             if let Some(exp) = expiry {
                 expiry_at.insert(planet.id, exp);
             }
             let arrivals = ledger.get(&planet.id).map(|v| v.as_slice()).unwrap_or(&[]);
-            trajectories.insert(planet.id, build_trajectory(planet, arrivals, horizon, expiry));
+            trajectories.insert(
+                planet.id,
+                build_trajectory(planet, arrivals, horizon, expiry),
+            );
         }
-        Self { horizon, ledger: Rc::new(ledger), expiry_at, trajectories }
+        Self {
+            horizon,
+            ledger: Rc::new(ledger),
+            expiry_at,
+            trajectories,
+        }
     }
 
     pub fn arrivals(&self, planet_id: i64) -> &[ArrivalEvent] {
@@ -569,9 +572,9 @@ impl TimelineCache {
         parent: &Simulator,
         player: i64,
         horizon: i64,
-        entity_cache: &EntityCache,
+        cache: &EntityCache,
     ) -> Self {
-        let ledger = ArrivalLedger::build(parent, horizon, entity_cache);
+        let ledger = ArrivalLedger::build(parent, horizon, cache);
         Self::from_ledger(parent.planets(), player, &ledger)
     }
 
@@ -583,8 +586,7 @@ impl TimelineCache {
     /// `planets` must match the snapshot the ledger was built from.
     pub fn from_ledger(planets: &[Planet], player: i64, ledger: &ArrivalLedger) -> Self {
         let horizon = ledger.horizon;
-        let mut baselines =
-            HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        let mut baselines = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
         for planet in planets {
             // Reuse the ledger's shared trajectory when available (the common
             // path); fall back to a full re-simulation only for a planet the
@@ -632,13 +634,13 @@ impl TimelineCache {
 
 /// Returns the planet's expiry turn iff it falls within `horizon`. Static and
 /// orbiting planets last the whole game, so they always return `None`.
-fn expiry_within_horizon(
-    entity_cache: &EntityCache,
-    planet_id: i64,
-    horizon: i64,
-) -> Option<i64> {
-    let life = entity_cache.remaining_life(planet_id);
-    if life <= horizon { Some(life) } else { None }
+fn expiry_within_horizon(cache: &EntityCache, planet_id: i64, horizon: i64) -> Option<i64> {
+    let life = cache.remaining_life(planet_id);
+    if life <= horizon {
+        Some(life)
+    } else {
+        None
+    }
 }
 
 /// Smallest ship count that, if it lands on `planet` at `arrival_turn` for
@@ -682,7 +684,13 @@ pub fn min_ships_to_own_by(
         let mut merged = Vec::with_capacity(base_arrivals.len() + extras.len());
         merged.extend_from_slice(base_arrivals);
         merged.extend_from_slice(extras);
-        Some(simulate_planet_timeline(planet, &merged, attacker_owner, eval_turn, expiry))
+        Some(simulate_planet_timeline(
+            planet,
+            &merged,
+            attacker_owner,
+            eval_turn,
+            expiry,
+        ))
     };
     let baseline: &PlanetTimeline = local_baseline
         .as_ref()
@@ -693,8 +701,7 @@ pub fn min_ships_to_own_by(
         return 0;
     }
 
-    let mut scratch: Vec<ArrivalEvent> =
-        Vec::with_capacity(base_arrivals.len() + extras.len() + 1);
+    let mut scratch: Vec<ArrivalEvent> = Vec::with_capacity(base_arrivals.len() + extras.len() + 1);
     scratch.extend_from_slice(base_arrivals);
     scratch.extend_from_slice(extras);
     scratch.push(ArrivalEvent {
@@ -713,8 +720,14 @@ pub fn min_ships_to_own_by(
     let mut owns_at = |ships: i64| -> bool {
         scratch[last].ships = ships;
         simulate_checkpoint_into(
-            planet, baseline, arrival_turn, &scratch, expiry,
-            &mut owner_buf, &mut ships_buf, &mut by_turn_buf,
+            planet,
+            baseline,
+            arrival_turn,
+            &scratch,
+            expiry,
+            &mut owner_buf,
+            &mut ships_buf,
+            &mut by_turn_buf,
         );
         owner_buf[eval_idx] == attacker_owner
     };
@@ -773,15 +786,16 @@ pub fn reinforcement_needed_to_hold_until(
         let mut merged = Vec::with_capacity(base_arrivals.len() + extras.len());
         merged.extend_from_slice(base_arrivals);
         merged.extend_from_slice(extras);
-        Some(simulate_planet_timeline(planet, &merged, player, hold_until, expiry))
+        Some(simulate_planet_timeline(
+            planet, &merged, player, hold_until, expiry,
+        ))
     };
     let baseline: &PlanetTimeline = local_baseline
         .as_ref()
         .or_else(|| cache.baseline(planet.id))
         .expect("planet must be in the timeline cache");
 
-    let mut scratch: Vec<ArrivalEvent> =
-        Vec::with_capacity(base_arrivals.len() + extras.len() + 1);
+    let mut scratch: Vec<ArrivalEvent> = Vec::with_capacity(base_arrivals.len() + extras.len() + 1);
     scratch.extend_from_slice(base_arrivals);
     scratch.extend_from_slice(extras);
     scratch.push(ArrivalEvent {
@@ -799,8 +813,14 @@ pub fn reinforcement_needed_to_hold_until(
     let mut holds = |ships: i64| -> bool {
         scratch[last].ships = ships;
         simulate_checkpoint_into(
-            planet, baseline, arrival_turn, &scratch, expiry,
-            &mut owner_buf, &mut ships_buf, &mut by_turn_buf,
+            planet,
+            baseline,
+            arrival_turn,
+            &scratch,
+            expiry,
+            &mut owner_buf,
+            &mut ships_buf,
+            &mut by_turn_buf,
         );
         (arrival_turn..=hold_until).all(|t| owner_buf[t as usize] == player)
     };

@@ -1,0 +1,16 @@
+[package]
+name = "graph_native"
+version = "0.1.0"
+edition = "2021"
+description = "Rust native Orbit Wars agent whose forward model is env_model (orbit_wars_model)"
+
+[lib]
+name = "graph_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+# The model of the environment: experimental_arch/env_model, depended on as an
+# rlib (it declares crate-type = ["cdylib", "rlib"]) so we reuse the exact same
+# forward-model physics used for RL training/test-time rollouts.
+orbit_wars_model = { path = "../../../experimental_arch/env_model" }

@@ -1,0 +1,5 @@
+name: graph
+description: "Native Rust agent whose forward model is env_model (orbit_wars_model). Computes the pairwise planet distance matrix as an RL input feature and overlays the planet graph as distance-colored debug lines. Currently plays the nearest-sniper baseline."
+author: Alex Thummalapalli
+license: "Apache 2.0"
+tags: [rust, native, env_model, rl, graph]

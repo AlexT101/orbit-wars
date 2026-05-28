@@ -70,6 +70,16 @@ def match_timeout_for(num_players: int) -> float:
     return (500 + 60) * max(1, num_players) + 20
 
 
+def side_order_for_seed(seed: int, num_players: int) -> list[int]:
+    """Deterministically map a match seed to engine player slots."""
+    order = list(range(num_players))
+    if num_players == 2:
+        return [1, 0] if seed % 2 else order
+    rng = random.Random(seed)
+    rng.shuffle(order)
+    return order
+
+
 def allocate_run_id(runs_root: Path, extra_taken: tuple[str, ...] = ()) -> str:
     """Return the next `YYYY-MM-DD-NNN` id (N = max existing today + 1).
 
@@ -533,16 +543,24 @@ class Scheduler:
             for pair in pairs:
                 for _ in range(config.games_per_pair):
                     mc += 1
+                    seed = rng.randrange(10**9)
+                    match_agents = list(pair)
+                    if not config.is_quick_match:
+                        match_agents = [
+                            match_agents[i]
+                            for i in side_order_for_seed(seed, len(match_agents))
+                        ]
                     pending.append(
                         QueuedMatch(
                             run_id=run_id,
                             match_counter=mc,
-                            agent_ids=[a["id"] for a in pair],
+                            agent_ids=[a["id"] for a in match_agents],
                             agent_paths=[
-                                str(self._zoo_root.parent / a["path"]) for a in pair
+                                str(self._zoo_root.parent / a["path"])
+                                for a in match_agents
                             ],
                             mode=config.mode,
-                            seed=rng.randrange(10**9),
+                            seed=seed,
                             save_replays=config.save_replays,
                             replays_dir=str(replays_dir),
                             logs_dir=str(logs_dir),

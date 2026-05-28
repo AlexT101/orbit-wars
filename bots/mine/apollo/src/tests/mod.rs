@@ -1,8 +1,8 @@
-mod blockers;
+mod aim;
 mod combat;
 mod engine;
-mod entity_cache;
-mod hellburner;
+mod cache;
+mod strategy;
 mod reference_engine;
 mod rollout_bench;
 mod simulator;

@@ -1,7 +1,7 @@
 use super::reference_engine::RefEngine;
 use crate::engine::{Configuration, MoveAction};
-use crate::entity_cache::EntityCache;
 use crate::engine::{Simulator, StepEvent};
+use crate::cache::EntityCache;
 
 /// Build an entity cache matching `engine`'s initial layout, for exercising
 /// the sim's precomputed-position fast path.
@@ -106,7 +106,9 @@ fn simulator_tracks_fleet_landing() {
     // Step forward until sim sees the fleet land or we hit a horizon.
     let mut landed = None;
     for _ in 0..40 {
-        engine_run.step_with_actions(&vec![Vec::new(), Vec::new()]).unwrap();
+        engine_run
+            .step_with_actions(&vec![Vec::new(), Vec::new()])
+            .unwrap();
         sim.step(Some(&cache));
         if let Some(StepEvent::FleetLanded { planet_id, .. }) = sim
             .events()
