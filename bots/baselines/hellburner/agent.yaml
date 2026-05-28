@@ -1,0 +1,10 @@
+name: "Hellburner"
+description: "Single-file heuristic Orbit Wars agent"
+author: "ajohnston7354"
+kernel_slug: "hellburner-x2"
+kernel_version: 7
+date_fetched: 2026-05-25
+license: "unknown"
+tags: [heuristic]
+author_claimed_lb_score: 1004
+disabled: false

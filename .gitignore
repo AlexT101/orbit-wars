@@ -190,3 +190,9 @@ node_modules/
 .extracted
 
 osteo_stuff/
+
+# RL training artifacts
+rl_orbit_wars/checkpoints/
+rl_orbit_wars/runs/
+
+runs/
