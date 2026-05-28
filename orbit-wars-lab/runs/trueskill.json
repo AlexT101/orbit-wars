@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-28T07:58:20.193394+00:00",
+  "last_updated": "2026-05-28T16:05:14.435468+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -46,9 +46,9 @@
     },
     "external/owproto": {
       "2p": {
-        "mu": 709.2235930352136,
-        "sigma": 23.0975377115989,
-        "games_played": 138
+        "mu": 706.3636030674435,
+        "sigma": 22.996710066595735,
+        "games_played": 139
       }
     },
     "external/peaking-bot": {
@@ -144,9 +144,9 @@
     },
     "mine/osteo": {
       "2p": {
-        "mu": 724.4682952111384,
-        "sigma": 20.058608040232816,
-        "games_played": 142
+        "mu": 726.6304507808588,
+        "sigma": 20.03510274443857,
+        "games_played": 143
       }
     },
     "mine/apollo_bf": {

@@ -58,6 +58,11 @@ class _WorkerResult:
     replay_path: str
     worker_pid: int = 0
     per_agent_turn_seconds: list[list[float]] = field(default_factory=list)
+    # When the match ended in a non-ok status the runner attaches an error
+    # string to `outcome.replay["error"]`. Carrying it through to the UI is
+    # what turns "⚠ crashed" into "⚠ crashed — Permission denied: …" so
+    # the failure is actually debuggable instead of mystery-meat.
+    error: Optional[str] = None
 
 
 def _quiet_kaggle_environments() -> None:
@@ -109,6 +114,11 @@ def _run_match_in_worker(
         rp = save_replay(replays_dir, match_counter, agent_ids, outcome.replay)
         replay_rel = str(rp.relative_to(replays_dir.parent))
 
+    err: Optional[str] = None
+    if isinstance(outcome.replay, dict):
+        e = outcome.replay.get("error")
+        if isinstance(e, str) and e:
+            err = e
     return _WorkerResult(
         match_counter=match_counter,
         agent_ids=agent_ids,
@@ -121,6 +131,7 @@ def _run_match_in_worker(
         replay_path=replay_rel,
         worker_pid=os.getpid(),
         per_agent_turn_seconds=outcome.per_agent_turn_seconds,
+        error=err,
     )
 
 
@@ -257,6 +268,11 @@ class Tournament:
                         rp = save_replay(replays_dir, mc, aids, outcome.replay)
                         replay_rel = str(rp.relative_to(run_dir))
                     completed_count += 1
+                    seq_err: Optional[str] = None
+                    if isinstance(outcome.replay, dict):
+                        e = outcome.replay.get("error")
+                        if isinstance(e, str) and e:
+                            seq_err = e
                     self._handle_match_outcome(
                         matches, store, runtime_store, run_dir, run_id, started_at,
                         total_matches, mc, aids, seed,
@@ -265,6 +281,7 @@ class Tournament:
                         match_status=outcome.status, replay_path=replay_rel,
                         per_agent_turn_seconds=outcome.per_agent_turn_seconds,
                         on_match_done=on_match_done,
+                        error=seq_err,
                     )
             else:
                 # Parallel path keeps at most `parallel` matches in flight so a
@@ -308,15 +325,17 @@ class Tournament:
                             # run completes — same fault-tolerance contract
                             # as `run_match_fast`.
                             mc, aids, apaths, seed = futs[fut]
+                            worker_err = f"{type(e).__name__}: {e}"
                             wr = _WorkerResult(
                                 match_counter=mc, agent_ids=aids,
                                 winner=None, scores=[], turns=0,
                                 duration_s=0.0, seed=seed,
                                 status="crashed", replay_path="",
                                 worker_pid=0,
+                                error=worker_err,
                             )
                             (run_dir / f"worker-error-{mc:03d}.txt").write_text(
-                                f"{type(e).__name__}: {e}\n"
+                                worker_err + "\n"
                             )
                         finally:
                             futs.pop(fut, None)
@@ -330,6 +349,7 @@ class Tournament:
                             per_agent_turn_seconds=wr.per_agent_turn_seconds,
                             progress_count=completed_count,
                             on_match_done=on_match_done,
+                            error=wr.error,
                         )
                         if self._cancel_requested():
                             cancelling = True
@@ -433,6 +453,7 @@ class Tournament:
         per_agent_turn_seconds: Optional[list[list[float]]] = None,
         progress_count: Optional[int] = None,
         on_match_done: Optional[Callable[["MatchResult", int, int], None]] = None,
+        error: Optional[str] = None,
     ) -> None:
         """Post-process a finished match: update store, append to results,
         write run.json, fire callback. Called from both sequential and
@@ -467,6 +488,7 @@ class Tournament:
             status=match_status,  # type: ignore[arg-type]
             seed=seed,
             replay_path=replay_path,
+            error=error,
         )
         matches.append(match_result)
         progress = progress_count if progress_count is not None else match_counter
@@ -525,7 +547,16 @@ class Tournament:
             "matches_done": matches_done,
             "is_quick_match": self.config.is_quick_match,
         }
-        (run_dir / "run.json").write_text(json.dumps(payload, indent=2))
+        # Atomic write: temp-file + rename. Plain `write_text` truncates
+        # first, then writes — a concurrent /api/runs/.../progress poll can
+        # land between those steps and read an empty file → JSONDecodeError
+        # → 500. The rename is atomic on POSIX (and on Windows via
+        # Path.replace), so readers see either the old or new payload but
+        # never an empty file.
+        target = run_dir / "run.json"
+        tmp = run_dir / "run.json.tmp"
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(target)
 
     def _new_run_id(self) -> str:
         """YYYY-MM-DD-NNN — N is `max(existing_NNN_today) + 1`.
