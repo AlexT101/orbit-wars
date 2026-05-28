@@ -30,7 +30,7 @@ use crate::helpers::{
 };
 use crate::world::{merge_arrivals, WorldState};
 
-// ── Constants (mirror hellburner) ────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────
 const EARLY_ROUNDS: i64 = 3;
 const EARLY_LOOK_AHEAD: i64 = 33;
 const MAX_DISTANCE: f64 = 38.0;
@@ -60,11 +60,10 @@ const A_S_LOOKAHEAD: i64 = 3;
 
 type FleetOrder = (i64, f64, i64); // (src_id, angle, ships)
 
-// ── Iterative intercept (mirrors hellburner's `intercept_planet`) ────────
+// ── Iterative intercept ──────────────────────────────────────────────────
 
 /// Continuous-time orbital position. `t_abs` is the absolute game step
-/// (allowed to be non-integer). For static planets / non-orbiters returns
-/// the fixed position.
+/// (allowed to be non-integer). Static planets return their fixed position.
 fn planet_pos_at(entity: &Entity, omega: f64, t_abs: f64) -> [f64; 2] {
     if entity.is_static() {
         return entity.positions[0].unwrap_or([CENTER, CENTER]);
@@ -76,11 +75,10 @@ fn planet_pos_at(entity: &Entity, omega: f64, t_abs: f64) -> [f64; 2] {
     [CENTER + r * a.cos(), CENTER + r * a.sin()]
 }
 
-/// Port of hellburner's `intercept_planet` — iterative damped fixed-point on
-/// travel time for orbital targets. Returns `(angle, tx, ty, travel)` where
-/// `travel` is in continuous turns; returns `+inf` travel if the iteration
-/// diverges (fleet too slow to catch orbital target). `scene_step` is the
-/// absolute game step at which the fleet *launches*.
+/// Iterative damped fixed-point on travel time for orbital targets. Returns
+/// `(angle, tx, ty, travel)`; `travel` is `+inf` if the iteration diverges
+/// (fleet too slow to catch orbital target). `scene_step` is the absolute
+/// game step at which the fleet *launches*.
 fn intercept_from(
     world: &WorldState,
     sx: f64,
@@ -102,8 +100,6 @@ fn intercept_from(
     let omega = world.entity_cache.angular_velocity;
 
     if entity.is_static() || entity.is_comet() {
-        // Hellburner excludes comets from `self.planets` so this branch is
-        // only hit for static planets. Use target's current position.
         let tx = target.x;
         let ty = target.y;
         let travel = dist(sx, sy, tx, ty) / speed;
@@ -140,8 +136,8 @@ fn intercept_from(
     (angle, tx, ty, travel)
 }
 
-/// Source position at fractional absolute step `t_abs`. Matches hellburner's
-/// "launch_turn - 0.5" formula for orbiting sources.
+/// Source position at fractional absolute step `t_abs`. Uses the
+/// `launch_turn - 0.5` convention for orbiting sources.
 fn source_pos_at(world: &WorldState, source_id: i64, t_abs: f64) -> (f64, f64) {
     let entity = match world.entity_cache.get(source_id) {
         Some(e) => e,
@@ -159,9 +155,8 @@ fn source_pos_at(world: &WorldState, source_id: i64, t_abs: f64) -> (f64, f64) {
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
-    /// Planet ids excluding comets — hellburner removes comets from
-    /// `self.planets` entirely so they never appear in the proximity graph,
-    /// reinforcement BFS, or target loops.
+    /// Planet ids excluding comets — comets never appear in the proximity
+    /// graph, reinforcement BFS, or target loops.
     pub non_comet_ids: HashSet<i64>,
     pub future_pos: HashMap<i64, [f64; 2]>,
     pub inbound_edges: HashMap<i64, Vec<(i64, f64)>>,
@@ -498,8 +493,7 @@ fn neighbor_holds_under_worst_case(
 
 /// Captured production weighting: enemy targets count double (we gain the
 /// production *and* they lose it — true zero-sum delta), neutral and
-/// own-planet defense are 1×. The "−1 for neutrals" hack in the old
-/// `evaluate_move_orders` is subsumed by this.
+/// own-planet defense are 1×.
 fn zero_sum_mult(world: &WorldState, target: &Planet) -> f64 {
     if target.owner != world.player && target.owner != -1 {
         2.0
@@ -542,12 +536,11 @@ struct FrontlineWin {
     max_arrival: i64,
 }
 
-/// Offset-aware port of hellburner's frontline assembly. `offset == 0` is
-/// "launch this turn" — those orders are what `plan` actually emits. For
-/// `offset > 0`, source/target/obstacle positions are evaluated at the
-/// future launch turn via `plan_shot(..., offset)` and arrival times in
-/// the trial timeline are shifted by `offset` so the ownership check
-/// stays correct.
+/// Offset-aware frontline assembly. `offset == 0` is "launch this turn" —
+/// those orders are what `plan` actually emits. For `offset > 0`,
+/// source/target/obstacle positions are evaluated at the future launch turn
+/// via `plan_shot(..., offset)` and arrival times in the trial timeline are
+/// shifted by `offset` so the ownership check stays correct.
 ///
 /// Source ship-availability and the worst-case defense reservation are
 /// computed at *current* state regardless of `offset` — a conservative
@@ -919,18 +912,6 @@ fn collect_source_candidates(
 
 // ── evaluate_move_orders ─────────────────────────────────────────────────
 
-/// Picks the single best (target, launch-offset) commitment for this greedy
-/// iteration.
-///
-/// For each candidate target we sweep `offset ∈ 0..=OFFSET_LOOKAHEAD` and
-/// keep the highest-scoring [`score_capture`] commitment. The chosen plan's
-/// orders may include `effective_offset > 0` entries — those are
-/// *reservations*: [`run_strategy`] commits the ships to [`PlanState`] (so
-/// later iterations of the same bot turn can't reuse them on lower-value
-/// targets) but does not emit a fleet move this turn. The "wait and grow"
-/// behavior emerges naturally from the greedy when a delayed plan scores
-/// higher than any offset-0 alternative. Returns `(target_id, fleet_orders,
-/// score)` for the chosen commitment.
 /// Which target each greedy iteration of `run_strategy` should commit. The
 /// rollouts in `plan()` try every variant and pick whichever resulting
 /// `PlanState` integrates the most own-production over the horizon — so
@@ -966,6 +947,13 @@ impl SelectionStrategy {
     }
 }
 
+/// Picks the single best (target, launch-offset) commitment for this greedy
+/// iteration. Sweeps `offset ∈ 0..=OFFSET_LOOKAHEAD` per target and keeps the
+/// highest-scoring [`score_capture`] commitment. Orders with
+/// `effective_offset > 0` are *reservations* — [`run_strategy`] reserves the
+/// ships in [`PlanState`] but doesn't emit a fleet move this turn, so
+/// "wait and grow" emerges naturally when a delayed plan outscores any
+/// offset-0 alternative.
 fn evaluate_move_orders(
     world: &WorldState,
     model: &HellburnerModel,
@@ -1290,7 +1278,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
         .cloned()
         .collect();
 
-    // In-flight friendly fleets from TimelineCache (hellburner's destination_list).
+    // In-flight friendly fleets from TimelineCache.
     let mut in_flight: Vec<EarlyFleet> = Vec::new();
     for planet in &world.planets {
         if !model.non_comet_ids.contains(&planet.id) {

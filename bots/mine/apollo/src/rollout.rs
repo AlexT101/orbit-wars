@@ -62,18 +62,11 @@ pub fn pick_plan_by_rollout(
     candidates.into_iter().nth(best_idx).unwrap_or_default()
 }
 
-/// Score a candidate plan by simulating it forward.
+/// Score a candidate plan by simulating it forward. `cache.current_turn` is
+/// restored before returning.
 ///
-/// The caller passes a pre-built `EngineState` reflecting the current turn;
-/// this function clones it and steps the clone, leaving the caller's state
-/// untouched. `cache.current_turn` is restored before returning.
-///
-/// `turn0_opponents` is the per-player opponent action list for the very
-/// first rollout step. The initial engine state is identical across every
-/// candidate, so opponent turn-0 plans don't depend on `my_moves` — the
-/// caller (`pick_plan_by_rollout`) computes the variant roster once via
-/// [`opponent_turn0_variants`] and reuses it across all candidates. The slot
-/// for `my_player` is ignored.
+/// `turn0_opponents` is reused across all candidates since the initial state
+/// is shared; the slot for `my_player` is ignored.
 pub fn rollout_score(
     initial_state: &EngineState,
     my_player: i64,
@@ -93,10 +86,8 @@ pub fn rollout_score(
         cache.set_current_turn(probe.step_count());
         let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
 
-        // Build the arrival ledger once per reactive step and share it across
-        // every player's WorldState — the probe-walk is player-agnostic.
-        // On turn 0 every player uses pre-baked actions, so the ledger isn't
-        // needed and we skip the forward sim entirely.
+        // Share one arrival ledger across all players (probe-walk is
+        // player-agnostic). Turn 0 uses pre-baked actions, so skip it.
         let ledger: Option<ArrivalLedger> = if t == 0 {
             None
         } else {
@@ -162,11 +153,9 @@ pub fn opponent_turn0_actions(
 }
 
 /// Build up to K distinct opponent turn-0 action sets for minimax-style
-/// scoring. In 2-player games we reuse the same full-search candidate builder
-/// as our own side, evaluated from the opponent's POV, and return one
-/// per-player action layout per variant. In games with more players we skip
-/// the combinatorial opponent options and fall back to a single greedy variant
-/// for every opponent. `cache.current_turn` is restored before returning.
+/// scoring. 2-player games reuse the full-search candidate builder from the
+/// opponent's POV; more-player games fall back to a single greedy variant per
+/// opponent to avoid combinatorial blow-up. `cache.current_turn` is restored.
 pub fn opponent_turn0_variants(
     initial_state: &EngineState,
     my_player: i64,

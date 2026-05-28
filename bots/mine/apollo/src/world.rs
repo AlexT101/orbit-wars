@@ -89,10 +89,8 @@ impl<'a> WorldState<'a> {
         Self::from_engine(player, &engine, entity_cache)
     }
 
-    /// Fast-path constructor for callers that already have an `EngineState`
-    /// (the rollout / search loop). Skips the EngineState reconstruction and
-    /// the two-stage Vec clones that `build` does when called with owned
-    /// observation parts.
+    /// Fast-path constructor for callers (rollout / search loop) that already
+    /// hold an `EngineState`, skipping the reconstruction + Vec clones `build` does.
     pub fn from_engine(
         player: i64,
         engine: &EngineState,

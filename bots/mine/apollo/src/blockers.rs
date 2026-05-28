@@ -545,10 +545,9 @@ fn add_dynamic_bands(
             continue;
         };
 
-        // Scan: sample envelope values at uniform `s` within the feasibility
-        // window. Restricting the scan tightens the effective resolution
-        // (step shrinks with the window) and ensures every sample yields a
-        // valid arc.
+        // Sample envelope values at uniform `s` within the feasibility window.
+        // Restricting to the window tightens effective resolution and ensures
+        // every sample yields a valid arc.
         let span = s_hi - s_lo;
         let scan_step = span / (ENVELOPE_SCAN - 1) as f64;
         let mut scan_u = [f64::NAN; ENVELOPE_SCAN];
@@ -708,11 +707,9 @@ pub fn lead_target(
         let dqy = q1y - q0y;
         let d0 = launch_offset + (t as f64 - 1.0) * v;
 
-        // Replace `hypot` with `sqrt(a² + b²)`: coordinates are bounded by
-        // `BOARD_SIZE ≈ 100`, so `a² + b²` cannot overflow `f64` and the
-        // hypot overflow guards are pure dead weight here. ~3-4× faster
-        // than `hypot`, and the loop body's sequential `if` chain keeps the
-        // compiler honest about the argmin reduction.
+        // `sqrt(a² + b²)` over `hypot`: coordinates are bounded by BOARD_SIZE
+        // ≈ 100 so overflow guards are dead weight; ~3-4× faster in this hot
+        // argmin loop.
         let mut best_gap = f64::INFINITY;
         let mut best_s = 0.0_f64;
         for i in 0..LEAD_SAMPLES {
@@ -780,15 +777,10 @@ pub fn aim_with_prediction(
     // boundary, never under-rejection).
     let table = cache.blocker_table(shooter_id, launch_turn_offset, ships);
 
-    // Find the extreme edges of the union of all blocking arcs in circular
-    // aim-angle space. Computed as signed deltas relative to `angle` via
-    // wrap_pi so entries from different bearings (including ones near ±π) are
-    // all compared in the same coordinate frame. For any blocking entry,
-    // entry_blocks guarantees aim_min ≤ angle ≤ aim_max (after bearing-
-    // relative wrapping), so wrap_pi(aim_min − angle) ≤ 0 ≤ wrap_pi(aim_max −
-    // angle) always holds. Comparing raw aim_min/aim_max across entries with
-    // different bearings would break when two entries sit on opposite sides of
-    // the ±π branch cut.
+    // Extreme edges of the union of blocking arcs, computed as signed deltas
+    // relative to `angle` via wrap_pi so entries with bearings on opposite
+    // sides of the ±π branch cut are compared in the same coordinate frame.
+    // entry_blocks guarantees lo ≤ 0 ≤ hi for any blocking entry.
     let (mut delta_lo, mut delta_hi) = (0.0_f64, 0.0_f64);
     let mut any_blocked = false;
     for e in table.entries.iter() {
@@ -808,15 +800,11 @@ pub fn aim_with_prediction(
         return Some((angle, turns, tx, ty, flight_time));
     }
 
-    // Direct path is blocked. Try the two angles just outside the full blocked
-    // arc's extreme edges — if either still lands on the target at the same
-    // arrival turn and clears all obstacles, use it rather than returning None.
-    //
-    // We check target validity by placing the fleet at `flight_time` along the
-    // candidate angle and comparing its distance to the direct intercept point
-    // (tx, ty). If that distance exceeds target_radius the angle falls outside
-    // the target's valid hit arc at this turn and we skip it. Otherwise we do a
-    // full is_blocked check (which catches secondary obstacles on that angle).
+    // Direct path is blocked. Try angles just outside the full blocked arc's
+    // edges — if either still hits the target at the same arrival turn and
+    // clears all obstacles, prefer it over returning None. Target validity is
+    // checked by placing the fleet at `flight_time` along the candidate angle
+    // and verifying its distance to (tx, ty) is within target_radius.
     let [lx, ly] = cache.position(shooter_id, launch_turn_offset)?;
     let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
     let target_radius = cache.get(target_id).map(|e| e.radius).unwrap_or(0.0);

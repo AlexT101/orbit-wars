@@ -5,7 +5,7 @@
 
 // Game rules
 pub const BOARD_SIZE: f64 = 100.0;
-pub const CENTER: f64 = BOARD_SIZE / 2.0;                           // Center of board (also the sun / orbital center).
+pub const CENTER: f64 = BOARD_SIZE / 2.0;                           // Sun / orbital center.
 pub const EPISODE_STEPS: i64 = 500;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -29,9 +29,6 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450];   // Game step
 
 
 // ── SIMULATION CONSTANTS ────────────────────────────────────────────────────────
-// These are assumptions made by `helpers.rs` for simulating in-game actions. Can be tuned, but note that these affect runtime.
+// Specific to our bot for internal decisions
 
 pub const HORIZON: i64 = 30;                                        // Maximum turns to look into the future.
-pub const FWD_ITER_MAX: usize = 16;                                 // Max convergence iterations for the iterative aiming solver.
-pub const INTERCEPT_TOLERANCE: i64 = 1;                             // Max |turn delta| between successive aim iterations to declare convergence.
-pub const EDGE_AIM_FRACS: [f64; 4] = [0.25, 0.50, 0.75, 0.95];      // Fractional offsets used for arc aim-point sampling around a target disk.
