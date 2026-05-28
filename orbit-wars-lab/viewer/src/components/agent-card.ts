@@ -16,8 +16,6 @@ export function renderAgentCard(
       <h2>${escapeHtml(agent.name)}</h2>
       <dl>
         <dt>ID</dt><dd>${escapeHtml(agent.id)}</dd>
-        <dt>Bucket</dt><dd>${escapeHtml(agent.bucket)}</dd>
-        <dt>Path</dt><dd><code>${escapeHtml(agent.path)}</code></dd>
         <dt>Description</dt><dd>${agent.description ? escapeHtml(agent.description) : "—"}</dd>
         <dt>Author</dt><dd>${agent.author ? escapeHtml(agent.author) : "—"}</dd>
         <dt>Source URL</dt><dd>${sourceLink}</dd>

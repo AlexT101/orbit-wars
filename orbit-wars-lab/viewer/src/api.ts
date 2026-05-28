@@ -35,6 +35,8 @@ export interface RunSummary {
   total_matches: number;
   matches_done: number;
   is_quick_match?: boolean;
+  shape?: "round-robin" | "gauntlet";
+  challenger_id?: string | null;
 }
 
 export interface KaggleSubmission {
