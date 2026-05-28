@@ -240,17 +240,14 @@ impl<'a> SimProbe<'a> {
         if self.step >= EPISODE_STEPS {
             return;
         }
-        // 1. Expire comets whose path ran out before this turn began.
         self.expire_pre_step();
 
-        // 2. (skip) Comet spawning — intentional, see module doc.
+        // (skip) Comet spawning — intentional, see module doc.
 
-        // 3. Process moves per player.
         for (player_idx, moves) in actions.iter().enumerate() {
             self.process_moves(player_idx as i64, moves);
         }
 
-        // 4. Production on owned planets.
         for planet in &mut self.planets {
             if planet.owner != -1 {
                 planet.ships += planet.production;
@@ -263,7 +260,6 @@ impl<'a> SimProbe<'a> {
         let fleet_count = self.fleets.len();
         self.reset_scratch(planet_count, fleet_count);
 
-        // 5. Orbital movement for non-comet planets.
         for (idx, planet) in self.planets.iter().enumerate() {
             if self.comet_id_set.contains(&planet.id) {
                 continue;
@@ -294,7 +290,7 @@ impl<'a> SimProbe<'a> {
             });
         }
 
-        // 6. Comet movement; record postmove expiries for cleanup at the end.
+        // Comet movement; record postmove expiries for cleanup at the end.
         self.expired_postmove.clear();
         for group in &mut self.comet_groups {
             group.path_index += 1;
@@ -324,7 +320,6 @@ impl<'a> SimProbe<'a> {
             }
         }
 
-        // 7. Fleet movement + collision detection.
         for (fleet_idx, fleet) in self.fleets.iter_mut().enumerate() {
             let old_pos = (fleet.x, fleet.y);
             let speed = fleet_speed(fleet.ships, self.ship_speed);
@@ -367,7 +362,6 @@ impl<'a> SimProbe<'a> {
             }
         }
 
-        // 8. Apply planet movement (write back computed new positions).
         for (idx, planet) in self.planets.iter_mut().enumerate() {
             if let Some(path) = &self.planet_paths[idx] {
                 planet.x = path.new_pos.0;
@@ -375,7 +369,6 @@ impl<'a> SimProbe<'a> {
             }
         }
 
-        // 9. Combat resolution per planet.
         for (idx, planet) in self.planets.iter_mut().enumerate() {
             let planet_fleets = &self.combat_lists[idx];
             if planet_fleets.is_empty() {
@@ -446,8 +439,8 @@ impl<'a> SimProbe<'a> {
             }
         }
 
-        // 10. Apply postmove comet expiry now that combat has been resolved
-        //     against the pre-removal planet indexing.
+        // Apply postmove comet expiry now that combat has been resolved
+        // against the pre-removal planet indexing.
         if !self.expired_postmove.is_empty() {
             // Swap-out to release the borrow on self.
             let mut expired = std::mem::take(&mut self.expired_postmove);
@@ -456,7 +449,7 @@ impl<'a> SimProbe<'a> {
             self.expired_postmove = expired;
         }
 
-        // 11. Remove destroyed fleets in place, indexed by pre-retain position.
+        // Remove destroyed fleets in place, indexed by pre-retain position.
         let removal_flags = &self.fleets_to_remove;
         let mut idx = 0usize;
         self.fleets.retain(|_| {
@@ -465,7 +458,7 @@ impl<'a> SimProbe<'a> {
             keep
         });
 
-        // 12. (skip) termination check + rewards — see module doc.
+        // (skip) termination check + rewards — see module doc.
 
         self.step += 1;
     }
@@ -520,8 +513,8 @@ impl<'a> SimProbe<'a> {
                 continue;
             }
             from.ships -= ma.ships;
-            // Snapshot the launch geometry, then drop the &mut self.planets
-            // borrow by ending the use of `from` before pushing to self.fleets.
+            // Snapshot geometry so the &mut self.planets borrow ends before
+            // we push to self.fleets.
             let radius = from.radius;
             let fx = from.x;
             let fy = from.y;

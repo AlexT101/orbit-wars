@@ -31,10 +31,9 @@ const MT_MATRIX_A: u32 = 0x9908_b0df;
 const MT_UPPER_MASK: u32 = 0x8000_0000;
 const MT_LOWER_MASK: u32 = 0x7fff_ffff;
 
-/// Per-section timing accumulators for `step_with_actions`, compiled in only
-/// under `--features profile`. Lets us see where simulation time actually goes
-/// (orbital math vs collision vs combat vs allocation/finalize) instead of
-/// guessing.
+/// Per-section timing accumulators for `step_with_actions`, gated on the
+/// `profile` feature. Reveals where simulation time actually goes (orbital
+/// vs collision vs combat vs finalize).
 #[cfg(feature = "profile")]
 pub mod prof {
     use std::cell::RefCell;
@@ -352,19 +351,15 @@ pub struct EngineState {
     pub num_players: usize,
     pub configuration: Configuration,
     /// When true, `step_with_actions` skips `spawn_comets()`. Set by
-    /// `from_observation_parts` because the bot doesn't know the real game
-    /// seed — spawning with the placeholder `seed: 0` would materialize
-    /// hallucinated comets in rollouts that cross a `COMET_SPAWN_STEPS`
-    /// boundary, poisoning collision/combat predictions.
+    /// `from_observation_parts` because the bot lacks the real game seed —
+    /// spawning with placeholder `seed: 0` would hallucinate comets in
+    /// rollouts crossing a `COMET_SPAWN_STEPS` boundary.
     pub disable_spawning: bool,
-    // Cached `planet.id -> index-in-planets`. Maintained whenever the planets
-    // vec is mutated (new / spawn_comets / remove_comets). NEVER read or
-    // written elsewhere — keep mutation centralized so it can't drift.
+    // Cached `planet.id -> index-in-planets`. Mutated only on new /
+    // spawn_comets / remove_comets — keep centralized so it can't drift.
     planet_index_by_id: HashMap<i64, usize>,
-    // Bumped whenever `initial_planets` changes (comet spawn / remove). Lets
-    // the PyO3 layer reuse a serialized `initial_planets` Python list across
-    // the many steps where it doesn't change, instead of rebuilding it every
-    // observation + snapshot.
+    // Bumped on every `initial_planets` change so the PyO3 layer can reuse a
+    // serialized list across steps where it's unchanged.
     initial_planets_version: u64,
 }
 
@@ -421,10 +416,9 @@ impl EngineState {
         }
     }
 
-    /// Construct an `EngineState` from raw observation parts, skipping the
-    /// random map generation `new()` runs. Useful for the bot when it wants to
-    /// build a `TimelineCache` / `SimProbe` from the observation it just got
-    /// from Kaggle.
+    /// Construct an `EngineState` from raw observation parts, skipping
+    /// `new()`'s random map generation. Used by the bot to build a
+    /// `TimelineCache` / `SimProbe` from the current observation.
     #[allow(clippy::too_many_arguments)]
     pub fn from_observation_parts(
         step: i64,
@@ -475,15 +469,11 @@ impl EngineState {
         self.planet_index_by_id.get(&planet_id).copied()
     }
 
-    /// Build the `num_players` observation dicts plus the snapshot dict for the
-    /// current state, sharing the heavy entity lists (`planets`, `fleets`,
-    /// `comets`, `comet_planet_ids`) across every dict instead of rebuilding
-    /// them per observation. `initial_obj` is the pre-built `initial_planets`
+    /// Build observation dicts + snapshot, sharing the heavy entity lists
+    /// across every dict. `initial_obj` is the pre-built `initial_planets`
     /// list, supplied by the caller so it can be cached across steps.
-    ///
     /// Observations differ only by the `player` field; the snapshot adds the
-    /// engine-private fields. All values are byte-for-byte identical to what
-    /// the old per-observation `observation_py` / `snapshot_py` produced.
+    /// engine-private fields.
     pub fn assemble<'py>(
         &self,
         py: Python<'py>,
@@ -600,16 +590,14 @@ impl EngineState {
         #[cfg(feature = "profile")]
         let _p1 = std::time::Instant::now();
 
-        // Per-planet movement path, indexed by current planet position. We
-        // build entries for every planet here; the fleet collision loop reads
-        // by index via enumerate, so no hash lookups in the hot loop.
+        // Per-planet movement path indexed by planet position so the fleet
+        // collision loop can read by enumerate index — no hash lookups in the
+        // hot loop.
         let mut planet_paths: Vec<Option<PlanetPath>> = vec![None; planet_count];
 
-        // Orbital movement for non-comet planets. planets[i].id == initial_planets[i].id
-        // is an invariant maintained by spawn_comets/remove_comets, so we can
-        // index initial_planets by the same `i`.
-        // Membership set built once instead of an O(planets * comet_ids) scan
-        // inside the loop. Comet planets are handled separately below.
+        // Invariant: planets[i].id == initial_planets[i].id (maintained by
+        // spawn_comets/remove_comets), so initial_planets is indexed by `i`.
+        // Comet planets are handled separately below.
         let comet_id_set: HashSet<i64> = self.comet_planet_ids.iter().copied().collect();
         for (idx, planet) in self.planets.iter().enumerate() {
             if comet_id_set.contains(&planet.id) {
@@ -639,8 +627,6 @@ impl EngineState {
         #[cfg(feature = "profile")]
         let _p2 = std::time::Instant::now();
 
-        // Comet movement. Use planet_index_by_id to convert each comet's
-        // planet id into a position in self.planets in O(1).
         let mut expired_postmove: Vec<i64> = Vec::new();
         for group in &mut self.comets {
             group.path_index += 1;
@@ -673,8 +659,6 @@ impl EngineState {
         #[cfg(feature = "profile")]
         let _p3 = std::time::Instant::now();
 
-        // Fleet movement + collision detection. fleets_to_remove is a
-        // per-fleet bool flag indexed by current fleet position.
         let fleet_count = self.fleets.len();
         let mut fleets_to_remove = vec![false; fleet_count];
         // Combat only needs (owner, ships) per attacker, so store just those two
@@ -720,9 +704,8 @@ impl EngineState {
         #[cfg(feature = "profile")]
         let _p4 = std::time::Instant::now();
 
-        // Apply movement results to planets and resolve combat before any
-        // planet-vec mutation, so combat_lists stays aligned with planet
-        // positions. Iterating with enumerate gives us the index directly.
+        // Apply movement and resolve combat before any planet-vec mutation,
+        // so combat_lists stays aligned with planet indices.
         for (idx, planet) in self.planets.iter_mut().enumerate() {
             if let Some(path) = &planet_paths[idx] {
                 planet.x = path.new_pos.0;
@@ -745,12 +728,9 @@ impl EngineState {
                 }
             }
 
-            // Find top and second by ship count, scanning by ascending
-            // player id. Tie-breaking for the "top" identity is irrelevant
-            // for the result: when top_ships == second_ships, survivor is
-            // forced to (-1, 0); when top_ships > second_ships, the top
-            // entry is unique by definition. Matches the previous
-            // sort_by-on-HashMap-iter behavior.
+            // Find top and second by ship count. Tie-breaking for "top" is
+            // irrelevant: when top == second, survivor is forced to (-1, 0);
+            // when top > second, the top entry is unique by definition.
             let mut top_player: i64 = -1;
             let mut top_ships: i64 = -1;
             let mut second_ships: i64 = -1;
@@ -801,13 +781,10 @@ impl EngineState {
         #[cfg(feature = "profile")]
         let _p5 = std::time::Instant::now();
 
-        // Now that combat is resolved against the build-time planet indexing,
-        // mutate the vecs.
         if !expired_postmove.is_empty() {
             self.remove_comets(&expired_postmove);
         }
 
-        // Remove destroyed fleets in place using the per-fleet bool flag.
         let mut retain_idx = 0usize;
         self.fleets.retain(|_| {
             let keep = !fleets_to_remove[retain_idx];
@@ -1370,8 +1347,7 @@ fn generate_comet_paths(
         let semi_minor = semi_major * (1.0 - eccentricity * eccentricity).sqrt();
         let focus_c = semi_major * eccentricity;
         let phi = rng.uniform(PI / 6.0, PI / 3.0);
-        // phi is constant across the dense loop; computing cos/sin once is
-        // bit-identical to recomputing them per point (same pure function).
+        // phi is loop-invariant; hoisting cos/sin is bit-identical.
         let phi_cos = phi.cos();
         let phi_sin = phi.sin();
 
@@ -1437,11 +1413,9 @@ fn generate_comet_paths(
         ];
 
         let mut static_planets = Vec::new();
-        // For orbiting planets, orb_r and init_angle depend only on the planet's
-        // (constant) initial position, not on the comet point. Precompute them
-        // once here instead of recomputing per comet point below. Computed
-        // exactly as the inner loop did (dx*dx form, not `distance`'s powi), so
-        // the resulting positions are bit-identical.
+        // orb_r / init_angle depend only on the planet's initial position, so
+        // hoist them out of the per-comet-point loop. Uses dx*dx (not
+        // `distance`'s powi) to stay bit-identical to the inline form.
         let mut orbiting_planets: Vec<(f64, f64, f64)> = Vec::new(); // (orb_r, init_angle, radius)
         for planet in initial_planets {
             if comet_pid_set.contains(&planet.id) {
@@ -1519,16 +1493,15 @@ fn generate_comet_paths(
 #[pyclass]
 struct RustEngineCore {
     state: Option<EngineState>,
-    // Serialized `initial_planets` list cached across steps, tagged with the
-    // `initial_planets_version` it was built from. Reused on every step where
-    // the version is unchanged (i.e. no comet spawn/remove), which is the
-    // common case — only ~5 spawns occur per 500-step episode.
+    // Serialized `initial_planets` list, tagged with the version it was
+    // built from. Comet spawn/remove is rare (~5 per 500-step episode), so
+    // most steps reuse the cached list.
     initial_planets_cache: Option<(u64, Py<PyAny>)>,
 }
 
 impl RustEngineCore {
-    /// Return the serialized `initial_planets` list, rebuilding it only when the
-    /// engine's `initial_planets_version` has advanced since the cached copy.
+    /// Return the serialized `initial_planets` list, rebuilding only when
+    /// `initial_planets_version` has advanced since the cached copy.
     fn initial_planets_obj<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let version = self
             .state
@@ -1554,8 +1527,6 @@ impl RustEngineCore {
             .clone())
     }
 
-    /// Build the observation list + snapshot for the current state, reusing the
-    /// cached `initial_planets` list.
     fn build_payload(&mut self, py: Python<'_>) -> PyResult<(Vec<Py<PyAny>>, Py<PyAny>)> {
         let initial_obj = self.initial_planets_obj(py)?;
         let state = self.state.as_ref().expect("state present");
@@ -1633,7 +1604,5 @@ impl RustEngineCore {
     }
 }
 
-// NOTE: the engine's `#[pymodule] fn orbit_wars_rust` is intentionally omitted.
-// This is an in-crate module, not its own extension module — the bot's
-// `lib.rs` defines the single `#[pymodule]` for this cdylib. `RustEngineCore`
-// above is retained as a usable wrapper but is not registered here.
+// The engine's `#[pymodule]` is intentionally omitted: this is an in-crate
+// module, and the bot's `lib.rs` owns the single `#[pymodule]` for this cdylib.

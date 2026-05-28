@@ -14,20 +14,18 @@ pub use crate::sim_probe::ArrivalEvent;
 
 // ── Basic Helpers ────────────────────────────────────────────────────
 
-/// Euclidean distance between two points
 #[inline]
 pub fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     crate::engine::distance((ax, ay), (bx, by))
 }
 
-///  Logarithmic speed curve between 1 and 6
+/// Logarithmic speed curve between 1 and 6 (engine rule).
 #[inline]
 pub fn fleet_speed(ships: i64) -> f64 {
     crate::engine::fleet_speed(ships.max(1), MAX_SHIP_SPEED)
 }
 
 
-/// Squared distance from point (px, py) to line segment (x1, y1)-(x2, y2)
 #[inline]
 pub fn point_to_segment_distance_sq(
     px: f64, py: f64,
@@ -48,7 +46,6 @@ pub fn point_to_segment_distance_sq(
     ex * ex + ey * ey
 }
 
-/// Returns true if movement segment (ax, ay)-(bx, by) comes within `r` of (cx, cy).
 #[inline]
 pub fn segment_intersects_circle(
     ax: f64, ay: f64,
@@ -59,7 +56,6 @@ pub fn segment_intersects_circle(
     point_to_segment_distance_sq(cx, cy, ax, ay, bx, by) <= r * r
 }
 
-/// Returns true if movement segment intersects sun
 #[inline]
 pub fn segment_hits_sun(
     x1: f64, y1: f64,
@@ -139,15 +135,6 @@ pub fn sorted_by_distance_to(
 }
 
 
-// ── Aiming Helpers (moved to crate::blockers) ───────────────────────────────
-// The old multi-stage aim chain (`safe_angle_and_distance`,
-// `estimate_arrival*`, `arc_safe_angle`, `aim_raw`, `verify_shot_hits`,
-// `search_safe_intercept`) was replaced by [`crate::blockers`]'s parametric
-// (aim, flight_time) band test. The public entry point lives at
-// [`aim_with_prediction`] above.
-
-
-
 // ── Timeline Helpers ──────────────────────────────────────────────────────────
 // Forward simulation with initial timeline and hypothetical queries
 
@@ -202,9 +189,8 @@ pub fn resolve_arrival_event(
     }
 }
 
-/// Filter, clamp, and sort raw arrivals into a clean per-turn event list:
-/// drops non-positive ship counts, pulls every `turns` up to at least 1,
-/// drops anything past `horizon`, then sorts by ETA ascending.
+/// Clean per-turn arrival list: drops non-positive ships, clamps `turns` to
+/// at least 1, drops past `horizon`, sorts by ETA.
 pub fn normalize_arrivals(arrivals: &[ArrivalEvent], horizon: i64) -> Vec<ArrivalEvent> {
     let mut out: Vec<ArrivalEvent> = arrivals
         .iter()

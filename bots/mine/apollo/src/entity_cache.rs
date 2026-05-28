@@ -255,8 +255,6 @@ impl EntityCache {
         }
     }
 
-    /// Store an aim result for a shot launching at
-    /// `current_turn + launch_turn_offset`.
     pub fn aim_cache_store(
         &self,
         src: i64,
@@ -288,7 +286,6 @@ impl EntityCache {
         }
     }
 
-    /// Position of `id` at `current_turn + turns_ahead`
     #[inline]
     pub fn position(&self, id: i64, turns_ahead: i64) -> Option<[f64; 2]> {
         let entity = self.entities.get(&id)?;

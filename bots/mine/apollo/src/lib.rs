@@ -192,13 +192,10 @@ impl Bot {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
 
-        // Construct the engine state once and reuse it for both the candidate
-        // WorldState and the rollout seed — avoids parsing/cloning the
-        // observation vecs a second time.
-        // NOTE: this recycles IDs of destroyed fleets — Kaggle's engine issues
-        // monotonically increasing IDs across the whole game, but we only see
-        // currently-visible fleets. Safe today because no consumer keys on
-        // fleet ID across turns; revisit if any cache/hash ever does.
+        // Build engine state once; reused for candidate WorldState and rollout seed.
+        // NOTE: next_fleet_id may recycle destroyed fleets' IDs since we only
+        // see currently-visible fleets. Safe while no consumer keys on fleet
+        // ID across turns; revisit if any cache/hash ever does.
         let next_fleet_id = obs.fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
         let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
         let player = obs.player;
@@ -256,9 +253,8 @@ impl Bot {
         }
         if let Some(cache) = &mut self.cache {
             cache.set_current_turn(self.current_turn);
-            // Drop the prior bot turn's aim entries. Slots from rollout
-            // forward-sim of earlier turns are released the same way as they
-            // age past `current_turn`.
+            // Drop the prior turn's aim entries; rollout forward-sim slots
+            // age out the same way past `current_turn`.
             cache.clear_aim_cache_slot(self.current_turn - 1);
         }
     }
