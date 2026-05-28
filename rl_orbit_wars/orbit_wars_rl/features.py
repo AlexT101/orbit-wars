@@ -19,6 +19,8 @@ PLANET_FEATURES = 26
 GLOBAL_FEATURES = 18
 ACTION_DIM = 1 + MAX_PLANETS * MAX_PLANETS * len(SEND_FRACTIONS)
 ACTION_TARGET_LIMIT_PER_SOURCE = 16
+DEFAULT_MAX_LAUNCHES_PER_TURN = 4
+DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN = 0.0
 
 
 @dataclass(frozen=True)
@@ -430,6 +432,58 @@ def _candidate_target_slots(
     return [i for _score, i in scored[:limit]]
 
 
+def _incoming_by_planet(obs, raw_planets: list[list[float]], player: int) -> dict[int, list[float]]:
+    incoming: dict[int, list[float]] = {int(p[0]): [0.0, 0.0] for p in raw_planets[:MAX_PLANETS]}
+    for fleet in list(_obs_get(obs, "fleets", []) or [])[:128]:
+        target_id = _predict_fleet_target(obs, fleet, raw_planets[:MAX_PLANETS])
+        if target_id is None or target_id not in incoming:
+            continue
+        if int(fleet[1]) == player:
+            incoming[target_id][0] += float(fleet[6])
+        else:
+            incoming[target_id][1] += float(fleet[6])
+    return incoming
+
+
+def remaining_ships_by_slot(obs) -> list[int]:
+    return [max(0, int(float(p[5]))) for p in list(_obs_get(obs, "planets", []) or [])[:MAX_PLANETS]]
+
+
+def _build_action_mask(
+    obs,
+    raw_planets: list[list[float]],
+    player: int,
+    incoming: dict[int, list[float]],
+    remaining_ships: list[int] | None = None,
+) -> np.ndarray:
+    action_mask = np.zeros(ACTION_DIM, dtype=np.bool_)
+    action_mask[0] = True
+    n = min(len(raw_planets), MAX_PLANETS)
+    if remaining_ships is None:
+        remaining_ships = remaining_ships_by_slot(obs)
+
+    for si in range(n):
+        src = raw_planets[si]
+        available = int(remaining_ships[si]) if si < len(remaining_ships) else 0
+        if int(src[1]) != player or available <= 1:
+            continue
+        for ti in _candidate_target_slots(raw_planets, si, player, incoming):
+            tgt = raw_planets[ti]
+            for bi, frac in enumerate(SEND_FRACTIONS):
+                ships = max(1, int(available * frac))
+                ships = min(ships, available)
+                if ships > 0 and dir_to_hit(obs, src, tgt, ships) is not None:
+                    action_mask[action_index(si, ti, bi)] = True
+    return action_mask
+
+
+def action_mask_for_remaining(obs, remaining_ships: list[int] | None = None) -> np.ndarray:
+    player = int(_obs_get(obs, "player", 0))
+    raw_planets = list(_obs_get(obs, "planets", []) or [])
+    incoming = _incoming_by_planet(obs, raw_planets, player)
+    return _build_action_mask(obs, raw_planets, player, incoming, remaining_ships)
+
+
 def encode_obs(obs) -> EncodedObs:
     player = int(_obs_get(obs, "player", 0))
     step = int(_obs_get(obs, "step", 0))
@@ -456,7 +510,6 @@ def encode_obs(obs) -> EncodedObs:
     neutral_positions: list[tuple[float, float]] = []
     orbiting_count = 0
     comet_count = 0
-    incoming: dict[int, list[float]] = {}
     for p in raw_planets[:MAX_PLANETS]:
         pid, owner, x, y, radius, _ships, _production = p
         owner = int(owner)
@@ -474,16 +527,7 @@ def encode_obs(obs) -> EncodedObs:
             neutral_positions.append((x, y))
         else:
             enemy_positions.append((x, y))
-        incoming[int(pid)] = [0.0, 0.0]
-
-    for fleet in raw_fleets[:128]:
-        target_id = _predict_fleet_target(obs, fleet, raw_planets[:MAX_PLANETS])
-        if target_id is None or target_id not in incoming:
-            continue
-        if int(fleet[1]) == player:
-            incoming[target_id][0] += float(fleet[6])
-        else:
-            incoming[target_id][1] += float(fleet[6])
+    incoming = _incoming_by_planet(obs, raw_planets, player)
 
     for i, p in enumerate(raw_planets[:MAX_PLANETS]):
         pid, owner, x, y, radius, ships, production = p
@@ -588,24 +632,12 @@ def encode_obs(obs) -> EncodedObs:
         dtype=np.float32,
     )
 
-    action_mask = np.zeros(ACTION_DIM, dtype=np.bool_)
-    action_mask[0] = True
-    for si in range(n):
-        src = raw_planets[si]
-        if int(src[1]) != player or int(src[5]) <= 1:
-            continue
-        for ti in _candidate_target_slots(raw_planets, si, player, incoming):
-            tgt = raw_planets[ti]
-            for bi, frac in enumerate(SEND_FRACTIONS):
-                ships = max(1, int(float(src[5]) * frac))
-                ships = min(ships, int(src[5]))
-                if ships > 0 and dir_to_hit(obs, src, tgt, ships) is not None:
-                    action_mask[action_index(si, ti, bi)] = True
+    action_mask = _build_action_mask(obs, raw_planets, player, incoming)
 
     return EncodedObs(planets=planets, planet_mask=planet_mask, globals=globals_, action_mask=action_mask)
 
 
-def decode_move(obs, index: int) -> list[list[float]]:
+def decode_move(obs, index: int, remaining_ships: list[int] | None = None) -> list[list[float]]:
     decoded = decode_action_index(int(index))
     if decoded is None:
         return []
@@ -617,12 +649,17 @@ def decode_move(obs, index: int) -> list[list[float]]:
     player = int(_obs_get(obs, "player", 0))
     src = raw_planets[source_slot]
     tgt = raw_planets[target_slot]
-    if int(src[1]) != player or source_slot == target_slot or int(src[5]) <= 1:
+    available = (
+        int(remaining_ships[source_slot])
+        if remaining_ships is not None and source_slot < len(remaining_ships)
+        else int(float(src[5]))
+    )
+    if int(src[1]) != player or source_slot == target_slot or available <= 1:
         return []
 
     frac = SEND_FRACTIONS[send_bin]
-    ships = max(1, int(float(src[5]) * frac))
-    ships = min(ships, int(src[5]))
+    ships = max(1, int(available * frac))
+    ships = min(ships, available)
     if ships <= 0:
         return []
     path = dir_to_hit(obs, src, tgt, ships)
@@ -630,6 +667,21 @@ def decode_move(obs, index: int) -> list[list[float]]:
         return []
     angle = path[0]
     return [[int(src[0]), angle, int(ships)]]
+
+
+def decode_moves(obs, action_indices: list[int]) -> list[list[float]]:
+    moves: list[list[float]] = []
+    remaining = remaining_ships_by_slot(obs)
+    for action_index_value in action_indices:
+        move = decode_move(obs, action_index_value, remaining)
+        if not move:
+            if int(action_index_value) <= 0:
+                break
+            continue
+        moves.extend(move)
+        source_slot = decode_action_index(int(action_index_value))[0]  # type: ignore[index]
+        remaining[source_slot] = max(0, remaining[source_slot] - int(move[0][2]))
+    return moves
 
 
 def encode_move_as_action_index(obs, move: list[float]) -> int:

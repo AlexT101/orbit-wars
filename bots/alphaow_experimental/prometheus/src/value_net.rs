@@ -57,6 +57,11 @@ pub const INPUT_DIM: usize = 2 * PER_BLOCK + DIST_BLOCK;
 
 const WEIGHTS_MAGIC: u32 = 0x564f_4157; // "AOWV" little-endian
 
+/// Record a real incoming observation for live tempo/history features.
+pub fn observe_root_state(state: &GameState) {
+    summary_features_v9::observe_root_state(state);
+}
+
 /// Per-object feature slot. 9 floats per planet/comet:
 /// `[is_me, is_opp, is_neutral, log1p(ships), radius, is_static, is_orbit, is_comet, production]`
 pub struct Features {
@@ -199,6 +204,8 @@ enum InputKind {
     /// 146-d v8: curated v6 without brittle sign/abs columns, plus focused
     /// phase interaction features.
     SummaryV8,
+    /// 157-d v9: v8 plus causal tempo/history slopes.
+    SummaryV9,
 }
 
 /// One dense layer: `out_dim` rows of length `in_dim` (row-major) plus a
@@ -240,9 +247,11 @@ fn detect_kind(input_dim: usize) -> Option<InputKind> {
         Some(InputKind::SummaryV7)
     } else if input_dim == summary_features_v8::DIM {
         Some(InputKind::SummaryV8)
+    } else if input_dim == summary_features_v9::DIM {
+        Some(InputKind::SummaryV9)
     } else {
         eprintln!(
-            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2 / {} summary_v3 / {} summary_v4 / {} summary_v5 / {} summary_v6 / {} summary_v7 / {} summary_v8)",
+            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2 / {} summary_v3 / {} summary_v4 / {} summary_v5 / {} summary_v6 / {} summary_v7 / {} summary_v8 / {} summary_v9)",
             input_dim,
             INPUT_DIM,
             summary_features::DIM,
@@ -252,7 +261,8 @@ fn detect_kind(input_dim: usize) -> Option<InputKind> {
             summary_features_v5::DIM,
             summary_features_v6::DIM,
             summary_features_v7::DIM,
-            summary_features_v8::DIM
+            summary_features_v8::DIM,
+            summary_features_v9::DIM
         );
         None
     }
@@ -564,6 +574,10 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
                 let feats = summary_features_v8::extract(state, me);
                 forward_raw(w, &feats)
             }
+            InputKind::SummaryV9 => {
+                let feats = summary_features_v9::extract(state, me);
+                forward_raw(w, &feats)
+            }
         },
         Model::Xgb { model, kind } => match kind {
             InputKind::Full => {
@@ -605,6 +619,10 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
             }
             InputKind::SummaryV8 => {
                 let feats = summary_features_v8::extract(state, me);
+                model.predict_value(&feats)
+            }
+            InputKind::SummaryV9 => {
+                let feats = summary_features_v9::extract(state, me);
                 model.predict_value(&feats)
             }
         },
@@ -1659,6 +1677,123 @@ pub mod summary_features_v8 {
             cur_ship_share * endgame_phase,
         ];
         out[write..].copy_from_slice(&extra);
+        out
+    }
+}
+
+/// 157-d: summary_v8 plus causal 50-turn tempo slopes from real observed
+/// history. Call `observe_root_state` once per incoming game observation.
+pub mod summary_features_v9 {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    pub const TEMPO_DIM: usize = 11;
+    pub const DIM: usize = summary_features_v8::DIM + TEMPO_DIM;
+    const WINDOW: f32 = 50.0;
+    const BASE: usize = summary_features_v3::DIM;
+    const METRIC_DIM: usize = 9;
+    const PROD_DIFF: usize = BASE + 11;
+    const SHIPS_TOTAL_DIFF: usize = BASE + 2;
+    const SHIPS_PLANETS_DIFF: usize = BASE;
+    const PLANET_COUNT_DIFF: usize = BASE + 7;
+    const STATIC_COUNT_DIFF: usize = BASE + 4;
+    const PROD_SHARE: usize = BASE + 12;
+    const SHIPS_SHARE: usize = BASE + 3;
+    const ADV_100: usize = BASE + 41;
+    const FLYING_COMMITMENT_DIFF: usize = BASE + 49;
+
+    #[derive(Clone, Copy)]
+    struct TempoSample {
+        step: f32,
+        metrics: [f32; METRIC_DIM],
+    }
+
+    thread_local! {
+        static HISTORY: RefCell<HashMap<i32, Vec<TempoSample>>> = RefCell::new(HashMap::new());
+    }
+
+    fn metrics(core: &[f32; summary_features_v8::DIM]) -> [f32; METRIC_DIM] {
+        [
+            core[PROD_DIFF],
+            core[SHIPS_TOTAL_DIFF],
+            core[SHIPS_PLANETS_DIFF],
+            core[PLANET_COUNT_DIFF],
+            core[STATIC_COUNT_DIFF],
+            core[PROD_SHARE],
+            core[SHIPS_SHARE],
+            core[ADV_100],
+            core[FLYING_COMMITMENT_DIFF],
+        ]
+    }
+
+    fn tempo_from_samples(samples: &[TempoSample], step: f32, current: [f32; METRIC_DIM]) -> [f32; TEMPO_DIM] {
+        let mut points: Vec<TempoSample> = samples
+            .iter()
+            .copied()
+            .filter(|s| s.step <= step && s.step >= step - WINDOW)
+            .collect();
+        if !points.iter().any(|s| (s.step - step).abs() < 1e-6) {
+            points.push(TempoSample { step, metrics: current });
+        }
+        points.sort_by(|a, b| a.step.partial_cmp(&b.step).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut out = [0.0f32; TEMPO_DIM];
+        if points.len() < 2 {
+            return out;
+        }
+        let n = points.len() as f32;
+        let sum_x: f32 = points.iter().map(|p| p.step).sum();
+        let sum_x2: f32 = points.iter().map(|p| p.step * p.step).sum();
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() > 1e-6 {
+            for j in 0..METRIC_DIM {
+                let sum_y: f32 = points.iter().map(|p| p.metrics[j]).sum();
+                let sum_xy: f32 = points.iter().map(|p| p.step * p.metrics[j]).sum();
+                out[j] = (n * sum_xy - sum_x * sum_y) / denom;
+            }
+        }
+        let min_step = points.first().map(|p| p.step).unwrap_or(step);
+        out[9] = ((step - min_step) / WINDOW).clamp(0.0, 1.0);
+        out[10] = out[1] * WINDOW + out[0] * (0.5 * WINDOW * WINDOW);
+        out
+    }
+
+    pub fn observe_root_state(state: &GameState) {
+        let me = state.player;
+        let step = state.step as f32;
+        let core = summary_features_v8::extract(state, me);
+        let sample = TempoSample { step, metrics: metrics(&core) };
+        HISTORY.with(|cell| {
+            let mut history = cell.borrow_mut();
+            let samples = history.entry(me).or_default();
+            if samples.last().map(|s| step < s.step).unwrap_or(false) {
+                samples.clear();
+            }
+            if samples.last().map(|s| (step - s.step).abs() < 1e-6).unwrap_or(false) {
+                if let Some(last) = samples.last_mut() {
+                    *last = sample;
+                }
+            } else {
+                samples.push(sample);
+            }
+            let keep_from = step - WINDOW;
+            samples.retain(|s| s.step >= keep_from);
+        });
+    }
+
+    pub fn extract(state: &GameState, me: i32) -> [f32; DIM] {
+        let core = summary_features_v8::extract(state, me);
+        let current = metrics(&core);
+        let step = state.step as f32;
+        let tempo = HISTORY.with(|cell| {
+            let history = cell.borrow();
+            let samples = history.get(&me).map(|v| v.as_slice()).unwrap_or(&[]);
+            tempo_from_samples(samples, step, current)
+        });
+        let mut out = [0f32; DIM];
+        out[..summary_features_v8::DIM].copy_from_slice(&core);
+        out[summary_features_v8::DIM..].copy_from_slice(&tempo);
         out
     }
 }

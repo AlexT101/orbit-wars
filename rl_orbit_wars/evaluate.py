@@ -10,7 +10,14 @@ import torch
 from torch.distributions import Categorical
 
 from orbit_wars_rl.env import OrbitWarsDuelEnv
-from orbit_wars_rl.features import decode_move, encode_obs
+from orbit_wars_rl.features import (
+    DEFAULT_MAX_LAUNCHES_PER_TURN,
+    DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN,
+    decode_action_index,
+    decode_move,
+    encode_obs,
+    remaining_ships_by_slot,
+)
 from orbit_wars_rl.model import build_policy, tensorize
 
 
@@ -48,23 +55,57 @@ def load_policy(path: str, device: str):
         config.get("transformer_heads", 4),
     ).to(device)
     model.load_state_dict(ckpt["model"])
+    model._max_launches_per_turn = int(
+        config.get("max_launches_per_turn", DEFAULT_MAX_LAUNCHES_PER_TURN)
+    )
+    model._multi_launch_logit_margin = float(
+        config.get("multi_launch_logit_margin", DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN)
+    )
     model.eval()
     return model
 
 
-def choose_action(model, obs, device: str, deterministic: bool) -> int:
+def threshold_moves_from_logits(obs, raw_logits, action_mask, max_launches: int, logit_margin: float):
+    remaining = remaining_ships_by_slot(obs)
+    threshold = float(raw_logits[0].item()) + float(logit_margin)
+    valid = torch.as_tensor(action_mask, dtype=torch.bool, device=raw_logits.device)
+    candidate_mask = valid & (raw_logits >= threshold)
+    candidate_mask[0] = False
+    candidates = torch.nonzero(candidate_mask, as_tuple=False).flatten().tolist()
+    ranked = sorted((int(i) for i in candidates), key=lambda i: float(raw_logits[i].item()), reverse=True)
+    moves: list[list[float]] = []
+    for action in ranked:
+        if len(moves) >= max(1, int(max_launches)):
+            break
+        move = decode_move(obs, action, remaining)
+        if not move:
+            continue
+        moves.extend(move)
+        decoded = decode_action_index(action)
+        assert decoded is not None
+        source_slot, _target_slot, _send_bin = decoded
+        remaining[source_slot] = max(0, remaining[source_slot] - int(move[0][2]))
+    return moves
+
+
+def choose_moves(model, obs, device: str, deterministic: bool) -> list[list[float]]:
     encoded = encode_obs(obs)
     batch = tensorize(encoded, device)
+    max_launches = max(1, int(getattr(model, "_max_launches_per_turn", DEFAULT_MAX_LAUNCHES_PER_TURN)))
+    logit_margin = float(getattr(model, "_multi_launch_logit_margin", DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN))
     with torch.no_grad():
         logits, _value = model(**batch)
-        if deterministic:
-            return int(torch.argmax(logits, dim=-1).item())
-        return int(Categorical(logits=logits).sample().item())
+        moves = threshold_moves_from_logits(obs, logits[0], encoded.action_mask, max_launches, logit_margin)
+        if not deterministic and not moves:
+            action = int(Categorical(logits=logits).sample().item())
+            if action > 0:
+                moves = decode_move(obs, action, remaining_ships_by_slot(obs))
+    return moves
 
 
 def policy_opponent(model, device: str, sample: bool):
     def opponent(obs):
-        return decode_move(obs, choose_action(model, obs, device, deterministic=not sample))
+        return choose_moves(model, obs, device, deterministic=not sample)
 
     return opponent
 
@@ -102,8 +143,8 @@ def eval_one_game(seed: int) -> list[float]:
     done = False
     result = None
     while not done:
-        action = choose_action(_WORKER_MODEL, obs, _WORKER_DEVICE, deterministic=not _WORKER_SAMPLE)
-        result = env.step(action)
+        moves = choose_moves(_WORKER_MODEL, obs, _WORKER_DEVICE, deterministic=not _WORKER_SAMPLE)
+        result = env.step_moves(moves)
         obs = result.obs
         done = result.done
     assert result is not None

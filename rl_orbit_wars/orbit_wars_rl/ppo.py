@@ -12,7 +12,17 @@ from torch.distributions import Categorical
 from torch.nn import functional as F
 
 from .env import OrbitWarsDuelEnv, RewardWeights
-from .features import ACTION_DIM, MAX_PLANETS, SEND_FRACTIONS, decode_action_index, decode_move, encode_obs
+from .features import (
+    ACTION_DIM,
+    DEFAULT_MAX_LAUNCHES_PER_TURN,
+    DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN,
+    MAX_PLANETS,
+    SEND_FRACTIONS,
+    decode_action_index,
+    decode_move,
+    encode_obs,
+    remaining_ships_by_slot,
+)
 from .model import OrbitPolicy, build_policy
 from .visualization import append_jsonl, write_training_report
 
@@ -66,6 +76,8 @@ class PPOConfig:
     transformer_heads: int = 4
     lr_warmup_steps: int = 0
     lr_schedule: str = "linear"
+    max_launches_per_turn: int = DEFAULT_MAX_LAUNCHES_PER_TURN
+    multi_launch_logit_margin: float = DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN
 
 
 def _last_jsonl(path: Path) -> dict:
@@ -107,21 +119,81 @@ def _stack_encoded(items, device):
     }
 
 
-def _sample_action(model, encoded, device):
+def _threshold_moves_from_logits(
+    obs,
+    raw_logits: torch.Tensor,
+    action_mask: np.ndarray,
+    max_launches_per_turn: int,
+    logit_margin: float,
+    include_actions: list[int] | None = None,
+) -> tuple[list[list[float]], list[int]]:
+    remaining = remaining_ships_by_slot(obs)
+    moves: list[list[float]] = []
+    selected_actions: list[int] = []
+    max_launches = max(1, int(max_launches_per_turn))
+    threshold = float(raw_logits[0].item()) + float(logit_margin)
+
+    valid = torch.as_tensor(action_mask, dtype=torch.bool, device=raw_logits.device)
+    candidate_mask = valid & (raw_logits >= threshold)
+    candidate_mask[0] = False
+    candidates = set(int(i) for i in torch.nonzero(candidate_mask, as_tuple=False).flatten().tolist())
+    for action in include_actions or []:
+        if action > 0 and action < len(action_mask) and bool(action_mask[action]):
+            candidates.add(int(action))
+
+    ranked = sorted(candidates, key=lambda i: float(raw_logits[i].item()), reverse=True)
+    for action in ranked:
+        if len(moves) >= max_launches:
+            break
+        move = decode_move(obs, action, remaining)
+        if not move:
+            continue
+        moves.extend(move)
+        selected_actions.append(action)
+        decoded = decode_action_index(action)
+        assert decoded is not None
+        source_slot, _target_slot, _send_bin = decoded
+        remaining[source_slot] = max(0, remaining[source_slot] - int(move[0][2]))
+    return moves, selected_actions
+
+
+def _sample_turn_action(model, encoded, obs, device, max_launches_per_turn: int, logit_margin: float):
     batch = _stack_encoded([encoded], device)
     with torch.no_grad():
         logits, value = model(**batch)
         dist = Categorical(logits=logits)
-        action = dist.sample()
-    return int(action.item()), float(dist.log_prob(action).item()), float(value.item())
+        action_t = dist.sample()
+        action = int(action_t.item())
+        moves, selected_actions = _threshold_moves_from_logits(
+            obs,
+            logits[0],
+            encoded.action_mask,
+            max_launches_per_turn,
+            logit_margin,
+            include_actions=[action],
+        )
+    return action, moves, selected_actions, float(dist.log_prob(action_t).item()), float(value.item())
 
 
-def _greedy_action(model, obs, device) -> int:
+def _greedy_turn_action(
+    model,
+    obs,
+    device,
+    max_launches_per_turn: int,
+    logit_margin: float,
+) -> list[list[float]]:
     encoded = encode_obs(obs)
     batch = _stack_encoded([encoded], device)
     with torch.no_grad():
         logits, _value = model(**batch)
-    return int(torch.argmax(logits, dim=-1).item())
+    moves, _selected_actions = _threshold_moves_from_logits(
+        obs,
+        logits[0],
+        encoded.action_mask,
+        max_launches_per_turn,
+        logit_margin,
+    )
+    return moves
 
 
 def _scheduled_lr(base_lr: float, progress: float, step_delta: int, warmup_steps: int, schedule: str) -> float:
@@ -174,6 +246,7 @@ def _format_train_metrics(metrics: dict, opponent_names: list[str]) -> str:
     ev = float(metrics.get("explained_var", 0.0) or 0.0)
     reward = float(metrics.get("reward_mean", 0.0) or 0.0)
     launch = float(metrics.get("launch_rate", 0.0) or 0.0)
+    avg_launches = float(metrics.get("avg_launches_per_turn", 0.0) or 0.0)
     entropy_launch = float(metrics.get("entropy_launch", 0.0) or 0.0)
     wr_parts = []
     for name in opponent_names:
@@ -193,7 +266,7 @@ def _format_train_metrics(metrics: dict, opponent_names: list[str]) -> str:
         f"r={reward:+.4f} "
         f"wr[{wr_text}] "
         f"sps={float(metrics.get('sps', 0.0) or 0.0):.1f} "
-        f"launch={launch:.0%} "
+        f"launch={launch:.0%}/{avg_launches:.2f} "
         f"Hlaunch={entropy_launch:.3f} "
         f"clip={_c(f'{clip:.3f}', clip_color)} "
         f"ev={_c(f'{ev:.3f}', ev_color)} "
@@ -221,14 +294,19 @@ def _format_eval_metrics(eval_metrics: dict) -> str:
 def _policy_opponent(model: OrbitPolicy, device, sample: bool = False):
     def opponent(obs):
         encoded = encode_obs(obs)
-        batch = _stack_encoded([encoded], device)
-        with torch.no_grad():
-            logits, _value = model(**batch)
-            if sample:
-                action = Categorical(logits=logits).sample()
-            else:
-                action = torch.argmax(logits, dim=-1)
-        return decode_move(obs, int(action.item()))
+        max_launches = int(getattr(model, "_max_launches_per_turn", DEFAULT_MAX_LAUNCHES_PER_TURN))
+        logit_margin = float(getattr(model, "_multi_launch_logit_margin", DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN))
+        if sample:
+            _action, moves, _selected_actions, _logprob, _value = _sample_turn_action(
+                model,
+                encoded,
+                obs,
+                device,
+                max_launches,
+                logit_margin,
+            )
+            return moves
+        return _greedy_turn_action(model, obs, device, max_launches, logit_margin)
 
     return opponent
 
@@ -245,6 +323,8 @@ def _model_from_state(state: dict[str, torch.Tensor], device, config: PPOConfig)
         config.transformer_heads,
     ).to(device)
     model.load_state_dict(state)
+    model._max_launches_per_turn = config.max_launches_per_turn
+    model._multi_launch_logit_margin = config.multi_launch_logit_margin
     model.eval()
     return model
 
@@ -259,6 +339,12 @@ def _checkpoint_opponent(path: str, device, sample: bool = False):
         ckpt_config.get("transformer_heads", 4),
     ).to(device)
     model.load_state_dict(ckpt["model"])
+    model._max_launches_per_turn = int(
+        ckpt_config.get("max_launches_per_turn", DEFAULT_MAX_LAUNCHES_PER_TURN)
+    )
+    model._multi_launch_logit_margin = float(
+        ckpt_config.get("multi_launch_logit_margin", DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN)
+    )
     model.eval()
     return _policy_opponent(model, device, sample=sample)
 
@@ -291,8 +377,14 @@ def evaluate_policy(
         done = False
         result = None
         while not done:
-            action = _greedy_action(model, obs, device)
-            result = env.step(action)
+            moves = _greedy_turn_action(
+                model,
+                obs,
+                device,
+                int(getattr(model, "_max_launches_per_turn", DEFAULT_MAX_LAUNCHES_PER_TURN)),
+                float(getattr(model, "_multi_launch_logit_margin", DEFAULT_MULTI_LAUNCH_LOGIT_MARGIN)),
+            )
+            result = env.step_moves(moves)
             obs = result.obs
             done = result.done
         assert result is not None
@@ -481,20 +573,33 @@ def train(config: PPOConfig) -> Path:
         done_buf = []
         value_buf = []
         component_sums: dict[str, float] = {}
-        noop_count = 0
+        no_launch_turn_count = 0
+        turn_with_launch_count = 0
         launch_count = 0
         send_bin_sum = 0.0
 
         for _ in range(config.rollout_steps):
             encoded = encode_obs(obs)
-            action, logprob, value = _sample_action(model, encoded, device)
-            decoded_action = decode_action_index(action)
-            if decoded_action is None:
-                noop_count += 1
-            else:
+            action, moves, selected_actions, logprob, value = _sample_turn_action(
+                model,
+                encoded,
+                obs,
+                device,
+                config.max_launches_per_turn,
+                config.multi_launch_logit_margin,
+            )
+            launches_this_turn = 0
+            for selected_action in selected_actions:
+                launches_this_turn += 1
                 launch_count += 1
-                send_bin_sum += decoded_action[2]
-            result = env.step(action)
+                decoded_action = decode_action_index(selected_action)
+                if decoded_action is not None:
+                    send_bin_sum += decoded_action[2]
+            if launches_this_turn:
+                turn_with_launch_count += 1
+            else:
+                no_launch_turn_count += 1
+            result = env.step_moves(moves)
             encoded_buf.append(encoded)
             action_buf.append(action)
             logprob_buf.append(logprob)
@@ -629,7 +734,7 @@ def train(config: PPOConfig) -> Path:
             last_stats["clip_frac"] = float(((ratio - 1.0).abs() > config.clip_coef).float().mean().item())
             last_stats["approx_kl"] = float(((ratio - 1.0) - logratio).mean().item())
             last_stats["value_loss"] = float(F.mse_loss(values_t, ret).item())
-            last_stats.update(_component_entropies(logits))
+            last_stats.update(_component_entropies(logits.masked_fill(~batch["action_mask"], -1e9)))
 
         mean_return = float(np.mean(recent_returns)) if recent_returns else episode_return
         session_steps = global_step - start_global_step if is_resume else global_step
@@ -664,8 +769,9 @@ def train(config: PPOConfig) -> Path:
             "sps": round(sps, 1),
             "explained_var": round(explained_var, 6),
             "reward_mean": round(float(np.mean(reward_buf)), 6),
-            "noop_rate": round(noop_count / max(1, len(action_buf)), 6),
-            "launch_rate": round(launch_count / max(1, len(action_buf)), 6),
+            "noop_rate": round(no_launch_turn_count / max(1, len(action_buf)), 6),
+            "launch_rate": round(turn_with_launch_count / max(1, len(action_buf)), 6),
+            "avg_launches_per_turn": round(launch_count / max(1, len(action_buf)), 6),
             "avg_send_bin": round(send_bin_sum / max(1, launch_count), 6),
             **{k: round(v, 6) for k, v in last_stats.items()},
             **reward_components,

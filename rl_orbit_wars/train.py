@@ -21,6 +21,18 @@ def main() -> int:
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-schedule", choices=["linear", "cosine", "constant"], default="linear")
     parser.add_argument(
+        "--max-launches-per-turn",
+        type=int,
+        default=4,
+        help="Maximum threshold-selected fleet launches emitted by the RL policy on one game turn.",
+    )
+    parser.add_argument(
+        "--multi-launch-logit-margin",
+        type=float,
+        default=0.0,
+        help="Emit valid launches whose logit is at least noop_logit plus this margin.",
+    )
+    parser.add_argument(
         "--opponent",
         default="nearest",
         help=(
@@ -74,6 +86,8 @@ def main() -> int:
         transformer_heads=args.transformer_heads,
         lr_warmup_steps=args.lr_warmup_steps,
         lr_schedule=args.lr_schedule,
+        max_launches_per_turn=args.max_launches_per_turn,
+        multi_launch_logit_margin=args.multi_launch_logit_margin,
         opponent=args.opponent,
         device=args.device,
         seed=args.seed,

@@ -7,7 +7,7 @@ This is a deliberately small PPO setup for getting RL signs of life before spend
 - Two-player Orbit Wars only.
 - Player 0 is the learned policy.
 - Player 1 is cycled by episode through the comma-separated opponent pool you pass to the trainer.
-- The action space is one launch per turn: `noop` or `(source planet, target planet, send fraction)`.
+- The policy head scores `noop` plus `(source planet, target planet, send fraction)` actions. At inference time one forward pass can emit multiple fleet launches whose logits clear the noop threshold.
 - The default model is an entity-pair MLP with masking. `--model entity_transformer` enables a small planet-token transformer.
 
 ## Feature Schema
@@ -27,11 +27,11 @@ Global features contain step, angular velocity, score/production/planet shares, 
 
 ## Reward Function
 
-The default training reward is now the clean two-player objective: `terminal`, meaning `+1` for a win, `-1` for a loss, and `0` during the episode. This follows the community note that `+1/-1` is enough for 2p mode, especially after a behavior-cloning warm start.
+The default training reward is now the two-player objective: `terminal`, meaning win/loss at game end plus a small faster-win/slower-loss bonus. This follows the community note that win/loss is enough for 2p mode, especially after a behavior-cloning warm start.
 
 You can still run reward-shaping experiments with `--reward-mode`:
 
-- `terminal`: win/loss only.
+- `terminal`: win/loss plus the small terminal-time bonus.
 - `terminal_score`: compatibility alias for terminal-style reward; no final margin is added.
 - `score_delta`: terminal reward plus positive-only own score increase.
 - `shaped`: all shaping terms below.
@@ -79,6 +79,57 @@ python3 rl_orbit_wars/pretrain_bc.py \
   --out rl_orbit_wars/checkpoints/bc_apollo.pt
 ```
 
+## Replay Imitation + Inverse RL
+
+`imitation_irl.py` trains from Kaggle replay JSONs instead of calling a local teacher. By default it looks in the alphaow replay manifests/cache under `bots/mine/alphaow_transformer/train`, scans cached player win rates, picks the top cached agent, learns multi-launch labels with a sampled multi-label policy loss, and also saves a contrastive inverse-RL reward model that scores expert state-action pairs above valid alternatives.
+
+```bash
+python3 rl_orbit_wars/imitation_irl.py \
+  --samples 50000 \
+  --epochs 8 \
+  --model entity_transformer \
+  --hidden 128 \
+  --target-mode top-agent \
+  --out rl_orbit_wars/checkpoints/irl_policy.pt \
+  --reward-out rl_orbit_wars/checkpoints/irl_reward.pt
+```
+
+If the cache is missing, let it reuse the KaggleHub dataset list from `bots/alphaow_experimental/prometheus/train/manifest.csv`:
+
+```bash
+python3 rl_orbit_wars/imitation_irl.py \
+  --download-from-alphaow-manifest \
+  --start-date 2026-05-26 \
+  --end-date 2026-05-28 \
+  --samples 50000 \
+  --out rl_orbit_wars/checkpoints/irl_policy.pt \
+  --reward-out rl_orbit_wars/checkpoints/irl_reward.pt
+```
+
+To pin the exact cached #1-style teacher from the current replay scan, use the replay agent name directly:
+
+```bash
+python3 rl_orbit_wars/imitation_irl.py \
+  --target-mode agent-name \
+  --target-name "Isaiah @ Tufa Labs" \
+  --samples 50000 \
+  --out rl_orbit_wars/checkpoints/irl_policy_isaiah.pt \
+  --reward-out rl_orbit_wars/checkpoints/irl_reward_isaiah.pt
+```
+
+The policy checkpoint can warm-start PPO the same way as normal BC:
+
+```bash
+python3 rl_orbit_wars/train.py \
+  --total-steps 100000 \
+  --rollout-steps 512 \
+  --model entity_transformer \
+  --opponent nearest,hellburner,heuristic,snapshot_sample \
+  --reward-mode terminal \
+  --init-checkpoint rl_orbit_wars/checkpoints/irl_policy.pt \
+  --checkpoint-dir rl_orbit_wars/checkpoints_irl_terminal
+```
+
 Then fine-tune with PPO:
 
 ```bash
@@ -104,7 +155,7 @@ python3 rl_orbit_wars/train.py \
   --snapshot-every-updates 25 \
   --snapshot-pool-size 4 \
   --eval-opponents random,nearest,baselines/starter,hellburner,heuristic,self \
-  --reward-mode terminal_score \
+  --reward-mode terminal \
   --init-checkpoint rl_orbit_wars/checkpoints/bc_hellburner.pt \
   --checkpoint-dir rl_orbit_wars/checkpoints_mixed_snapshots
 ```
@@ -139,7 +190,7 @@ python3 rl_orbit_wars/train.py \
   --snapshot-every-updates 25 \
   --snapshot-pool-size 4 \
   --eval-opponents random,nearest,baselines/starter,hellburner,heuristic,self \
-  --reward-mode terminal_score \
+  --reward-mode terminal \
   --init-checkpoint rl_orbit_wars/checkpoints/bc_hellburner_transformer.pt \
   --checkpoint-dir rl_orbit_wars/checkpoints_transformer_v1
 ```
@@ -167,11 +218,11 @@ It refreshes every 5 seconds and shows return, reward components, PPO health, ac
 
 ## Overnight Curriculum
 
-Use the curriculum runner to train against harder and harder bots from the rating ladder. It starts with only `random`, `nearest`, and `baselines/starter`, ignores `mine/apollo_backup`, and promotes to the next rating band only when every gate bot clears the current win-rate threshold. The threshold starts strict (`0.98`) for starter bots and decays toward `0.65` for later phases.
+Use the curriculum runner to train against harder and harder bots from the rating ladder. It uses `terminal` reward for every phase, starts with only `random`, `nearest`, and `baselines/starter`, ignores `mine/apollo_backup`, and promotes to the next rating band only when every gate bot clears the current win-rate threshold. The threshold starts strict (`0.98`) for starter bots and decays toward `0.65` for later phases.
 
 ```bash
 python3 rl_orbit_wars/curriculum_train.py \
-  --checkpoint-dir rl_orbit_wars/checkpoints_curriculum \
+  --checkpoint-dir rl_orbit_wars/checkpoints_curriculum_terminal \
   --init-checkpoint rl_orbit_wars/checkpoints/bc_hellburner_transformer.pt \
   --total-budget-steps 300000 \
   --chunk-steps 10000 \
@@ -180,7 +231,7 @@ python3 rl_orbit_wars/curriculum_train.py \
   --gate-games 16
 ```
 
-The runner writes `curriculum_config.json`, `curriculum_state.json`, and `curriculum_events.jsonl` into the checkpoint directory. Re-running the same command resumes from `latest.pt` and the saved curriculum phase.
+The runner writes `curriculum_config.json`, `curriculum_state.json`, and `curriculum_events.jsonl` into the checkpoint directory. Re-running the same command resumes from `latest.pt` and the saved curriculum phase. Use a fresh checkpoint directory when changing reward modes.
 Trainer-side eval is disabled by default inside chunks; promotion is handled by the curriculum gate after each chunk.
 
 For the default overnight setup, this wrapper is equivalent:
@@ -218,7 +269,7 @@ python3 run_match.py rl_ppo nearest-sniper --kaggle --seed 42
 
 ## Next Useful Upgrades
 
-- Add multi-action turns by sampling repeated masked launches until `noop`.
+- Feed the learned IRL reward model into PPO as an optional auxiliary reward.
 - Add target ETA features directly into the action/pair head.
 - Port the wrapper to the Rust engine once `orbit_wars_rust` is built locally.
-- Only then try a tiny entity transformer, with LR warmup/decay and per-head entropy logging.
+- Keep tuning the entity transformer with LR warmup/decay and per-head entropy logging.

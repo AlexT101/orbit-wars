@@ -138,7 +138,7 @@ def make_phases(
             "starter",
             ladder[: len(START_BOTS)],
             ladder[: len(START_BOTS)],
-            "shaped",
+            "terminal",
         )
     ]
     phase_index = 1
@@ -148,18 +148,12 @@ def make_phases(
         carry_start = max(0, start - carry)
         gates = ladder[start:end]
         train = ladder[carry_start:end]
-        if phase_index <= 2:
-            reward_mode = "shaped"
-        elif phase_index <= 4:
-            reward_mode = "score_delta"
-        else:
-            reward_mode = "terminal"
         phase_specs.append(
             (
                 f"rating_{int(gates[0].mu)}_{int(gates[-1].mu)}",
                 train,
                 gates,
-                reward_mode,
+                "terminal",
             )
         )
         phase_index += 1

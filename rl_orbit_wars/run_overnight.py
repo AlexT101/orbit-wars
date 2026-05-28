@@ -9,7 +9,7 @@ if __name__ == "__main__":
     sys.argv = [
         sys.argv[0],
         "--checkpoint-dir",
-        "rl_orbit_wars/checkpoints_curriculum",
+        "rl_orbit_wars/checkpoints_curriculum_terminal",
         "--init-checkpoint",
         "rl_orbit_wars/checkpoints/bc_hellburner_transformer.pt",
         "--total-budget-steps",

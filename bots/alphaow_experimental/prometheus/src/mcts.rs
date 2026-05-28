@@ -151,12 +151,11 @@ fn evaluate(state: &GameState, me: i32) -> f64 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(15);
     let mut s = state.clone();
-    let mut rng = XorRng(0xdeadbeef ^ (s.step as u64));
     for _ in 0..lookahead {
         if alive_players(&s) <= 1 || s.step >= TERMINAL_STEP {
             break;
         }
-        crate::sim::tick(&mut s, &mut rng);
+        tick(&mut s);
     }
     raw_score(&s, me)
 }
@@ -260,21 +259,21 @@ fn raw_score_legacy(state: &GameState, me: i32) -> f64 {
 /// Rollout-only noise amount, scaled to eval range ~[-1, 1]. Adds random
 /// jitter to the final value so MCTS sees variance across iterations
 /// targeting the same subtree (helpful for exploration when rollouts are
-/// deterministic given state). Default 0.05; tunable via OW_ROLLOUT_NOISE.
+/// deterministic given state). Default off; tunable via OW_ROLLOUT_NOISE.
 fn rollout_noise_amount() -> f64 {
     std::env::var("OW_ROLLOUT_NOISE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0.05)
+        .unwrap_or(0.0)
 }
 
 fn rollout(mut state: GameState, me: i32, rng: &mut XorRng, _depth: i64) -> f64 {
     // Rollout policy mode set by OW_ROLLOUT env:
     //   "none"      — no rollout, just evaluate the leaf
     //   "fast"      — old fast sampler
-    //   "ow2_short" — ow2_plan for ~3 steps then evaluate (default)
+    //   "ow2_short" — ow2_plan for ~3 steps then evaluate
     //   "ow2_full"  — ow2_plan for N steps (slow, accurate)
-    let mode = std::env::var("OW_ROLLOUT").unwrap_or_else(|_| "ow2_full".to_string());
+    let mode = std::env::var("OW_ROLLOUT").unwrap_or_else(|_| "none".to_string());
     let depth: i64 = std::env::var("OW_ROLLOUT_DEPTH")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -337,7 +336,7 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng, _depth: i64) -> f64 
         };
         apply_launches(&mut state, &my_act);
         apply_launches(&mut state, &opp_act);
-        tick(&mut state, rng);
+        tick(&mut state);
     }
     let v = evaluate(&state, me);
     // Add small noise ONLY to rollout-returned values (not to terminal-state
@@ -516,7 +515,7 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng) -> f64 {
                 let mut s = node.state.clone();
                 apply_launches(&mut s, my_action);
                 apply_launches(&mut s, &action);
-                tick(&mut s, rng);
+                tick(&mut s);
                 (s, NodeKind::MyTurn)
             }
         };
@@ -531,7 +530,7 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng) -> f64 {
                     let opp_act = crate::ow2_plan::plan(&s, o, nc);
                     apply_launches(&mut s, &opp_act);
                 }
-                tick(&mut s, rng);
+                tick(&mut s);
                 s
             }
         };

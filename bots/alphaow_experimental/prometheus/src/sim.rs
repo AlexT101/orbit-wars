@@ -2,104 +2,13 @@
 //! launches → production → fleet movement (swept-pair collisions) → planet
 //! /comet movement → combat resolution → comet expiration.
 //!
-//! Comet *spawning* (at steps 50/150/.../450) is omitted because we don't
-//! have the RNG; this drifts from reality after the first spawn but is
-//! acceptable for MCTS rollouts per the user.
+//! Comet *spawning* (at steps 50/150/.../450) is RNG-driven in the real engine
+//! and its location is unobservable from a game state, so forward simulation
+//! deliberately does not attempt it.
 
 use crate::pathing::{fleet_speed, point_to_segment_distance, swept_pair_hit};
-use crate::policy::XorRng;
-use crate::{
-    CometGroup, Fleet, GameState, Planet, BOARD_SIZE, CENTER_X, CENTER_Y, COMET_PRODUCTION,
-    COMET_RADIUS, SUN_RADIUS,
-};
+use crate::{Fleet, GameState, BOARD_SIZE, CENTER_X, CENTER_Y, SUN_RADIUS};
 use std::collections::HashMap;
-use std::sync::OnceLock;
-
-const SPAWN_STEPS: &[i64] = &[50, 150, 250, 350, 450];
-const HARVEST_JSON: &[u8] = include_bytes!("../comet_harvest.json");
-
-#[derive(Clone)]
-struct HarvestedComet {
-    path: Vec<(f64, f64)>,
-    ships: i64,
-}
-
-fn harvest() -> &'static HashMap<i64, Vec<Vec<HarvestedComet>>> {
-    static M: OnceLock<HashMap<i64, Vec<Vec<HarvestedComet>>>> = OnceLock::new();
-    M.get_or_init(|| {
-        let v: serde_json::Value = serde_json::from_slice(HARVEST_JSON).unwrap_or(serde_json::Value::Null);
-        let mut out: HashMap<i64, Vec<Vec<HarvestedComet>>> = HashMap::new();
-        if let serde_json::Value::Object(map) = v {
-            for (k, groups) in map {
-                let step: i64 = match k.parse() { Ok(n) => n, Err(_) => continue };
-                if let serde_json::Value::Array(arr) = groups {
-                    let mut list: Vec<Vec<HarvestedComet>> = Vec::new();
-                    for g in arr {
-                        let comets = match g.as_array() { Some(a) => a, None => continue };
-                        let mut hg: Vec<HarvestedComet> = Vec::with_capacity(4);
-                        for c in comets {
-                            let path = match c.get("path").and_then(|p| p.as_array()) {
-                                Some(a) => a.iter().filter_map(|pt| {
-                                    let p = pt.as_array()?;
-                                    Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?))
-                                }).collect(),
-                                None => continue,
-                            };
-                            let ships = c.get("ships").and_then(|s| s.as_i64()).unwrap_or(1);
-                            hg.push(HarvestedComet { path, ships });
-                        }
-                        if !hg.is_empty() {
-                            list.push(hg);
-                        }
-                    }
-                    out.insert(step, list);
-                }
-            }
-        }
-        out
-    })
-}
-
-pub fn maybe_spawn_comets(state: &mut GameState, rng: &mut XorRng) {
-    let next_step = state.step + 1;
-    if !SPAWN_STEPS.contains(&next_step) {
-        return;
-    }
-    let h = harvest();
-    let groups = match h.get(&next_step) {
-        Some(g) if !g.is_empty() => g,
-        _ => return,
-    };
-    let idx = (rng.next_u64() % groups.len() as u64) as usize;
-    let chosen = &groups[idx];
-    let mut next_id = state.planets.iter().map(|p| p.id).max().unwrap_or(-1) + 1;
-    let mut group_ids: Vec<i64> = Vec::with_capacity(chosen.len());
-    let mut paths: Vec<Vec<(f64, f64)>> = Vec::with_capacity(chosen.len());
-    for c in chosen {
-        let pid = next_id;
-        next_id += 1;
-        group_ids.push(pid);
-        paths.push(c.path.clone());
-        state.planets.push(Planet {
-            id: pid,
-            owner: -1,
-            x: -99.0,
-            y: -99.0,
-            radius: COMET_RADIUS,
-            ships: c.ships,
-            production: COMET_PRODUCTION,
-            orbital_radius: 0.0,
-            initial_angle: 0.0,
-            is_orbiting: false,
-            is_comet: true,
-        });
-    }
-    state.comets.push(CometGroup {
-        planet_ids: group_ids,
-        paths,
-        path_index: -1,
-    });
-}
 
 /// (source_planet_id, angle, ships, owner).
 pub type Action = (i64, f64, i64, i32);
@@ -136,23 +45,12 @@ pub fn apply_launches(state: &mut GameState, actions: &[Action]) {
 }
 
 /// Advance state by one engine turn (after launches have already been applied).
-/// `rng` is used for sampling future comet spawns from harvest data.
-pub fn tick(state: &mut GameState, rng: &mut XorRng) {
-    tick_inner(state, rng, true);
-}
-
-/// Like `tick` but never spawns comets (used by the sim validator).
-pub fn tick_no_spawn(state: &mut GameState, rng: &mut XorRng) {
-    tick_inner(state, rng, false);
-}
-
-fn tick_inner(state: &mut GameState, rng: &mut XorRng, do_spawn: bool) {
-    // 0. Comet spawning (sampled from harvest). Engine does this BEFORE
-    // launches in real games; we accept the order swap since agents can't
-    // launch at not-yet-spawned comets anyway.
-    if do_spawn {
-        maybe_spawn_comets(state, rng);
-    }
+///
+/// Comet-free and fully deterministic: the real engine spawns new comets at
+/// fixed steps but at RNG-determined, unobservable locations, so forward
+/// simulation never invents them (see module docs). Comets already on the board
+/// still move and expire.
+pub fn tick(state: &mut GameState) {
     // 1. Production
     for p in state.planets.iter_mut() {
         if p.owner != -1 {

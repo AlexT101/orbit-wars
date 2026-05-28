@@ -21,6 +21,8 @@ PLANET_FEATURES = 26
 GLOBAL_FEATURES = 18
 ACTION_DIM = 1 + MAX_PLANETS * MAX_PLANETS * len(SEND_FRACTIONS)
 ACTION_TARGET_LIMIT_PER_SOURCE = 16
+MAX_LAUNCHES_PER_TURN = 4
+MULTI_LAUNCH_LOGIT_MARGIN = 0.0
 
 
 def _get(obs, key, default=None):
@@ -332,6 +334,44 @@ def _candidate_target_slots(raw_planets, source_slot, player, incoming=None, lim
     return [i for _score, i in scored[:limit]]
 
 
+def _incoming_by_planet(obs, raw_planets, player):
+    incoming = {int(p[0]): [0.0, 0.0] for p in raw_planets[:MAX_PLANETS]}
+    for f in list(_get(obs, "fleets", []) or [])[:128]:
+        target_id = _predict_fleet_target(obs, f, raw_planets[:MAX_PLANETS])
+        if target_id is None or target_id not in incoming:
+            continue
+        if int(f[1]) == player:
+            incoming[target_id][0] += float(f[6])
+        else:
+            incoming[target_id][1] += float(f[6])
+    return incoming
+
+
+def _remaining(obs):
+    return [max(0, int(float(p[5]))) for p in list(_get(obs, "planets", []) or [])[:MAX_PLANETS]]
+
+
+def _action_mask_for_remaining(obs, remaining):
+    player = int(_get(obs, "player", 0))
+    raw_planets = list(_get(obs, "planets", []) or [])
+    incoming = _incoming_by_planet(obs, raw_planets, player)
+    action_mask = np.zeros(ACTION_DIM, dtype=np.bool_)
+    action_mask[0] = True
+    n = min(len(raw_planets), MAX_PLANETS)
+    for s in range(n):
+        src = raw_planets[s]
+        available = int(remaining[s]) if s < len(remaining) else 0
+        if int(src[1]) != player or available <= 1:
+            continue
+        for t in _candidate_target_slots(raw_planets, s, player, incoming):
+            tgt = raw_planets[t]
+            for b in range(len(SEND_FRACTIONS)):
+                ships = min(available, max(1, int(available * SEND_FRACTIONS[b])))
+                if ships > 0 and _dir_to_hit(obs, src, tgt, ships) is not None:
+                    action_mask[_action_index(s, t, b)] = True
+    return action_mask
+
+
 def _encode(obs):
     player = int(_get(obs, "player", 0))
     step = int(_get(obs, "step", 0) or 0)
@@ -445,7 +485,7 @@ def _encode(obs):
     return planets, mask, globals_, action_mask
 
 
-def _move(obs, index):
+def _move(obs, index, remaining=None):
     decoded = _decode(int(index))
     if decoded is None:
         return []
@@ -455,14 +495,40 @@ def _move(obs, index):
         return []
     player = int(_get(obs, "player", 0))
     src, tgt = raw_planets[s], raw_planets[t]
-    if int(src[1]) != player or s == t or int(src[5]) <= 1:
+    available = int(remaining[s]) if remaining is not None and s < len(remaining) else int(float(src[5]))
+    if int(src[1]) != player or s == t or available <= 1:
         return []
-    ships = min(int(src[5]), max(1, int(float(src[5]) * SEND_FRACTIONS[b])))
+    ships = min(available, max(1, int(available * SEND_FRACTIONS[b])))
     path = _dir_to_hit(obs, src, tgt, ships)
     if path is None:
         return []
     angle = path[0]
     return [[int(src[0]), angle, ships]]
+
+
+def _turn_moves(obs, logits, first_mask):
+    remaining = _remaining(obs)
+    moves = []
+    raw_logits = logits[0]
+    threshold = float(raw_logits[0].item()) + float(MULTI_LAUNCH_LOGIT_MARGIN)
+    valid = torch.as_tensor(first_mask, dtype=torch.bool)
+    candidate_mask = valid & (raw_logits >= threshold)
+    candidate_mask[0] = False
+    candidates = torch.nonzero(candidate_mask, as_tuple=False).flatten().tolist()
+    ranked = sorted((int(i) for i in candidates), key=lambda i: float(raw_logits[i].item()), reverse=True)
+    for action in ranked:
+        if len(moves) >= max(1, int(MAX_LAUNCHES_PER_TURN)):
+            break
+        move = _move(obs, action, remaining)
+        if not move:
+            continue
+        moves.extend(move)
+        decoded = _decode(action)
+        if decoded is None:
+            break
+        s, _t, _b = decoded
+        remaining[s] = max(0, remaining[s] - int(move[0][2]))
+    return moves
 
 
 class OrbitPolicy(nn.Module):
@@ -558,7 +624,6 @@ def agent(obs):
             torch.as_tensor(planets, dtype=torch.float32).unsqueeze(0),
             torch.as_tensor(mask, dtype=torch.float32).unsqueeze(0),
             torch.as_tensor(globals_, dtype=torch.float32).unsqueeze(0),
-            torch.as_tensor(action_mask, dtype=torch.bool).unsqueeze(0),
+            None,
         )
-        action = int(torch.argmax(logits, dim=-1).item())
-    return _move(obs, action)
+    return _turn_moves(obs, logits, action_mask)

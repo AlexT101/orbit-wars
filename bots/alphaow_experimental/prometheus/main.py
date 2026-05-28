@@ -9,7 +9,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import threading
 
 _PROC = None
@@ -18,7 +17,7 @@ _LOCK = threading.Lock()
 # Value net bundled with the bot. main.py points ALPHAOW_VALUE_NET_PATH here
 # when the caller hasn't set it, so a bare submission runs the trained net
 # instead of silently falling back to the duck heuristic (value_net.rs).
-_DEFAULT_VALUE_NET = "train/weights/v2_replays.bin"
+_DEFAULT_VALUE_NET = "train/weights/xgb_46p12e88t11_latest.json"
 
 
 def _here():
@@ -71,6 +70,17 @@ def _ensure():
     bin_path = _binary_path()
     _build_if_needed(bin_path)
     env = dict(os.environ)
+    # Match alphaow_newest's stable baseline: parent experiment knobs should not
+    # leak into this bot unless explicitly represented by this wrapper.
+    for k in (
+        "OW_PLANNER", "OW_PUCT_C",
+        "OW_ROLLOUT", "OW_ROLLOUT_DEPTH", "OW_ROLLOUT_REACTIVE",
+        "OW_ROLLOUT_NOISE", "OW_DUCT_ENUMERATE", "OW_NO_COOP", "OW_NO_REUSE",
+        "OW_FOCUSED_CANDIDATES", "OW_SELECTION", "OW_EXP3_ETA", "OW_EXP3_GAMMA",
+    ):
+        env.pop(k, None)
+    env["OW_ROLLOUT"] = "none"
+    env["OW_ROLLOUT_DEPTH"] = "0"
     default_net = os.path.join(_here(), _DEFAULT_VALUE_NET)
     if os.path.isfile(default_net):
         env.setdefault("ALPHAOW_VALUE_NET_PATH", default_net)
@@ -78,7 +88,7 @@ def _ensure():
         [bin_path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=sys.stderr,
+        stderr=subprocess.DEVNULL,
         cwd=_here(),
         env=env,
         bufsize=0,

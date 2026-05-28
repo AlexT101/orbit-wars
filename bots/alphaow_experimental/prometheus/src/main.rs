@@ -49,6 +49,7 @@ fn main() -> io::Result<()> {
             }
         };
         let state = parse_state(&v);
+        value_net::observe_root_state(&state);
         if let Some(f) = dump.as_mut() {
             let feats = value_net::extract_features(&state, state.player);
             let v2 = value_net::summary_features_v2::extract(&state, state.player);
