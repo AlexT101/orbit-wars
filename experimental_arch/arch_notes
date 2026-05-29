@@ -1,0 +1,62 @@
+A frame is a snapshot of game state with features at some time t.
+Let NUM_FRAMES = 4.
+I wanna have NUM_FRAMES: t, t+1, t+10, t_resolved,
+where t_resolved is the time in the future when all moving ships have resolved (landed).
+
+Let ACTIONS_DIM = 6 (subject to change).
+The actions are (25%, 50%, 75%, 100%, 42, target_planet_resolved + 1)
+where
+    25%, 50%, 75%, 100% are fractions of the planet's ship count currently.
+    42 is a constant.
+    target_planet_resolved 
+        is the number of ships required to take the planet once all moving ships have resolved,
+        if the target planet is already in ally control once ships have resolved, this action is invalid.
+
+Actions are invalid if there are insufficient ships at the source planet.
+Actions are invalid if the source planet is not under ally control.
+
+An action (i, j, count) is invalid if the trajectory caused from sending `count` ships from i to j, 
+is not "clean" - i.e. the ships don't arrive at the destination in the future - this could be
+because they intersect with another planet or intersect the sun.
+(I don't see any other reason for obstruction.)
+
+The output action space is therefore (44, 44, ACTIONS_DIM).
+Create a valid action mask. I think this mask should also be of shape (44, 44, ACTIONS_DIM).
+
+A planet token consists of information about a planet, the specifics we'll work out later.
+Pretty much stuff like:
+    * is_mine
+    * is_enemy
+    * is_neutral
+    * is_comet
+    * is_orbiting
+    * production
+    * ships
+    * dist_to_sun
+
+Each frame consists of 44 planet tokens along with an 
+asymmetric distances matrix D of dims (44, 44, ACTIONS_DIM) 
+where D[i][j][action_idx] is the number of turns required to send the ships from i to j, 
+starting at this frame. Probably we keep this number as a float instead of one hot.
+
+For invalid actions probably just leave this at 0 and let valid action mask handle it.
+So this is looking like (NUM_FRAMES, 44, 44, ACTIONS_DIM).
+
+I also think normalising stuff would be good.
+    * distances: 1/100
+    * turns: 1/20
+    * ships: log or something else
+    * production: log or something else
+
+Always validate / test to make ensure correctness. 
+
+I'm concerned about action "fractions" taking a long time to compute at test/train time
+just because there are so many equivalance classes - any suggestions on this?
+In the worst case we would have to do 44*44*ACTIONS_DIM sims to compute them. That's cooked.
+Ok so Mr Claude Opus 4.8 said it's ok - "only" 25M rust ops... let's see.
+
+
+
+
+
+

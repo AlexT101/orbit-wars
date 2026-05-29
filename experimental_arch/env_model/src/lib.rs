@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PySequence};
+
+pub mod features;
 
 const BOARD_SIZE: f64 = 100.0;
 const CENTER: f64 = BOARD_SIZE / 2.0;
@@ -20,15 +22,19 @@ const SUN_RADIUS: f64 = 10.0;
 const ROTATION_RADIUS_LIMIT: f64 = 50.0;
 const MAX_PLAYERS: usize = 4;
 
+// NOTE: these types and the `EngineState` forward model are `pub` so other
+// crates in the workspace can depend on `orbit_wars_model` as an rlib and reuse
+// the physics directly (e.g. the `graph` bot builds an `EngineState` from an
+// observation to drive its forward model). The PyO3 surface below is unchanged.
 #[derive(Clone, Debug)]
-struct Planet {
-    id: i64,
-    owner: i64,
-    x: f64,
-    y: f64,
-    radius: f64,
-    ships: i64,
-    production: i64,
+pub struct Planet {
+    pub id: i64,
+    pub owner: i64,
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+    pub ships: i64,
+    pub production: i64,
 }
 
 impl Planet {
@@ -38,14 +44,14 @@ impl Planet {
 }
 
 #[derive(Clone, Debug)]
-struct Fleet {
-    id: i64,
-    owner: i64,
-    x: f64,
-    y: f64,
-    angle: f64,
-    from_planet_id: i64,
-    ships: i64,
+pub struct Fleet {
+    pub id: i64,
+    pub owner: i64,
+    pub x: f64,
+    pub y: f64,
+    pub angle: f64,
+    pub from_planet_id: i64,
+    pub ships: i64,
 }
 
 impl Fleet {
@@ -55,16 +61,16 @@ impl Fleet {
 }
 
 #[derive(Clone, Debug)]
-struct CometGroup {
-    planet_ids: Vec<i64>,
-    paths: Vec<Vec<[f64; 2]>>,
-    path_index: i64,
+pub struct CometGroup {
+    pub planet_ids: Vec<i64>,
+    pub paths: Vec<Vec<[f64; 2]>>,
+    pub path_index: i64,
 }
 
 #[derive(Clone, Debug)]
-struct Configuration {
-    episode_steps: i64,
-    ship_speed: f64,
+pub struct Configuration {
+    pub episode_steps: i64,
+    pub ship_speed: f64,
 }
 
 impl Default for Configuration {
@@ -74,26 +80,26 @@ impl Default for Configuration {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct MoveAction {
-    from_id: i64,
-    angle: f64,
-    ships: i64,
+pub struct MoveAction {
+    pub from_id: i64,
+    pub angle: f64,
+    pub ships: i64,
 }
 
 #[derive(Clone, Debug)]
-struct EngineState {
-    step: i64,
-    angular_velocity: f64,
-    planets: Vec<Planet>,
-    initial_planets: Vec<Planet>,
-    fleets: Vec<Fleet>,
-    next_fleet_id: i64,
-    comet_planet_ids: Vec<i64>,
-    comets: Vec<CometGroup>,
-    done: bool,
-    num_players: usize,
-    configuration: Configuration,
-    planet_index_by_id: HashMap<i64, usize>,
+pub struct EngineState {
+    pub step: i64,
+    pub angular_velocity: f64,
+    pub planets: Vec<Planet>,
+    pub initial_planets: Vec<Planet>,
+    pub fleets: Vec<Fleet>,
+    pub next_fleet_id: i64,
+    pub comet_planet_ids: Vec<i64>,
+    pub comets: Vec<CometGroup>,
+    pub done: bool,
+    pub num_players: usize,
+    pub configuration: Configuration,
+    pub planet_index_by_id: HashMap<i64, usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -104,7 +110,121 @@ struct PlanetPath {
 }
 
 impl EngineState {
-    fn rebuild_planet_index(&mut self) {
+    /// Build a forward-model state from raw parts (the shape a caller gets after
+    /// parsing a kaggle observation). The planet index is built for you.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        step: i64,
+        angular_velocity: f64,
+        planets: Vec<Planet>,
+        initial_planets: Vec<Planet>,
+        fleets: Vec<Fleet>,
+        next_fleet_id: i64,
+        comet_planet_ids: Vec<i64>,
+        comets: Vec<CometGroup>,
+        num_players: usize,
+        configuration: Configuration,
+    ) -> Self {
+        let mut state = Self {
+            step,
+            angular_velocity,
+            planets,
+            initial_planets,
+            fleets,
+            next_fleet_id,
+            comet_planet_ids,
+            comets,
+            done: false,
+            num_players,
+            configuration,
+            planet_index_by_id: HashMap::new(),
+        };
+        state.rebuild_planet_index();
+        state
+    }
+
+    /// Parse an observation dict (kaggle / env_engine / env_model shape) into a
+    /// forward-model state. This is the single source of truth for obs→state
+    /// parsing, shared by `set_state` and the feature encoder so neither
+    /// reimplements it.
+    pub fn from_py_obs(
+        dict: &Bound<'_, PyDict>,
+        num_players: usize,
+        configuration: Configuration,
+    ) -> PyResult<Self> {
+        let step: i64 = dict
+            .get_item("step")?
+            .ok_or_else(|| PyRuntimeError::new_err("state missing 'step'"))?
+            .extract()?;
+        let angular_velocity: f64 = dict
+            .get_item("angular_velocity")?
+            .ok_or_else(|| PyRuntimeError::new_err("state missing 'angular_velocity'"))?
+            .extract()?;
+
+        let planets_obj = dict
+            .get_item("planets")?
+            .ok_or_else(|| PyRuntimeError::new_err("state missing 'planets'"))?;
+        let planets_l = planets_obj.downcast::<PyList>()?;
+        let mut planets = Vec::with_capacity(planets_l.len());
+        for v in planets_l.iter() {
+            planets.push(parse_planet(&v)?);
+        }
+
+        let initial_obj = dict
+            .get_item("initial_planets")?
+            .ok_or_else(|| PyRuntimeError::new_err("state missing 'initial_planets'"))?;
+        let initial_l = initial_obj.downcast::<PyList>()?;
+        let mut initial_planets = Vec::with_capacity(initial_l.len());
+        for v in initial_l.iter() {
+            initial_planets.push(parse_planet(&v)?);
+        }
+
+        let fleets_obj = dict
+            .get_item("fleets")?
+            .ok_or_else(|| PyRuntimeError::new_err("state missing 'fleets'"))?;
+        let fleets_l = fleets_obj.downcast::<PyList>()?;
+        let mut fleets = Vec::with_capacity(fleets_l.len());
+        for v in fleets_l.iter() {
+            fleets.push(parse_fleet(&v)?);
+        }
+
+        // next_fleet_id may be missing on raw player observations — default to
+        // max(fleet.id)+1, which matches kaggle's behavior when no fleets have
+        // been spawned yet.
+        let next_fleet_id: i64 = match dict.get_item("next_fleet_id")? {
+            Some(v) => v.extract()?,
+            None => fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0),
+        };
+
+        let comet_planet_ids: Vec<i64> = match dict.get_item("comet_planet_ids")? {
+            Some(v) => v.extract()?,
+            None => Vec::new(),
+        };
+        let mut comets = Vec::new();
+        if let Some(comets_obj) = dict.get_item("comets")? {
+            if !comets_obj.is_none() {
+                let comets_l = comets_obj.downcast::<PyList>()?;
+                for v in comets_l.iter() {
+                    comets.push(parse_comet(&v)?);
+                }
+            }
+        }
+
+        Ok(Self::new(
+            step,
+            angular_velocity,
+            planets,
+            initial_planets,
+            fleets,
+            next_fleet_id,
+            comet_planet_ids,
+            comets,
+            num_players,
+            configuration,
+        ))
+    }
+
+    pub fn rebuild_planet_index(&mut self) {
         self.planet_index_by_id.clear();
         self.planet_index_by_id.reserve(self.planets.len());
         for (idx, planet) in self.planets.iter().enumerate() {
@@ -112,7 +232,7 @@ impl EngineState {
         }
     }
 
-    fn step_with_actions(&mut self, actions: &[Vec<MoveAction>]) -> Result<bool, String> {
+    pub fn step_with_actions(&mut self, actions: &[Vec<MoveAction>]) -> Result<bool, String> {
         if self.done {
             return Ok(true);
         }
@@ -400,7 +520,7 @@ impl EngineState {
 
 }
 
-fn distance(p1: (f64, f64), p2: (f64, f64)) -> f64 {
+pub fn distance(p1: (f64, f64), p2: (f64, f64)) -> f64 {
     ((p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2)).sqrt()
 }
 
@@ -461,8 +581,10 @@ fn py_any_to_i64(value: &Bound<'_, PyAny>) -> PyResult<i64> {
 }
 
 fn parse_planet(value: &Bound<'_, PyAny>) -> PyResult<Planet> {
-    let parts = value.downcast::<PyList>()?;
-    if parts.len() != 7 {
+    // Accept either a list (kaggle obs) or a tuple (env_engine/env_model obs,
+    // which serialize rows via `as_tuple`). PySequence covers both.
+    let parts = value.downcast::<PySequence>()?;
+    if parts.len()? != 7 {
         return Err(PyRuntimeError::new_err("planet tuple must have 7 fields"));
     }
     Ok(Planet {
@@ -477,8 +599,8 @@ fn parse_planet(value: &Bound<'_, PyAny>) -> PyResult<Planet> {
 }
 
 fn parse_fleet(value: &Bound<'_, PyAny>) -> PyResult<Fleet> {
-    let parts = value.downcast::<PyList>()?;
-    if parts.len() != 7 {
+    let parts = value.downcast::<PySequence>()?;
+    if parts.len()? != 7 {
         return Err(PyRuntimeError::new_err("fleet tuple must have 7 fields"));
     }
     Ok(Fleet {
@@ -664,81 +786,7 @@ impl OrbitWarsModel {
         }
         let dict = state.downcast::<PyDict>()?;
         let cfg = parse_configuration(configuration)?;
-
-        let step: i64 = dict
-            .get_item("step")?
-            .ok_or_else(|| PyRuntimeError::new_err("state missing 'step'"))?
-            .extract()?;
-        let angular_velocity: f64 = dict
-            .get_item("angular_velocity")?
-            .ok_or_else(|| PyRuntimeError::new_err("state missing 'angular_velocity'"))?
-            .extract()?;
-
-        let planets_obj = dict
-            .get_item("planets")?
-            .ok_or_else(|| PyRuntimeError::new_err("state missing 'planets'"))?;
-        let planets_l = planets_obj.downcast::<PyList>()?;
-        let mut planets = Vec::with_capacity(planets_l.len());
-        for v in planets_l.iter() {
-            planets.push(parse_planet(&v)?);
-        }
-
-        let initial_obj = dict
-            .get_item("initial_planets")?
-            .ok_or_else(|| PyRuntimeError::new_err("state missing 'initial_planets'"))?;
-        let initial_l = initial_obj.downcast::<PyList>()?;
-        let mut initial_planets = Vec::with_capacity(initial_l.len());
-        for v in initial_l.iter() {
-            initial_planets.push(parse_planet(&v)?);
-        }
-
-        let fleets_obj = dict
-            .get_item("fleets")?
-            .ok_or_else(|| PyRuntimeError::new_err("state missing 'fleets'"))?;
-        let fleets_l = fleets_obj.downcast::<PyList>()?;
-        let mut fleets = Vec::with_capacity(fleets_l.len());
-        for v in fleets_l.iter() {
-            fleets.push(parse_fleet(&v)?);
-        }
-
-        // next_fleet_id may be missing on raw player observations — default to
-        // max(fleet.id)+1, which matches kaggle's behavior when no fleets have
-        // been spawned yet.
-        let next_fleet_id: i64 = match dict.get_item("next_fleet_id")? {
-            Some(v) => v.extract()?,
-            None => fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0),
-        };
-
-        let comet_planet_ids: Vec<i64> = match dict.get_item("comet_planet_ids")? {
-            Some(v) => v.extract()?,
-            None => Vec::new(),
-        };
-        let mut comets = Vec::new();
-        if let Some(comets_obj) = dict.get_item("comets")? {
-            if !comets_obj.is_none() {
-                let comets_l = comets_obj.downcast::<PyList>()?;
-                for v in comets_l.iter() {
-                    comets.push(parse_comet(&v)?);
-                }
-            }
-        }
-
-        let mut new_state = EngineState {
-            step,
-            angular_velocity,
-            planets,
-            initial_planets,
-            fleets,
-            next_fleet_id,
-            comet_planet_ids,
-            comets,
-            done: false,
-            num_players,
-            configuration: cfg,
-            planet_index_by_id: HashMap::new(),
-        };
-        new_state.rebuild_planet_index();
-        self.state = Some(new_state);
+        self.state = Some(EngineState::from_py_obs(dict, num_players, cfg)?);
         Ok(())
     }
 
@@ -815,6 +863,19 @@ impl OrbitWarsModel {
         Ok(dict.into_any().unbind())
     }
 
+    /// Encode the current state into model input features from `player`'s
+    /// perspective. Returns `{"planet_ids", "distance_matrix", "n"}`. This is
+    /// the same `features::encode` the bot uses natively — call this in the
+    /// training loop so training and the bot share one feature implementation.
+    #[pyo3(signature = (player=0))]
+    fn features(&self, py: Python<'_>, player: i64) -> PyResult<Py<PyAny>> {
+        let s = self
+            .state
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("call set_state first"))?;
+        features::encode(s, player).to_py(py)
+    }
+
     #[getter]
     fn done(&self) -> PyResult<bool> {
         Ok(self.state.as_ref().map(|s| s.done).unwrap_or(false))
@@ -826,8 +887,27 @@ impl OrbitWarsModel {
     }
 }
 
+/// Encode an observation dict directly into features without holding a model —
+/// the path the training loop uses on `env_engine` observations. Identical
+/// output to `OrbitWarsModel.features` (both call `features::encode`).
+#[pyfunction]
+#[pyo3(signature = (obs, player=0, num_players=2, configuration=None))]
+fn encode_obs(
+    py: Python<'_>,
+    obs: &Bound<'_, PyAny>,
+    player: i64,
+    num_players: usize,
+    configuration: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let dict = obs.downcast::<PyDict>()?;
+    let cfg = parse_configuration(configuration)?;
+    let state = EngineState::from_py_obs(dict, num_players, cfg)?;
+    features::encode(&state, player).to_py(py)
+}
+
 #[pymodule]
 fn orbit_wars_model(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OrbitWarsModel>()?;
+    m.add_function(wrap_pyfunction!(encode_obs, m)?)?;
     Ok(())
 }

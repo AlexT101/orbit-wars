@@ -175,27 +175,8 @@ works end-to-end.
 
 ## File map
 
-```
-experimental_arch/
-├── README.md                       ← this file
-├── requirements.txt                ← adds wandb
-├── train.py                        ← --no-wandb / --wandb-mode flags
-├── pretrain_bc.py                  ← BC pretraining
-├── evaluate.py                     ← unchanged from parent
-├── export_submission.py            ← inherited; needs patching for new schema
-├── validate_resolver.py            ← runs cached vs interpreter resolver checks
-└── orbit_wars_rl/
-    ├── env.py                      ← rewritten compute_reward + RewardWeights;
-    │                                 per-step env-rollout cache injected into obs
-    ├── features.py                 ← +resolve_via_env_rollout (truth),
-    │                                 +_resolve_via_interpreter (obs-only fallback),
-    │                                 +arrival bins, +RESOLVED_BIN; pid removed
-    ├── heuristics.py               ← unchanged
-    ├── model.py                    ← NUM_SEND_OPTIONS instead of len(SEND_FRACTIONS)
-    ├── opponents.py                ← unchanged
-    ├── ppo.py                      ← wandb logging, HTML report removed
-    └── visualization.py            ← trimmed to just append_jsonl
-```
+run tree to see
+
 
 ## Resolver dispatch
 
