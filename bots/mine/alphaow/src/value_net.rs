@@ -183,18 +183,54 @@ enum InputKind {
     SummaryV2,
 }
 
+/// One dense layer: `out_dim` rows of length `in_dim` (row-major) plus a
+/// per-output bias. Hidden layers apply ReLU; the final layer (out_dim==1)
+/// is followed by tanh in `forward_raw`.
+struct Layer {
+    in_dim: usize,
+    out_dim: usize,
+    w: Vec<f32>, // [out_dim, in_dim] row-major
+    b: Vec<f32>, // [out_dim]
+}
+
 struct MlpWeights {
-    hidden: usize,
     input_dim: usize,
     kind: InputKind,
-    w1: Vec<f32>, // [hidden, input_dim]
-    b1: Vec<f32>, // [hidden]
-    w2: Vec<f32>, // [hidden]
-    b2: f32,
+    layers: Vec<Layer>,
 }
 
 fn read_u32_le(slice: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(slice.get(..4)?.try_into().ok()?))
+}
+
+fn detect_kind(input_dim: usize) -> Option<InputKind> {
+    if input_dim == INPUT_DIM {
+        Some(InputKind::Full)
+    } else if input_dim == summary_features::DIM {
+        Some(InputKind::Summary)
+    } else if input_dim == summary_features_v2::DIM {
+        Some(InputKind::SummaryV2)
+    } else {
+        eprintln!(
+            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2)",
+            input_dim,
+            INPUT_DIM,
+            summary_features::DIM,
+            summary_features_v2::DIM
+        );
+        None
+    }
+}
+
+fn read_f32_vec(bytes: &[u8], cursor: &mut usize, count: usize) -> Option<Vec<f32>> {
+    let end = cursor.checked_add(4usize.checked_mul(count)?)?;
+    let slice = bytes.get(*cursor..end)?;
+    let mut out = Vec::with_capacity(count);
+    for chunk in slice.chunks_exact(4) {
+        out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    *cursor = end;
+    Some(out)
 }
 
 fn parse_weights(bytes: &[u8]) -> Option<MlpWeights> {
@@ -205,50 +241,73 @@ fn parse_weights(bytes: &[u8]) -> Option<MlpWeights> {
         return None;
     }
     let version = read_u32_le(&bytes[4..8])?;
-    if version != 1 {
-        return None;
-    }
     let input_dim = read_u32_le(&bytes[8..12])? as usize;
+    let kind = detect_kind(input_dim)?;
+    match version {
+        1 => parse_v1(bytes, input_dim, kind),
+        2 => parse_v2(bytes, input_dim, kind),
+        v => {
+            eprintln!("[alphaow] unsupported weights version {}", v);
+            None
+        }
+    }
+}
+
+/// v1 (legacy): single hidden layer. Header word at [12..16] is `hidden`,
+/// then w1[hidden*input], b1[hidden], w2[hidden], b2. Lifted into a
+/// two-layer stack: input->hidden (relu), hidden->1 (tanh).
+fn parse_v1(bytes: &[u8], input_dim: usize, kind: InputKind) -> Option<MlpWeights> {
     let hidden = read_u32_le(&bytes[12..16])? as usize;
     if hidden == 0 {
         return None;
     }
-    let kind = if input_dim == INPUT_DIM {
-        InputKind::Full
-    } else if input_dim == summary_features::DIM {
-        InputKind::Summary
-    } else if input_dim == summary_features_v2::DIM {
-        InputKind::SummaryV2
-    } else {
-        eprintln!(
-            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2)",
-            input_dim,
-            INPUT_DIM,
-            summary_features::DIM,
-            summary_features_v2::DIM
-        );
-        return None;
-    };
-    let need = 16 + 4 * (hidden * input_dim + hidden + hidden + 1);
-    if bytes.len() < need {
+    let mut cursor = 16usize;
+    let w1 = read_f32_vec(bytes, &mut cursor, hidden * input_dim)?;
+    let b1 = read_f32_vec(bytes, &mut cursor, hidden)?;
+    let w2 = read_f32_vec(bytes, &mut cursor, hidden)?;
+    let b2 = read_f32_vec(bytes, &mut cursor, 1)?;
+    Some(MlpWeights {
+        input_dim,
+        kind,
+        layers: vec![
+            Layer { in_dim: input_dim, out_dim: hidden, w: w1, b: b1 },
+            Layer { in_dim: hidden, out_dim: 1, w: w2, b: b2 },
+        ],
+    })
+}
+
+/// v2 (deep): arbitrary dense stack. Header word at [12..16] is `n_layers`,
+/// followed by `n_layers` u32 out-dims, then per layer `w[out*in]`
+/// (row-major) and `b[out]`. `in_dim` chains: input_dim for the first
+/// layer, the previous out_dim thereafter. The last out_dim must be 1.
+fn parse_v2(bytes: &[u8], input_dim: usize, kind: InputKind) -> Option<MlpWeights> {
+    let n_layers = read_u32_le(&bytes[12..16])? as usize;
+    if n_layers == 0 || n_layers > 16 {
         return None;
     }
     let mut cursor = 16usize;
-    let mut read_f32_block = |count: usize, c: &mut usize| -> Vec<f32> {
-        let end = *c + 4 * count;
-        let slice = &bytes[*c..end];
-        let mut out = Vec::with_capacity(count);
-        for chunk in slice.chunks_exact(4) {
-            out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    let mut out_dims = Vec::with_capacity(n_layers);
+    for _ in 0..n_layers {
+        let d = read_u32_le(bytes.get(cursor..cursor + 4)?)? as usize;
+        if d == 0 {
+            return None;
         }
-        *c = end;
-        out
-    };
-    let w1 = read_f32_block(hidden * input_dim, &mut cursor);
-    let b1 = read_f32_block(hidden, &mut cursor);
-    let w2 = read_f32_block(hidden, &mut cursor);
-    let b2 = f32::from_le_bytes(bytes[cursor..cursor + 4].try_into().ok()?);
-    Some(MlpWeights { hidden, input_dim, kind, w1, b1, w2, b2 })
+        out_dims.push(d);
+        cursor += 4;
+    }
+    if *out_dims.last()? != 1 {
+        eprintln!("[alphaow] v2 weights: final layer out_dim must be 1");
+        return None;
+    }
+    let mut layers = Vec::with_capacity(n_layers);
+    let mut in_dim = input_dim;
+    for &out_dim in &out_dims {
+        let w = read_f32_vec(bytes, &mut cursor, out_dim * in_dim)?;
+        let b = read_f32_vec(bytes, &mut cursor, out_dim)?;
+        layers.push(Layer { in_dim, out_dim, w, b });
+        in_dim = out_dim;
+    }
+    Some(MlpWeights { input_dim, kind, layers })
 }
 
 fn load_weights() -> Option<MlpWeights> {
@@ -268,10 +327,18 @@ fn load_weights() -> Option<MlpWeights> {
     };
     let w = parse_weights(&bytes);
     match &w {
-        Some(mw) => eprintln!(
-            "[alphaow] loaded value net (kind={:?}, hidden={}, input_dim={}) from {}",
-            mw.kind, mw.hidden, mw.input_dim, path
-        ),
+        Some(mw) => {
+            let arch: Vec<String> = std::iter::once(mw.input_dim)
+                .chain(mw.layers.iter().map(|l| l.out_dim))
+                .map(|d| d.to_string())
+                .collect();
+            eprintln!(
+                "[alphaow] loaded value net (kind={:?}, arch={}) from {}",
+                mw.kind,
+                arch.join("->"),
+                path
+            );
+        }
         None => eprintln!("[alphaow] failed to parse value net weights at {}", path),
     }
     w
@@ -348,18 +415,34 @@ fn dot_neon(row: &[f32], input: &[f32], bias: f32, dim: usize) -> f32 {
 
 fn forward_raw(w: &MlpWeights, input: &[f32]) -> f32 {
     debug_assert_eq!(input.len(), w.input_dim);
-    let mut hidden = [0f32; 512];
-    debug_assert!(w.hidden <= hidden.len(), "hidden > 512 not supported");
-    for h in 0..w.hidden {
-        let row = &w.w1[h * w.input_dim..(h + 1) * w.input_dim];
-        let s = dot_neon(row, input, w.b1[h], w.input_dim);
-        hidden[h] = if s > 0.0 { s } else { 0.0 };
+    // Ping-pong scratch buffers reused across calls (the deep stack means a
+    // fixed-size array no longer fits). All but the last layer apply ReLU;
+    // the final layer (out_dim==1) passes through tanh below.
+    thread_local! {
+        static CUR: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new());
+        static NXT: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new());
     }
-    let mut out = w.b2;
-    for h in 0..w.hidden {
-        out += w.w2[h] * hidden[h];
-    }
-    out.tanh()
+    CUR.with(|cur_cell| {
+        NXT.with(|nxt_cell| {
+            let mut cur = cur_cell.borrow_mut();
+            let mut nxt = nxt_cell.borrow_mut();
+            cur.clear();
+            cur.extend_from_slice(input);
+            let n = w.layers.len();
+            for (li, layer) in w.layers.iter().enumerate() {
+                let is_last = li + 1 == n;
+                nxt.clear();
+                nxt.resize(layer.out_dim, 0.0);
+                for o in 0..layer.out_dim {
+                    let row = &layer.w[o * layer.in_dim..(o + 1) * layer.in_dim];
+                    let s = dot_neon(row, &cur[..], layer.b[o], layer.in_dim);
+                    nxt[o] = if is_last || s > 0.0 { s } else { 0.0 };
+                }
+                std::mem::swap(&mut *cur, &mut *nxt);
+            }
+            cur[0].tanh()
+        })
+    })
 }
 
 fn forward_full(w: &MlpWeights, features: &Features) -> f32 {

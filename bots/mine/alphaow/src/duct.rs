@@ -319,6 +319,24 @@ fn rollout_config() -> (&'static str, i64) {
     (mode.as_str(), *depth)
 }
 
+/// Number of leading rollout ticks that REPLAN (apollo/ow planner runs for
+/// both players). Ticks beyond this are "ballistic": no new launches, but
+/// in-flight fleets keep moving and combat/production still resolve. apollo's
+/// own rollout uses 2 reactive turns then ballistic stepping, which is far
+/// cheaper than replanning every tick (the planner is ~all of the rollout
+/// cost). Default = i64::MAX, i.e. "replan every tick" (the pre-ballistic
+/// behavior), so this is strictly opt-in via OW_ROLLOUT_REACTIVE.
+fn rollout_reactive_turns() -> i64 {
+    use std::sync::OnceLock;
+    static V: OnceLock<i64> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("OW_ROLLOUT_REACTIVE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(i64::MAX)
+    })
+}
+
 // ── profiling (OW_PROFILE) ───────────────────────────────────────────────
 // Per-turn cumulative timing of the leaf eval (MLP + heuristic blend) vs the
 // rollout simulation, to answer "how much of the budget is the value net?".
@@ -352,7 +370,8 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng) -> f64 {
     } else {
         None
     };
-    for _ in 0..depth {
+    let reactive_turns = rollout_reactive_turns();
+    for t in 0..depth {
         if state.step >= TERMINAL_STEP || alive_players(&state) <= 1 {
             break;
         }
@@ -373,35 +392,40 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng) -> f64 {
         if tot > 30.0 && (my_score / tot < 0.05 || opp_score / tot < 0.05) {
             break;
         }
-        let opp = dominant_enemy(&state, me);
-        let (my_act, opp_act) = if let Some((cache, comet_ids)) = apollo_cache.as_mut() {
-            cache.set_current_turn(state.step);
-            let cur = comet_id_set(&state);
-            if &cur != comet_ids {
-                crate::apollo_bridge::refresh_cache_comets(cache, &state);
-                *comet_ids = cur;
-            }
-            (
-                crate::apollo_bridge::apollo_plan(&state, me, cache),
-                opp.map(|o| crate::apollo_bridge::apollo_plan(&state, o, cache))
-                    .unwrap_or_default(),
-            )
-        } else if mode == "ow2_fast" {
-            (
-                crate::policy::rollout_policy_fast(&state, me),
-                opp.map(|o| crate::policy::rollout_policy_fast(&state, o)).unwrap_or_default(),
-            )
-        } else {
-            use std::sync::OnceLock;
-            static NC: OnceLock<bool> = OnceLock::new();
-            let nc = *NC.get_or_init(|| std::env::var("OW_NO_COOP").is_ok());
-            (
-                ow2_plan::plan(&state, me, nc),
-                opp.map(|o| ow2_plan::plan(&state, o, nc)).unwrap_or_default(),
-            )
-        };
-        apply_launches(&mut state, &my_act);
-        apply_launches(&mut state, &opp_act);
+        // Reactive ticks replan (the planner is ~all of the rollout cost);
+        // ticks at/after `reactive_turns` go ballistic — no new launches, but
+        // tick() still moves fleets and resolves combat/production.
+        if t < reactive_turns {
+            let opp = dominant_enemy(&state, me);
+            let (my_act, opp_act) = if let Some((cache, comet_ids)) = apollo_cache.as_mut() {
+                cache.set_current_turn(state.step);
+                let cur = comet_id_set(&state);
+                if &cur != comet_ids {
+                    crate::apollo_bridge::refresh_cache_comets(cache, &state);
+                    *comet_ids = cur;
+                }
+                (
+                    crate::apollo_bridge::apollo_plan(&state, me, cache),
+                    opp.map(|o| crate::apollo_bridge::apollo_plan(&state, o, cache))
+                        .unwrap_or_default(),
+                )
+            } else if mode == "ow2_fast" {
+                (
+                    crate::policy::rollout_policy_fast(&state, me),
+                    opp.map(|o| crate::policy::rollout_policy_fast(&state, o)).unwrap_or_default(),
+                )
+            } else {
+                use std::sync::OnceLock;
+                static NC: OnceLock<bool> = OnceLock::new();
+                let nc = *NC.get_or_init(|| std::env::var("OW_NO_COOP").is_ok());
+                (
+                    ow2_plan::plan(&state, me, nc),
+                    opp.map(|o| ow2_plan::plan(&state, o, nc)).unwrap_or_default(),
+                )
+            };
+            apply_launches(&mut state, &my_act);
+            apply_launches(&mut state, &opp_act);
+        }
         tick(&mut state, rng);
     }
     if let Some(t) = _prof_t {

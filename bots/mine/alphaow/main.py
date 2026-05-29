@@ -15,6 +15,11 @@ import threading
 _PROC = None
 _LOCK = threading.Lock()
 
+# Value net bundled with the bot. main.py points ALPHAOW_VALUE_NET_PATH here
+# when the caller hasn't set it, so a bare submission runs the trained net
+# instead of silently falling back to the duck heuristic (value_net.rs).
+_DEFAULT_VALUE_NET = "train/weights/v2_replays.bin"
+
 
 def _here():
     try:
@@ -65,13 +70,17 @@ def _ensure():
         return _PROC
     bin_path = _binary_path()
     _build_if_needed(bin_path)
+    env = dict(os.environ)
+    default_net = os.path.join(_here(), _DEFAULT_VALUE_NET)
+    if os.path.isfile(default_net):
+        env.setdefault("ALPHAOW_VALUE_NET_PATH", default_net)
     _PROC = subprocess.Popen(
         [bin_path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=sys.stderr,
         cwd=_here(),
-        env=dict(os.environ),
+        env=env,
         bufsize=0,
     )
     return _PROC
