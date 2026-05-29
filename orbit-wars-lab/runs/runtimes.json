@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-28T17:08:45.930897+00:00",
+  "last_updated": "2026-05-28T21:19:08.772460+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 16611,
@@ -15,22 +15,22 @@
       "last_updated": "2026-05-28T16:47:32.025499+00:00"
     },
     "external/ykhnkf-distance-prioritized": {
-      "total_turns": 13539,
-      "total_seconds": 2613.001804121996,
-      "avg_ms": 192.9981390148457,
-      "last_updated": "2026-05-28T16:47:30.823241+00:00"
+      "total_turns": 13641,
+      "total_seconds": 2619.104749121996,
+      "avg_ms": 192.00240078601246,
+      "last_updated": "2026-05-28T20:58:50.223019+00:00"
     },
     "external/yuriygreben-architect": {
-      "total_turns": 13440,
-      "total_seconds": 2347.5809877889988,
-      "avg_ms": 174.67120444858622,
-      "last_updated": "2026-05-28T16:47:40.723775+00:00"
+      "total_turns": 13593,
+      "total_seconds": 2354.5394627889987,
+      "avg_ms": 173.21705751408803,
+      "last_updated": "2026-05-28T21:05:04.148607+00:00"
     },
     "external/hellburner": {
-      "total_turns": 37175,
-      "total_seconds": 622.5524530040203,
-      "avg_ms": 16.746535386792747,
-      "last_updated": "2026-05-28T17:08:45.863371+00:00"
+      "total_turns": 37356,
+      "total_seconds": 623.3318840040204,
+      "avg_ms": 16.686258807260423,
+      "last_updated": "2026-05-28T20:47:34.868744+00:00"
     },
     "baselines/starter": {
       "total_turns": 17463,
@@ -39,10 +39,10 @@
       "last_updated": "2026-05-28T16:47:29.714668+00:00"
     },
     "external/owproto": {
-      "total_turns": 23904,
-      "total_seconds": 521.7541741400005,
-      "avg_ms": 21.827065517904973,
-      "last_updated": "2026-05-28T16:46:32.354556+00:00"
+      "total_turns": 24095,
+      "total_seconds": 523.0865281400005,
+      "avg_ms": 21.7093392048143,
+      "last_updated": "2026-05-28T20:51:47.253312+00:00"
     },
     "external/peaking-bot": {
       "total_turns": 10331,
@@ -51,58 +51,58 @@
       "last_updated": "2026-05-28T04:26:16.179240+00:00"
     },
     "external/obnext": {
-      "total_turns": 14039,
-      "total_seconds": 3361.554085127016,
-      "avg_ms": 239.44398355488397,
-      "last_updated": "2026-05-28T16:46:53.989360+00:00"
+      "total_turns": 14228,
+      "total_seconds": 3371.7802961270163,
+      "avg_ms": 236.98202812250608,
+      "last_updated": "2026-05-28T20:56:35.587811+00:00"
     },
     "external/ppo": {
-      "total_turns": 13603,
-      "total_seconds": 2210.106439672996,
-      "avg_ms": 162.47198703763848,
-      "last_updated": "2026-05-28T16:46:59.252258+00:00"
+      "total_turns": 13774,
+      "total_seconds": 2221.2171126729963,
+      "avg_ms": 161.26158796812808,
+      "last_updated": "2026-05-28T20:49:01.604860+00:00"
     },
     "external/structured-v4": {
-      "total_turns": 11688,
-      "total_seconds": 2081.088943376998,
-      "avg_ms": 178.0534688036446,
-      "last_updated": "2026-05-28T16:47:08.688550+00:00"
+      "total_turns": 11841,
+      "total_seconds": 2097.036625376998,
+      "avg_ms": 177.09962210767654,
+      "last_updated": "2026-05-28T20:57:53.569554+00:00"
     },
     "external/heuristic": {
-      "total_turns": 17046,
-      "total_seconds": 42.20420469600282,
-      "avg_ms": 2.4759007800072053,
-      "last_updated": "2026-05-28T16:46:35.424480+00:00"
+      "total_turns": 17119,
+      "total_seconds": 42.35886169600282,
+      "avg_ms": 2.4743771070741762,
+      "last_updated": "2026-05-28T20:55:00.504250+00:00"
     },
     "external/sigmaborov-reinforce": {
-      "total_turns": 14687,
-      "total_seconds": 519.8468182610052,
-      "avg_ms": 35.39503086137435,
-      "last_updated": "2026-05-28T16:47:30.839413+00:00"
+      "total_turns": 14853,
+      "total_seconds": 522.2598062610052,
+      "avg_ms": 35.16190710704943,
+      "last_updated": "2026-05-28T21:06:23.426839+00:00"
     },
     "external/tamrazov-starwars": {
-      "total_turns": 5658,
-      "total_seconds": 523.5268985219952,
-      "avg_ms": 92.52861409013701,
-      "last_updated": "2026-05-28T16:46:58.695218+00:00"
+      "total_turns": 5825,
+      "total_seconds": 533.7575665219953,
+      "avg_ms": 91.63220026128674,
+      "last_updated": "2026-05-28T21:01:59.083800+00:00"
     },
     "external/pilkwang-structured": {
-      "total_turns": 15399,
-      "total_seconds": 3123.2925391639947,
-      "avg_ms": 202.82437425573056,
-      "last_updated": "2026-05-28T16:47:25.412538+00:00"
+      "total_turns": 15515,
+      "total_seconds": 3125.631474163995,
+      "avg_ms": 201.45868347818208,
+      "last_updated": "2026-05-28T21:02:50.279345+00:00"
     },
     "external/smart-baseline": {
-      "total_turns": 18754,
-      "total_seconds": 3167.2905692169943,
-      "avg_ms": 168.88613464951447,
-      "last_updated": "2026-05-28T16:47:26.826310+00:00"
+      "total_turns": 18959,
+      "total_seconds": 3178.601395216994,
+      "avg_ms": 167.65659555973386,
+      "last_updated": "2026-05-28T21:00:37.116654+00:00"
     },
     "external/sim-search": {
-      "total_turns": 7119,
-      "total_seconds": 1354.9196096719973,
-      "avg_ms": 190.3244289467618,
-      "last_updated": "2026-05-28T16:47:30.254904+00:00"
+      "total_turns": 7394,
+      "total_seconds": 1370.9775156719973,
+      "avg_ms": 185.41757041817652,
+      "last_updated": "2026-05-28T20:54:22.105973+00:00"
     },
     "external/marco-dg": {
       "total_turns": 13280,
@@ -123,10 +123,10 @@
       "last_updated": "2026-05-27T18:43:24.895847+00:00"
     },
     "mine/osteo": {
-      "total_turns": 21947,
-      "total_seconds": 2479.9144920000003,
-      "avg_ms": 112.99560267918169,
-      "last_updated": "2026-05-28T16:05:14.428069+00:00"
+      "total_turns": 22082,
+      "total_seconds": 2480.7766500000002,
+      "avg_ms": 112.34383887329047,
+      "last_updated": "2026-05-28T20:50:06.349895+00:00"
     },
     "mine/apollo_bf": {
       "total_turns": 28343,
@@ -141,22 +141,28 @@
       "last_updated": "2026-05-28T17:07:34.351189+00:00"
     },
     "mine/ow": {
-      "total_turns": 7385,
-      "total_seconds": 460.56005999999996,
-      "avg_ms": 62.36425998645903,
-      "last_updated": "2026-05-28T07:42:29.917495+00:00"
+      "total_turns": 7539,
+      "total_seconds": 468.10948499999995,
+      "avg_ms": 62.0917210505372,
+      "last_updated": "2026-05-28T21:07:39.954706+00:00"
     },
     "mine/duck": {
-      "total_turns": 7114,
-      "total_seconds": 3461.32586,
-      "avg_ms": 486.55128760191167,
-      "last_updated": "2026-05-28T07:34:30.122064+00:00"
+      "total_turns": 10624,
+      "total_seconds": 5176.6634619999995,
+      "avg_ms": 487.26124454066263,
+      "last_updated": "2026-05-28T21:19:08.684924+00:00"
     },
     "external/yutsu": {
-      "total_turns": 10783,
-      "total_seconds": 97.486893,
-      "avg_ms": 9.040795047760362,
-      "last_updated": "2026-05-28T16:47:40.723758+00:00"
+      "total_turns": 10935,
+      "total_seconds": 98.259992,
+      "avg_ms": 8.98582459990855,
+      "last_updated": "2026-05-28T21:03:53.186618+00:00"
+    },
+    "baselines/hellburner": {
+      "total_turns": 927,
+      "total_seconds": 6.509766,
+      "avg_ms": 7.022401294498382,
+      "last_updated": "2026-05-28T21:19:08.684971+00:00"
     }
   }
 }
