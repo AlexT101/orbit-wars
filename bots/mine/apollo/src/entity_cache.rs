@@ -4,15 +4,13 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::blockers::{self, BlockerTable};
-use crate::constants::{
-    CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, MAX_SHIP_SPEED, ROTATION_LIMIT,
-};
-use crate::engine::{fleet_speed, CometGroup, Planet};
+use crate::blockers;
+use crate::constants::{CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, ROTATION_LIMIT};
+use crate::engine::{CometGroup, Planet};
 
 /// Aim solver result tuple: `(angle, turns, target_x, target_y,
 /// fractional_flight_time)`. See [`crate::blockers::AimResult`].
@@ -90,14 +88,6 @@ pub struct EntityCache {
     ///   * Rollout forward-sim entries (stored at the rollout's notion of
     ///     `current_turn`) likewise share slots with the bot's real turns.
     aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
-    /// Lazily-built [`BlockerTable`]s keyed by
-    /// `(shooter_id, absolute_launch_turn, ships)`, built at the exact
-    /// `fleet_speed(ships)`. Only consulted on the blocked path of
-    /// [`blockers::aim_with_prediction`] for the blocked arc's angular edges
-    /// (clear/blocked verdicts use the table-free [`blockers::shot_blocked_exact`]).
-    /// Cleared on comet spawn; orbiter geometry is permanent but a fresh comet
-    /// may have introduced entries not in the cached table.
-    blocker_tables: Mutex<HashMap<(i64, i64, i64), Arc<BlockerTable>>>,
 }
 
 impl EntityCache {
@@ -132,13 +122,10 @@ impl EntityCache {
             angular_velocity,
             entities,
             aim_cache: Mutex::new(aim_cache),
-            blocker_tables: Mutex::new(HashMap::default()),
         }
     }
 
-    /// Drop expired comet entries and add newly-spawned ones. Also clears the
-    /// blocker-table cache: orbiter geometry is permanent but cached tables
-    /// may have been built without the freshly-spawned comets.
+    /// Drop expired comet entries and add newly-spawned ones.
     pub fn refresh_comets(
         &mut self,
         comets: &[CometGroup],
@@ -157,8 +144,6 @@ impl EntityCache {
                     .or_insert_with(|| build_comet_entity(pid, group, idx, current_step));
             }
         }
-
-        self.blocker_tables.get_mut().unwrap().clear();
     }
 
     #[inline]
@@ -169,38 +154,6 @@ impl EntityCache {
     #[inline]
     pub fn get(&self, id: i64) -> Option<&Entity> {
         self.entities.get(&id)
-    }
-
-    /// Cached blocker table for `(shooter_id, launch_turn_offset, ships)`, built
-    /// at the **exact** fleet speed `fleet_speed(ships)` and keyed internally by
-    /// the *absolute* launch turn (so entries are reused across `set_current_turn`
-    /// during rollout forward-sim) and by `ships` (so the table matches the engine
-    /// trajectory exactly — no speed quantization). This is only consulted on the
-    /// blocked path of [`blockers::aim_with_prediction`] to obtain the blocked
-    /// arc's angular edges; clear/blocked verdicts themselves come from the
-    /// table-free exact swept-pair in [`blockers::shot_blocked_exact`].
-    pub fn blocker_table(
-        &self,
-        shooter_id: i64,
-        launch_turn_offset: i64,
-        ships: i64,
-    ) -> Arc<BlockerTable> {
-        let ships = ships.max(1);
-        let v = fleet_speed(ships, MAX_SHIP_SPEED);
-        let abs_launch = self.current_turn + launch_turn_offset;
-        let key = (shooter_id, abs_launch, ships);
-        let mut guard = self.blocker_tables.lock().unwrap();
-        if let Some(t) = guard.get(&key) {
-            return t.clone();
-        }
-        let table = Arc::new(blockers::build_blocker_table(
-            self,
-            shooter_id,
-            launch_turn_offset,
-            v,
-        ));
-        guard.insert(key, table.clone());
-        table
     }
 
     /// Look up a cached aim result for a shot launching at
