@@ -17,9 +17,11 @@ from . import __version__, api
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """App lifespan — cleanly shut down the tournament executor on exit."""
+    """App lifespan — cleanly shut down the scrape executor + match scheduler
+    (kills any in-flight worker processes) on exit."""
     yield
     api._executor.shutdown(wait=False, cancel_futures=True)
+    api._shutdown_scheduler()
 
 
 app = FastAPI(

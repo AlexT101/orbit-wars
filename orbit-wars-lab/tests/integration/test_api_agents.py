@@ -7,6 +7,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from orbit_wars_app.main import app
+from tests.zoo import REAL_ZOO
+
+
+@pytest.fixture(autouse=True)
+def _use_real_zoo(monkeypatch):
+    monkeypatch.setenv("ORBIT_WARS_ZOO_DIR", str(REAL_ZOO))
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,8 @@ from orbit_wars_app.tournament import Tournament
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+from tests.zoo import REAL_ZOO
+
 
 @pytest.fixture
 def isolated_runs_dir(tmp_path: Path):
@@ -32,7 +34,7 @@ def test_tournament_one_pair_one_game_fast(isolated_runs_dir: Path):
     t = Tournament(
         config=cfg,
         runs_root=isolated_runs_dir,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     )
     run_id = t.run()
 
@@ -65,7 +67,7 @@ def test_tournament_three_agents_k3_round_robin_fast(isolated_runs_dir: Path):
     t = Tournament(
         config=cfg,
         runs_root=isolated_runs_dir,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     )
     run_id = t.run()
 
@@ -83,7 +85,7 @@ def test_tournament_updates_persistent_trueskill(isolated_runs_dir: Path):
     t = Tournament(
         config=cfg,
         runs_root=isolated_runs_dir,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     )
     t.run()
 
@@ -101,10 +103,10 @@ def test_tournament_second_run_accumulates_ratings(isolated_runs_dir: Path):
         games_per_pair=1,
         mode="fast",
     )
-    t1 = Tournament(config=cfg, runs_root=isolated_runs_dir, zoo_root=PROJECT_ROOT / "agents")
+    t1 = Tournament(config=cfg, runs_root=isolated_runs_dir, zoo_root=REAL_ZOO)
     t1.run()
 
-    t2 = Tournament(config=cfg, runs_root=isolated_runs_dir, zoo_root=PROJECT_ROOT / "agents")
+    t2 = Tournament(config=cfg, runs_root=isolated_runs_dir, zoo_root=REAL_ZOO)
     t2.run()
 
     persistent = json.loads((isolated_runs_dir / "trueskill.json").read_text())
@@ -134,9 +136,9 @@ def test_tournament_parallel_assigns_same_seeds_as_sequential(isolated_runs_dir:
         parallel=4, seed_base=42,
     )
     rid_seq = Tournament(config=cfg_seq, runs_root=isolated_runs_dir,
-                         zoo_root=PROJECT_ROOT / "agents").run()
+                         zoo_root=REAL_ZOO).run()
     rid_par = Tournament(config=cfg_par, runs_root=isolated_runs_dir,
-                         zoo_root=PROJECT_ROOT / "agents").run()
+                         zoo_root=REAL_ZOO).run()
 
     res_seq = json.loads((isolated_runs_dir / rid_seq / "results.json").read_text())
     res_par = json.loads((isolated_runs_dir / rid_par / "results.json").read_text())
@@ -161,7 +163,7 @@ def test_tournament_parallel_writes_run_json_during_execution(isolated_runs_dir:
         parallel=4, seed_base=42,
     )
     rid = Tournament(config=cfg, runs_root=isolated_runs_dir,
-                     zoo_root=PROJECT_ROOT / "agents").run()
+                     zoo_root=REAL_ZOO).run()
     run_json = json.loads((isolated_runs_dir / rid / "run.json").read_text())
     assert run_json["matches_done"] == run_json["total_matches"] == 4
     assert run_json["status"] == "completed"
@@ -177,7 +179,7 @@ def test_tournament_no_replays_skips_replay_files(isolated_runs_dir: Path):
         parallel=1, seed_base=42, save_replays=False,
     )
     rid = Tournament(config=cfg, runs_root=isolated_runs_dir,
-                     zoo_root=PROJECT_ROOT / "agents").run()
+                     zoo_root=REAL_ZOO).run()
     replays = list((isolated_runs_dir / rid / "replays").glob("*.json"))
     assert replays == [], f"expected 0 replay files, got {len(replays)}"
 
@@ -210,7 +212,7 @@ def test_tournament_parallel_actually_uses_multiple_workers(isolated_runs_dir: P
     )
     parent_pid = os.getpid()
     rid = Tournament(config=cfg, runs_root=isolated_runs_dir,
-                     zoo_root=PROJECT_ROOT / "agents").run()
+                     zoo_root=REAL_ZOO).run()
 
     # The harness check above can't see workers post-shutdown, but we can
     # at least verify the parallel branch executed without crashing and
@@ -219,7 +221,10 @@ def test_tournament_parallel_actually_uses_multiple_workers(isolated_runs_dir: P
     # about. Treat this as a smoke test for the parallel path.
     res = json.loads((isolated_runs_dir / rid / "results.json").read_text())
     assert res["summary"]["total_matches"] == 12
-    assert all(m["status"] in {"ok", "completed", "crashed"} for m in res["matches"])
+    valid_statuses = {
+        "ok", "draw", "timeout", "crashed", "invalid_action", "agent_failed_to_start",
+    }
+    assert all(m["status"] in valid_statuses for m in res["matches"])
     # Suppress unused-variable warnings.
     _ = parent_pid
 
@@ -232,7 +237,7 @@ def test_tournament_no_replays_with_parallel(isolated_runs_dir: Path):
         parallel=4, seed_base=42, save_replays=False,
     )
     rid = Tournament(config=cfg, runs_root=isolated_runs_dir,
-                     zoo_root=PROJECT_ROOT / "agents").run()
+                     zoo_root=REAL_ZOO).run()
     replays = list((isolated_runs_dir / rid / "replays").glob("*.json"))
     assert replays == []
     results = json.loads((isolated_runs_dir / rid / "results.json").read_text())

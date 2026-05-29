@@ -30,6 +30,10 @@ dependencies = [
     "trueskill>=0.4.5",
     "pyyaml>=6.0",
     "psutil>=5.9",
+    # Killable process pool for the match scheduler — gives per-match timeout
+    # (terminates + respawns the worker) and cancel-while-running (kills the
+    # worker), which stdlib ProcessPoolExecutor cannot do.
+    "pebble>=5.0",
 ]
 
 [project.optional-dependencies]

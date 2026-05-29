@@ -9,7 +9,9 @@ from orbit_wars_app.match import run_match_fast
 
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-AGENTS_ROOT = PROJECT_ROOT / "agents"
+
+from tests.zoo import REAL_ZOO
+AGENTS_ROOT = REAL_ZOO
 
 
 def _agent_path(agent_id: str) -> Path:

@@ -1,16 +1,15 @@
 """FastAPI route handlers."""
 from __future__ import annotations
 
-import asyncio
 import concurrent.futures
 import json
 import os
 import tarfile
 import tempfile
 import threading
-import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -22,8 +21,8 @@ from . import kaggle_submissions
 from .kaggle_auth import KaggleAuthError
 from .kaggle_submissions import KaggleCliError
 from .runtime_store import RuntimeStore
+from .scheduler import Scheduler
 from .schemas import AgentInfo, AgentLogsResponse, KaggleSubmission, Rating, TournamentConfig
-from .tournament import Tournament
 from .trueskill_store import TrueSkillStore
 
 
@@ -168,6 +167,13 @@ def get_run(run_id: str) -> dict:
 
 @router.get("/runs/{run_id}/progress")
 def get_run_progress(run_id: str) -> dict:
+    # Prefer live in-memory progress for an active tournament — it's exact and
+    # never races a half-written file. Archived/finished runs fall back to disk.
+    sched = _peek_scheduler()
+    if sched is not None:
+        prog = sched.tournament_progress(run_id)
+        if prog is not None:
+            return prog
     run_json = _runs_root() / run_id / "run.json"
     if not run_json.is_file():
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
@@ -665,95 +671,204 @@ def clear_kaggle_auth() -> KaggleAuthStatus:
         raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
-# Single-tournament lock + tracking state
-_tournament_lock = threading.Lock()
-_current_run_id: str | None = None
-_current_cancel_event: threading.Event | None = None
+# Background executor for scrape jobs (kaggle replay downloads). The match
+# scheduler owns its own killable process pool — see `_get_scheduler`.
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 
-@router.post("/tournaments")
-async def start_tournament(cfg: TournamentConfig) -> dict:
-    global _current_run_id, _current_cancel_event
-    zoo_root = _zoo_root()
-    runs_root = _runs_root()
-    runs_root.mkdir(parents=True, exist_ok=True)
-    with _tournament_lock:
-        if _current_run_id is not None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "tournament_in_progress",
-                    "current_run_id": _current_run_id,
-                },
-            )
-        # Reserve the exact run id up front so the caller polls the match we
-        # just launched, not some older abandoned run.json still marked running.
-        cancel_event = threading.Event()
-        t = Tournament(
-            config=cfg,
-            runs_root=runs_root,
-            zoo_root=zoo_root,
-            cancel_event=cancel_event,
-        )
-        run_id = t.next_run_id()
-        _current_run_id = run_id
-        _current_cancel_event = cancel_event
+# ============================================================
+# Match scheduler — process-wide queue + killable worker pool
+# ============================================================
+#
+# The scheduler is created lazily and keyed by (runs_root, zoo_root) so the test
+# suite — which monkeypatches ORBIT_WARS_RUNS_DIR per test — transparently gets
+# a fresh scheduler for each tmp dir. In production the env is stable, so one
+# scheduler lives for the process lifetime.
 
-    # Launch in background thread so POST returns promptly
-    def _run_and_clear() -> None:
-        global _current_run_id, _current_cancel_event
+_DEFAULT_CONCURRENCY = 8
+
+_scheduler_lock = threading.Lock()
+_scheduler: Optional[Scheduler] = None
+
+
+def _scheduler_settings_path(runs_root: Path) -> Path:
+    return runs_root / "scheduler-settings.json"
+
+
+def _load_concurrency(runs_root: Path) -> int:
+    path = _scheduler_settings_path(runs_root)
+    if path.is_file():
         try:
-            t.run(run_id=run_id)
-        finally:
-            with _tournament_lock:
-                _current_run_id = None
-                _current_cancel_event = None
+            return int(json.loads(path.read_text()).get("concurrency", _DEFAULT_CONCURRENCY))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    return _DEFAULT_CONCURRENCY
 
+
+def _save_concurrency(runs_root: Path, concurrency: int) -> None:
+    runs_root.mkdir(parents=True, exist_ok=True)
+    _scheduler_settings_path(runs_root).write_text(
+        json.dumps({"concurrency": concurrency}, indent=2)
+    )
+
+
+def _reconcile_orphan_runs(runs_root: Path) -> None:
+    """Mark disk runs still flagged running/queued as aborted.
+
+    Scheduler state is in-memory, so a backend restart leaves any
+    mid-flight run's run.json claiming "running" forever. On scheduler
+    creation we sweep those to "aborted" so the UI doesn't show phantoms.
+    """
+    if not runs_root.is_dir():
+        return
+    for p in sorted(runs_root.iterdir()):
+        if not p.is_dir() or p.name == "latest":
+            continue
+        run_json = p / "run.json"
+        if not run_json.is_file():
+            continue
+        try:
+            data = json.loads(run_json.read_text())
+        except json.JSONDecodeError:
+            continue
+        if data.get("status") in ("running", "queued"):
+            data["status"] = "aborted"
+            data["finished_at"] = data.get("finished_at") or datetime.now(
+                timezone.utc
+            ).isoformat()
+            tmp = p / "run.json.tmp"
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(run_json)
+
+
+def _get_scheduler() -> Scheduler:
+    """Return the live scheduler, creating it (and its worker pool) on demand.
+
+    Recreates the scheduler if the configured runs/zoo dirs have changed since
+    it was built (test isolation).
+    """
+    global _scheduler
+    runs_root = _runs_root()
+    zoo_root = _zoo_root()
+    with _scheduler_lock:
+        if _scheduler is not None and (
+            _scheduler.runs_root != runs_root or _scheduler.zoo_root != zoo_root
+        ):
+            _scheduler.shutdown()
+            _scheduler = None
+        if _scheduler is None:
+            runs_root.mkdir(parents=True, exist_ok=True)
+            _scheduler = Scheduler(
+                runs_root=runs_root,
+                zoo_root=zoo_root,
+                concurrency=_load_concurrency(runs_root),
+            )
+            _scheduler.start()
+            _reconcile_orphan_runs(runs_root)
+        return _scheduler
+
+
+def _peek_scheduler() -> Optional[Scheduler]:
+    """Return the existing scheduler without creating one. None if not built or
+    its roots no longer match the configured dirs (read-only callers)."""
+    s = _scheduler
+    if s is None:
+        return None
+    if s.runs_root != _runs_root() or s.zoo_root != _zoo_root():
+        return None
+    return s
+
+
+def _shutdown_scheduler() -> None:
+    global _scheduler
+    with _scheduler_lock:
+        if _scheduler is not None:
+            _scheduler.shutdown()
+            _scheduler = None
+
+
+@router.post("/tournaments")
+def start_tournament(cfg: TournamentConfig) -> dict:
+    """Queue a tournament. Returns immediately — matches run on the shared pool.
+
+    Multiple tournaments may be queued concurrently; they interleave fairly.
+    """
+    sched = _get_scheduler()
     try:
-        _executor.submit(_run_and_clear)
-    except BaseException:
-        with _tournament_lock:
-            _current_run_id = None
-            _current_cancel_event = None
-        raise
+        run_id = sched.submit(cfg)
+    except ValueError as e:
+        # Bad config (unknown/disabled agent, too few agents) — reported before
+        # any run dir is created.
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"run_id": run_id, "status": "queued"}
 
-    # Poll only the reserved run dir for newly-created run.json (≤5 s).
-    deadline = time.monotonic() + 5.0
-    run_json = runs_root / run_id / "run.json"
-    while time.monotonic() < deadline:
-        if run_json.is_file():
-            try:
-                data = json.loads(run_json.read_text())
-            except json.JSONDecodeError:
-                data = None
-            if data and data.get("id") == run_id:
-                break
-        await asyncio.sleep(0.05)
-    else:
-        # Release lock — Tournament.run might be stuck or crashed early
-        with _tournament_lock:
-            _current_run_id = None
-            _current_cancel_event = None
+
+def _stop_tournament(run_id: str) -> dict:
+    sched = _peek_scheduler()
+    if sched is None or not sched.stop(run_id):
         raise HTTPException(
-            status_code=500,
-            detail="Tournament started but run.json never appeared",
+            status_code=409,
+            detail={"error": "tournament_not_running", "run_id": run_id},
         )
+    return {"run_id": run_id, "status": "stopping"}
 
-    return {"run_id": run_id, "status": "starting"}
+
+@router.post("/tournaments/{run_id}/stop")
+def stop_tournament(run_id: str) -> dict:
+    """Stop a tournament: drop its queued matches + kill its in-flight ones."""
+    return _stop_tournament(run_id)
 
 
 @router.post("/tournaments/{run_id}/cancel")
 def cancel_tournament(run_id: str) -> dict:
-    global _current_run_id, _current_cancel_event
-    with _tournament_lock:
-        if _current_run_id != run_id or _current_cancel_event is None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "tournament_not_running",
-                    "current_run_id": _current_run_id,
-                },
-            )
-        _current_cancel_event.set()
-    return {"run_id": run_id, "status": "cancelling"}
+    """Deprecated alias for /stop."""
+    return _stop_tournament(run_id)
+
+
+@router.get("/scheduler")
+def get_scheduler_status() -> dict:
+    """Live scheduler snapshot: concurrency, queue depth, active tournaments,
+    and currently-running matches."""
+    sched = _peek_scheduler()
+    if sched is None:
+        return {
+            "concurrency": _load_concurrency(_runs_root()),
+            "running_count": 0,
+            "queued_total": 0,
+            "tournaments": [],
+            "running": [],
+        }
+    return sched.status()
+
+
+@router.get("/scheduler/running")
+def get_running_matches() -> list[dict]:
+    """All matches currently executing across every active tournament."""
+    sched = _peek_scheduler()
+    return sched.running_matches() if sched is not None else []
+
+
+class ConcurrencyRequest(BaseModel):
+    concurrency: int = Field(..., ge=1, le=64)
+
+
+@router.put("/scheduler/concurrency")
+def set_concurrency(req: ConcurrencyRequest) -> dict:
+    """Set the system-wide number of matches that run at once.
+
+    Growing the pool applies once the scheduler is idle (pebble pre-spawns all
+    workers); shrinking applies immediately. Persisted across restarts.
+    """
+    sched = _get_scheduler()
+    applied = sched.set_concurrency(req.concurrency)
+    _save_concurrency(_runs_root(), applied)
+    return {"concurrency": applied}
+
+
+@router.post("/scheduler/restart-pool")
+def restart_pool() -> dict:
+    """Recycle the worker pool so freshly-rebuilt bot binaries (native .so/.pyd,
+    cached in warm workers) get picked up. In-flight matches are re-queued."""
+    sched = _get_scheduler()
+    sched.restart_pool()
+    return {"restarted": True}

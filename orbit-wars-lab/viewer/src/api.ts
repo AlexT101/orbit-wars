@@ -31,12 +31,44 @@ export interface RunSummary {
   finished_at?: string | null;
   mode: "fast" | "faithful" | "ultrafast";
   format: "2p" | "4p";
-  status: "running" | "completed" | "aborted";
+  status: "queued" | "running" | "completed" | "aborted";
   total_matches: number;
   matches_done: number;
   is_quick_match?: boolean;
   shape?: "round-robin" | "gauntlet";
   challenger_id?: string | null;
+}
+
+export interface RunningMatch {
+  run_id: string;
+  match_id: string;
+  agent_ids: string[];
+  mode: string;
+  started_at: string;
+  elapsed_s: number;
+}
+
+export interface SchedulerTournament {
+  id: string;
+  status: "queued" | "running" | "completed" | "aborted";
+  mode: string;
+  format: "2p" | "4p";
+  shape: "round-robin" | "gauntlet";
+  challenger_id?: string | null;
+  is_quick_match: boolean;
+  total_matches: number;
+  matches_done: number;
+  queued: number;
+  running: number;
+  started_at: string;
+}
+
+export interface SchedulerStatus {
+  concurrency: number;
+  running_count: number;
+  queued_total: number;
+  tournaments: SchedulerTournament[];
+  running: RunningMatch[];
 }
 
 export interface KaggleSubmission {
@@ -129,7 +161,6 @@ export const api = {
     games_per_pair: number;
     mode: string;
     format: string;
-    parallel?: number;
     save_replays?: boolean;
     seed_base?: number;
     seed_mode?: "fixed" | "random";
@@ -142,10 +173,22 @@ export const api = {
       body: JSON.stringify(cfg),
       headers: { "Content-Type": "application/json" },
     }),
-  cancelTournament: (runId: string) =>
-    j<{ run_id: string; status: string }>(`/tournaments/${runId}/cancel`, {
+  // Stop a tournament: drop its queued matches + kill its in-flight ones.
+  stopTournament: (runId: string) =>
+    j<{ run_id: string; status: string }>(`/tournaments/${runId}/stop`, {
       method: "POST",
     }),
+  getScheduler: () => j<SchedulerStatus>(`/scheduler`),
+  getRunningMatches: () => j<RunningMatch[]>(`/scheduler/running`),
+  setConcurrency: (concurrency: number) =>
+    j<{ concurrency: number }>(`/scheduler/concurrency`, {
+      method: "PUT",
+      body: JSON.stringify({ concurrency }),
+      headers: { "Content-Type": "application/json" },
+    }),
+  // Recycle the worker pool so rebuilt native bot binaries get picked up.
+  restartPool: () =>
+    j<{ restarted: boolean }>(`/scheduler/restart-pool`, { method: "POST" }),
   deleteLocalReplay: (runId: string, matchId: string) =>
     j<{ deleted: boolean }>(`/replays/${runId}/${matchId}`, { method: "DELETE" }),
   deleteKaggleReplay: (submissionId: number, episodeId: number) =>

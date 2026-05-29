@@ -9,8 +9,10 @@ from orbit_wars_app.match import run_match, run_match_faithful
 
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+from tests.zoo import REAL_ZOO
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
-AGENTS_ROOT = PROJECT_ROOT / "agents"
+AGENTS_ROOT = REAL_ZOO
 
 
 def test_faithful_match_random_vs_random():

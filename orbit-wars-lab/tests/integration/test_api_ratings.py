@@ -13,6 +13,8 @@ from orbit_wars_app.tournament import Tournament
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+from tests.zoo import REAL_ZOO
+
 
 @pytest.mark.asyncio
 async def test_ratings_empty_before_any_tournament(tmp_path, monkeypatch):
@@ -32,7 +34,7 @@ async def test_ratings_after_tournament(tmp_path: Path, monkeypatch):
         games_per_pair=2,
         mode="fast",
     )
-    Tournament(config=cfg, runs_root=tmp_path, zoo_root=PROJECT_ROOT / "agents").run()
+    Tournament(config=cfg, runs_root=tmp_path, zoo_root=REAL_ZOO).run()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

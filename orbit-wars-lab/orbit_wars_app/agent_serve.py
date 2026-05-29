@@ -14,12 +14,46 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import socket
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
 from .agent_extract import ensure_extracted
+
+
+def _start_parent_watchdog() -> None:
+    """Exit this process if our parent dies.
+
+    Faithful-mode agents are spawned by a scheduler worker process. When the
+    scheduler hard-kills that worker (Stop / per-match timeout), the kill is
+    abrupt — our parent's `finally: shutdown()` never runs, so without this we'd
+    orphan a live uvicorn server holding a port. The watchdog polls the parent
+    (tracked by pid + creation time via psutil, so a reused pid won't fool it)
+    and `os._exit`s the moment it's gone.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return
+    try:
+        parent = psutil.Process(os.getppid())
+    except psutil.Error:
+        os._exit(1)
+
+    def _watch() -> None:
+        while True:
+            time.sleep(1.0)
+            try:
+                if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE:
+                    os._exit(1)
+            except psutil.Error:
+                os._exit(1)
+
+    threading.Thread(target=_watch, daemon=True).start()
 
 
 def load_agent(agent_dir: str) -> Optional[Callable]:
@@ -126,6 +160,8 @@ def main() -> None:
     if agent_fn is None:
         print(json.dumps({"status": "error", "reason": "no callable in main.py"}), flush=True)
         sys.exit(1)
+
+    _start_parent_watchdog()
 
     port = _find_free_port()
     url = f"http://{args.host}:{port}"

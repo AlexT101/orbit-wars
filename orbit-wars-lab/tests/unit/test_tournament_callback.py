@@ -12,6 +12,8 @@ from orbit_wars_app.tournament import Tournament
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+from tests.zoo import REAL_ZOO
+
 
 def test_tournament_writes_run_json_with_lifecycle(tmp_path: Path):
     runs = tmp_path / "runs"
@@ -21,7 +23,7 @@ def test_tournament_writes_run_json_with_lifecycle(tmp_path: Path):
         games_per_pair=1,
         mode="fast",
     )
-    t = Tournament(config=cfg, runs_root=runs, zoo_root=PROJECT_ROOT / "agents")
+    t = Tournament(config=cfg, runs_root=runs, zoo_root=REAL_ZOO)
 
     run_id = t.run()
 
@@ -44,7 +46,7 @@ def test_tournament_on_match_done_called_per_match(tmp_path: Path):
         games_per_pair=2,
         mode="fast",
     )
-    t = Tournament(config=cfg, runs_root=runs, zoo_root=PROJECT_ROOT / "agents")
+    t = Tournament(config=cfg, runs_root=runs, zoo_root=REAL_ZOO)
 
     seen: list[tuple[int, int]] = []
     def cb(match_result, done: int, total: int) -> None:
@@ -74,7 +76,7 @@ def test_tournament_config_json_persists_rerun_relevant_fields(tmp_path: Path):
         shape="gauntlet",
         challenger_id="baselines/random",
     )
-    t = Tournament(config=cfg, runs_root=runs, zoo_root=PROJECT_ROOT / "agents")
+    t = Tournament(config=cfg, runs_root=runs, zoo_root=REAL_ZOO)
 
     run_id = t.run()
     data = json.loads((runs / run_id / "config.json").read_text())
