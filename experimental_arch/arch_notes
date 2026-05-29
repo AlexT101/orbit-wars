@@ -42,6 +42,13 @@ starting at this frame. Probably we keep this number as a float instead of one h
 For invalid actions probably just leave this at 0 and let valid action mask handle it.
 So this is looking like (NUM_FRAMES, 44, 44, ACTIONS_DIM).
 
+[UPDATE] The turns/distance tensor is now computed for the DECISION frame (t)
+ONLY -> shape (44, 44, ACTIONS_DIM), not (NUM_FRAMES, 44, 44, ACTIONS_DIM). The
+policy only acts at t, and the aim solve is ~all the cost, so running it for the
+t+1/t+10/t_resolved frames wasn't worth ~4x the work. The lookahead frames still
+give temporal context via their planet tokens + presence (those stay
+(NUM_FRAMES, 44, ...)). angles and mask are likewise frame-t only.
+
 I also think normalising stuff would be good.
     * distances: 1/100
     * turns: 1/20
@@ -57,6 +64,25 @@ Always validate / test to make ensure correctness.
 * Ok so Mr Claude Opus 4.8 said it's ok - "only" 25M rust ops... let's see. Supposedly not cooked.
 * Claude made the changes and now the env runs at 30 steps/s (down from 20k steps/s).
 * We can add some optimisation where we parallelise the action check.
+
+OPTIMISATION LOG (encode_obs, ~21-planet states, single-thread):
+* baseline (turns for all 4 frames):                       ~30 calls/s (33 ms)
+* removed hashmap from projection hot loop:                 ~36 calls/s (28 ms)
+* broad-phase cull of far stationary planets + FxHashMap:   ~40 calls/s (25 ms)
+  (modest: the swept tests were only ~3ms of the loop; profiling showed the cost
+   was spread across the 4-frame full action grid, not any single hot spot.)
+* turns/angles/mask at frame t only (above):               ~155 calls/s (6.5 ms)  <-- ~4x, current
+* parallelisation: tried, then REVERTED (kept single-threaded by choice; the
+  per-source loop is embarrassingly parallel if we ever want cores x later).
+
+Validation (all green after each change): env_model/validate_features.py checks,
+against the official kaggle engine, that (a) the t+1/t+10/t_resolved frame caches
+match kaggle stepping, (b) every valid action lands on its target at the predicted
+turn, (c) masked-out-but-otherwise-legal actions are genuinely unreachable. Plus
+`cargo test` replays every aim solution through the real engine for an exact check.
+
+Further levers if needed: lower AIM_HORIZON (64) to drop very-slow long-range
+single-ship shots; return numpy buffers instead of Python lists to cut marshalling.
 
 
 

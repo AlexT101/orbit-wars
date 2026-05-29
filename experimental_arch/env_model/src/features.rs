@@ -17,11 +17,14 @@
 //! ally-held at resolution).
 //!
 //! Outputs:
-//!   - `tokens`  `(NUM_FRAMES, 44, TOKEN_DIM)`     — per-planet features
+//!   - `tokens`  `(NUM_FRAMES, 44, TOKEN_DIM)`     — per-planet features (all frames = temporal context)
 //!   - `presence``(NUM_FRAMES, 44)`                — 1 if that slot's planet exists at the frame
-//!   - `turns`   `(NUM_FRAMES, 44, 44, 6)`         — normalized turns-to-arrive (0 if invalid)
+//!   - `turns`   `(44, 44, 6)`                     — normalized turns-to-arrive at frame t (0 if invalid)
 //!   - `angles`  `(44, 44, 6)`                     — launch angle (radians) at frame t, to issue the move
 //!   - `mask`    `(44, 44, 6)`                      — 1 if the action is legal *now* (frame t)
+//!
+//! `turns`/`angles`/`mask` are the decision frame (t) only: the aim solve is the
+//! whole cost and the policy acts now, so it isn't run for the lookahead frames.
 //!
 //! # Aim solver
 //!
@@ -356,7 +359,7 @@ pub struct Features {
     pub offsets: [usize; NUM_FRAMES],
     pub tokens: Vec<f32>,    // (NUM_FRAMES, 44, TOKEN_DIM)
     pub presence: Vec<f32>,  // (NUM_FRAMES, 44)
-    pub turns: Vec<f32>,     // (NUM_FRAMES, 44, 44, ACTIONS_DIM)
+    pub turns: Vec<f32>,     // (44, 44, ACTIONS_DIM), frame t
     pub angles: Vec<f32>,    // (44, 44, ACTIONS_DIM), frame t
     pub mask: Vec<u8>,       // (44, 44, ACTIONS_DIM), frame t
     /// Raw per-frame planet state `[id, owner, x, y, ships]`, present planets
@@ -376,7 +379,7 @@ impl Features {
         d.set_item("presence", self.presence.clone())?;
         d.set_item("presence_shape", (NUM_FRAMES, PLANET_SLOTS))?;
         d.set_item("turns", self.turns.clone())?;
-        d.set_item("turns_shape", (NUM_FRAMES, PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
+        d.set_item("turns_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
         d.set_item("angles", self.angles.clone())?;
         d.set_item("angles_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
         d.set_item("mask", self.mask.clone())?;
@@ -490,7 +493,11 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
 
     let mut tokens = vec![0f32; NUM_FRAMES * PLANET_SLOTS * TOKEN_DIM];
     let mut presence = vec![0f32; NUM_FRAMES * PLANET_SLOTS];
-    let mut turns = vec![0f32; NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    // `turns`/`angles`/`mask` are for the *decision* frame (t) only — the policy
+    // acts now, and the aim solve is the whole cost, so computing it for the
+    // lookahead frames isn't worth ~4x the work. The lookahead frames still
+    // provide temporal context through their tokens/presence.
+    let mut turns = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut angles = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut frame_planets: Vec<Vec<(i64, i64, f64, f64, i64)>> = Vec::with_capacity(NUM_FRAMES);
@@ -502,7 +509,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
         let comet = &traj.comet_ids[off];
         frame_planets.push(fp.iter().map(|p| (p.id, p.owner, p.x, p.y, p.ships)).collect());
 
-        // Tokens + presence.
+        // Tokens + presence (all frames — this is the temporal context).
         for si in 0..PLANET_SLOTS {
             let id = slot_id[si];
             if id < 0 {
@@ -515,18 +522,15 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
             }
         }
 
-        // Turns tensor (+ angles & mask for frame t). Each source writes a
-        // disjoint `PLANET_SLOTS*ACTIONS_DIM` row, so we just walk them.
+        // Turns + angles + mask: frame t only.
+        if f != 0 {
+            continue;
+        }
         const ROW: usize = PLANET_SLOTS * ACTIONS_DIM;
-        let frame_base = f * PLANET_SLOTS * ROW;
         for si in 0..PLANET_SLOTS {
-            let t_row = &mut turns[frame_base + si * ROW..frame_base + (si + 1) * ROW];
-            if f == 0 {
-                let (a_row, m_row) = (&mut angles[si * ROW..(si + 1) * ROW], &mut mask[si * ROW..(si + 1) * ROW]);
-                compute_source_row(&traj, off, si, &slot_id, &by, &resolved, player, t_row, Some((a_row, m_row)));
-            } else {
-                compute_source_row(&traj, off, si, &slot_id, &by, &resolved, player, t_row, None);
-            }
+            let t_row = &mut turns[si * ROW..(si + 1) * ROW];
+            let (a_row, m_row) = (&mut angles[si * ROW..(si + 1) * ROW], &mut mask[si * ROW..(si + 1) * ROW]);
+            compute_source_row(&traj, off, si, &slot_id, &by, &resolved, player, t_row, Some((a_row, m_row)));
         }
     }
 
@@ -758,7 +762,7 @@ mod tests {
             let st = random_state(&mut rng);
             let f = encode(&st, 0);
             assert_eq!(f.tokens.len(), NUM_FRAMES * PLANET_SLOTS * TOKEN_DIM);
-            assert_eq!(f.turns.len(), NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
+            assert_eq!(f.turns.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(f.mask.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(f.angles.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             for v in f.tokens.iter().chain(f.turns.iter()).chain(f.angles.iter()) {
