@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-29T16:06:28.330292+00:00",
+  "last_updated": "2026-05-29T16:28:15.722141+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -32,9 +32,9 @@
     },
     "external/hellburner": {
       "2p": {
-        "mu": 720.1215057688738,
-        "sigma": 19.567135315321792,
-        "games_played": 217
+        "mu": 723.7938088557844,
+        "sigma": 19.01177402848338,
+        "games_played": 367
       }
     },
     "baselines/starter": {
@@ -46,9 +46,9 @@
     },
     "external/owproto": {
       "2p": {
-        "mu": 703.9082766477816,
-        "sigma": 20.237925594707978,
-        "games_played": 178
+        "mu": 636.285375214858,
+        "sigma": 19.4575050500463,
+        "games_played": 278
       }
     },
     "external/peaking-bot": {
@@ -81,9 +81,9 @@
     },
     "mine/apollo": {
       "2p": {
-        "mu": 858.0603324519452,
-        "sigma": 19.44736297350629,
-        "games_played": 566
+        "mu": 893.1483845409582,
+        "sigma": 19.55076333060246,
+        "games_played": 666
       }
     },
     "mine/bruteforcer": {
@@ -151,16 +151,16 @@
     },
     "mine/apollo_bf": {
       "2p": {
-        "mu": 830.3543416470462,
-        "sigma": 20.54974445954799,
-        "games_played": 69
+        "mu": 849.9609718762663,
+        "sigma": 19.377006806391122,
+        "games_played": 119
       }
     },
     "mine/apollo_fast": {
       "2p": {
-        "mu": 809.180244904438,
-        "sigma": 20.497180289853773,
-        "games_played": 147
+        "mu": 825.8527793965881,
+        "sigma": 19.334593072528072,
+        "games_played": 197
       }
     },
     "mine/ow": {
@@ -193,16 +193,16 @@
     },
     "external/evogen": {
       "2p": {
-        "mu": 722.0696672761186,
-        "sigma": 25.28230707351577,
-        "games_played": 68
+        "mu": 737.7556765734773,
+        "sigma": 18.312341051470185,
+        "games_played": 318
       }
     },
     "external/owheuristic": {
       "2p": {
-        "mu": 834.8589811342042,
-        "sigma": 21.99871904091722,
-        "games_played": 118
+        "mu": 809.7804577745123,
+        "sigma": 18.933872114634777,
+        "games_played": 318
       }
     }
   }

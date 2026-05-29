@@ -6,6 +6,7 @@ Routes:
 """
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,8 +18,17 @@ from . import __version__, api
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """App lifespan — cleanly shut down the scrape executor + match scheduler
-    (kills any in-flight worker processes) on exit."""
+    """App lifespan — print a friendly ready line on startup (uvicorn's own
+    banner is muted via `--log-level warning`), then cleanly shut down the
+    scrape executor + match scheduler (kills any in-flight worker processes)
+    on exit."""
+    # Host port comes from compose's PORT (mapped to the container's 8000);
+    # falls back to the documented default if not injected.
+    port = os.environ.get("PORT", "6001")
+    print(
+        f"Running at http://localhost:{port}/#/tournaments",
+        flush=True,
+    )
     yield
     api._executor.shutdown(wait=False, cancel_futures=True)
     api._shutdown_scheduler()

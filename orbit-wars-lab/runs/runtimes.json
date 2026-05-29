@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-29T16:06:28.335590+00:00",
+  "last_updated": "2026-05-29T16:28:15.727392+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 21648,
@@ -27,10 +27,10 @@
       "last_updated": "2026-05-29T16:04:40.240866+00:00"
     },
     "external/hellburner": {
-      "total_turns": 38867,
-      "total_seconds": 635.6704170040204,
-      "avg_ms": 16.355016260684394,
-      "last_updated": "2026-05-29T16:02:54.742557+00:00"
+      "total_turns": 78981,
+      "total_seconds": 1124.9799610040195,
+      "avg_ms": 14.243678365733777,
+      "last_updated": "2026-05-29T16:28:15.715618+00:00"
     },
     "baselines/starter": {
       "total_turns": 20457,
@@ -39,10 +39,10 @@
       "last_updated": "2026-05-29T07:19:08.566939+00:00"
     },
     "external/owproto": {
-      "total_turns": 28264,
-      "total_seconds": 557.9622501400005,
-      "avg_ms": 19.741092914661778,
-      "last_updated": "2026-05-29T16:03:15.583538+00:00"
+      "total_turns": 47252,
+      "total_seconds": 723.3711541400006,
+      "avg_ms": 15.308794424363004,
+      "last_updated": "2026-05-29T16:28:15.715637+00:00"
     },
     "external/peaking-bot": {
       "total_turns": 10331,
@@ -123,16 +123,16 @@
       "last_updated": "2026-05-29T16:03:35.417114+00:00"
     },
     "mine/apollo_bf": {
-      "total_turns": 28343,
-      "total_seconds": 3822.749295397993,
-      "avg_ms": 134.87454734495267,
-      "last_updated": "2026-05-28T17:02:10.974382+00:00"
+      "total_turns": 36068,
+      "total_seconds": 3924.0823933979927,
+      "avg_ms": 108.79678366967929,
+      "last_updated": "2026-05-29T16:16:15.536936+00:00"
     },
     "mine/apollo_fast": {
-      "total_turns": 29928,
-      "total_seconds": 53.61992263000467,
-      "avg_ms": 1.7916306679365368,
-      "last_updated": "2026-05-29T07:39:53.741761+00:00"
+      "total_turns": 37341,
+      "total_seconds": 72.3415986300047,
+      "avg_ms": 1.9373235486463858,
+      "last_updated": "2026-05-29T16:16:27.653846+00:00"
     },
     "mine/ow": {
       "total_turns": 7545,
@@ -159,22 +159,22 @@
       "last_updated": "2026-05-29T07:14:29.840421+00:00"
     },
     "mine/apollo": {
-      "total_turns": 14422,
-      "total_seconds": 173.101429,
-      "avg_ms": 12.002595271113575,
-      "last_updated": "2026-05-29T16:06:28.322774+00:00"
+      "total_turns": 30115,
+      "total_seconds": 358.78816800000016,
+      "avg_ms": 11.913935513863528,
+      "last_updated": "2026-05-29T16:15:50.504372+00:00"
     },
     "external/evogen": {
-      "total_turns": 12043,
-      "total_seconds": 72.75779699999998,
-      "avg_ms": 6.041501037947354,
-      "last_updated": "2026-05-29T16:04:54.511701+00:00"
+      "total_turns": 66924,
+      "total_seconds": 676.05277,
+      "avg_ms": 10.10179860737553,
+      "last_updated": "2026-05-29T16:18:07.427826+00:00"
     },
     "external/owheuristic": {
-      "total_turns": 15895,
-      "total_seconds": 109.47056199999997,
-      "avg_ms": 6.887106763133059,
-      "last_updated": "2026-05-29T16:06:28.322755+00:00"
+      "total_turns": 46207,
+      "total_seconds": 325.58306900000025,
+      "avg_ms": 7.046184971973949,
+      "last_updated": "2026-05-29T16:16:27.653830+00:00"
     }
   }
 }

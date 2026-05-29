@@ -42,7 +42,7 @@ from typing import Callable, Optional
 
 from pebble import ProcessExpired, ProcessPool
 
-from .match import run_match
+from .match import run_match, silence_kaggle_environments_logging
 from .pairing import generate_pairs, resolve_agents
 from .replay_store import save_replay
 from .runtime_store import RuntimeStore
@@ -101,11 +101,12 @@ def _quiet_kaggle_environments() -> None:
     """Silence kaggle-environments' chatty import-time logging in workers.
 
     Runs once per worker via the pool `initializer` (loggers are process-wide
-    and persist across pebble worker reuse), so we don't repeat it per match.
+    and persist across pebble worker reuse), so the filter is in place before
+    the worker's first `import kaggle_environments`. See
+    `match.silence_kaggle_environments_logging` for why a plain parent-level
+    bump is not enough.
     """
-    import logging
-
-    logging.getLogger("kaggle_environments").setLevel(logging.WARNING)
+    silence_kaggle_environments_logging()
 
 
 # ============================================================
