@@ -1,12 +1,12 @@
-//! Pure-Rust XGBoost binary-logistic inference.
+//! Pure-Rust XGBoost inference.
 //!
 //! Parses an XGBoost `bst.save_model('*.json')` dump and walks each tree per
-//! inference. Supports `binary:logistic` only (the objective we train value
-//! nets with). For each tree, walk from node 0 using `split_indices` /
+//! inference. Supports `binary:logistic` and `reg:squarederror`. For each tree,
+//! walk from node 0 using `split_indices` /
 //! `split_conditions` until reaching a leaf (`left_children[i] == -1`); the
-//! leaf's `base_weights[i]` is its logit contribution. Sum across all trees
-//! plus the base-score logit, sigmoid to a probability, then map to a value
-//! in `[-1, 1]` (matching the MLP's tanh-output convention).
+//! leaf's `base_weights[i]` is its contribution. Binary-logistic models map
+//! logits to a value in `[-1, 1]`; regression models are already trained on the
+//! value scale and are clamped to `[-1, 1]`.
 //!
 //! Loaded via `ALPHAOW_VALUE_NET_PATH` (auto-detected by leading `{` vs
 //! AOWV magic byte). See `value_net.rs::weights()`.
@@ -86,26 +86,44 @@ impl CompiledTree {
 
 pub struct XgbModel {
     trees: Vec<CompiledTree>,
-    pub base_score_logit: f32,
+    pub base_score: f32,
     pub num_feature: usize,
+    pub objective: XgbObjective,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XgbObjective {
+    BinaryLogistic,
+    Regression,
 }
 
 impl XgbModel {
-    /// Total logit (before sigmoid) for input `x`.
-    pub fn predict_logit(&self, x: &[f32]) -> f32 {
-        let mut s = self.base_score_logit;
+    /// Raw model margin for input `x`.
+    pub fn predict_margin(&self, x: &[f32]) -> f32 {
+        let mut s = self.base_score;
         for t in &self.trees {
             s += t.predict(x);
         }
         s
     }
 
+    /// Total logit for binary-logistic models. For regression models this is
+    /// the raw margin, retained for the parity/debug binary.
+    pub fn predict_logit(&self, x: &[f32]) -> f32 {
+        self.predict_margin(x)
+    }
+
     /// Output mapped to `[-1, 1]` to match the MLP tanh convention used by
-    /// the rest of the bot. `2*sigmoid(z) - 1 = tanh(z/2)`.
+    /// the rest of the bot.
     pub fn predict_value(&self, x: &[f32]) -> f32 {
-        let z = self.predict_logit(x);
-        // tanh(z/2) is numerically nicer than 2/(1+e^-z) - 1 for large |z|.
-        (z * 0.5).tanh()
+        let z = self.predict_margin(x);
+        match self.objective {
+            XgbObjective::BinaryLogistic => {
+                // tanh(z/2) is numerically nicer than 2/(1+e^-z) - 1 for large |z|.
+                (z * 0.5).tanh()
+            }
+            XgbObjective::Regression => z.clamp(-1.0, 1.0),
+        }
     }
 }
 
@@ -123,10 +141,17 @@ pub fn load(bytes: &[u8]) -> Option<XgbModel> {
         }
     };
     let obj = &dump.learner.objective.name;
-    if obj != "binary:logistic" {
-        eprintln!("[alphaow] xgb unsupported objective: {} (only binary:logistic)", obj);
-        return None;
-    }
+    let objective = match obj.as_str() {
+        "binary:logistic" => XgbObjective::BinaryLogistic,
+        "reg:squarederror" => XgbObjective::Regression,
+        _ => {
+            eprintln!(
+                "[alphaow] xgb unsupported objective: {} (expected binary:logistic or reg:squarederror)",
+                obj
+            );
+            return None;
+        }
+    };
     // base_score in XGB JSON is stored as a JSON string like "[5E-1]" or "0.5".
     // Strip optional brackets and parse as f32 (probability).
     let bs_str = dump
@@ -137,11 +162,16 @@ pub fn load(bytes: &[u8]) -> Option<XgbModel> {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .trim();
-    let base_prob: f32 = bs_str.parse().ok()?;
-    let base_score_logit = if base_prob > 0.0 && base_prob < 1.0 {
-        (base_prob / (1.0 - base_prob)).ln()
-    } else {
-        0.0
+    let parsed_base: f32 = bs_str.parse().ok()?;
+    let base_score = match objective {
+        XgbObjective::BinaryLogistic => {
+            if parsed_base > 0.0 && parsed_base < 1.0 {
+                (parsed_base / (1.0 - parsed_base)).ln()
+            } else {
+                0.0
+            }
+        }
+        XgbObjective::Regression => parsed_base,
     };
     let num_feature: usize = dump
         .learner
@@ -184,5 +214,5 @@ pub fn load(bytes: &[u8]) -> Option<XgbModel> {
         }
         trees.push(CompiledTree { feat_idx, threshold, left_or_value, right });
     }
-    Some(XgbModel { trees, base_score_logit, num_feature })
+    Some(XgbModel { trees, base_score, num_feature, objective })
 }

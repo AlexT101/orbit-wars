@@ -47,6 +47,7 @@
 use crate::ow2_plan::cached_predict_fleet_collision;
 use crate::{GameState, Planet};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 pub const MAX_OBJECTS: usize = 44;
@@ -206,6 +207,13 @@ enum InputKind {
     SummaryV8,
     /// 157-d v9: v8 plus causal tempo/history slopes.
     SummaryV9,
+    /// 236-d 4P-specific layout with global/map features, my block, three
+    /// threat-ordered opponent blocks, aggregate enemy features, and pairwise
+    /// matchup/rank features.
+    FourPV1,
+    /// 278-d 4P v2: v1 plus pairwise placement probabilities/margins and
+    /// dogpile/exposure features.
+    FourPV2,
 }
 
 /// One dense layer: `out_dim` rows of length `in_dim` (row-major) plus a
@@ -249,9 +257,13 @@ fn detect_kind(input_dim: usize) -> Option<InputKind> {
         Some(InputKind::SummaryV8)
     } else if input_dim == summary_features_v9::DIM {
         Some(InputKind::SummaryV9)
+    } else if input_dim == summary_features_4p_v1::DIM {
+        Some(InputKind::FourPV1)
+    } else if input_dim == summary_features_4p_v1::DIM_V2 {
+        Some(InputKind::FourPV2)
     } else {
         eprintln!(
-            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2 / {} summary_v3 / {} summary_v4 / {} summary_v5 / {} summary_v6 / {} summary_v7 / {} summary_v8 / {} summary_v9)",
+            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2 / {} summary_v3 / {} summary_v4 / {} summary_v5 / {} summary_v6 / {} summary_v7 / {} summary_v8 / {} summary_v9 / {} 4p_v1 / {} 4p_v2)",
             input_dim,
             INPUT_DIM,
             summary_features::DIM,
@@ -262,7 +274,9 @@ fn detect_kind(input_dim: usize) -> Option<InputKind> {
             summary_features_v6::DIM,
             summary_features_v7::DIM,
             summary_features_v8::DIM,
-            summary_features_v9::DIM
+            summary_features_v9::DIM,
+            summary_features_4p_v1::DIM,
+            summary_features_4p_v1::DIM_V2
         );
         None
     }
@@ -366,18 +380,17 @@ enum Model {
     },
 }
 
-fn load_weights() -> Option<Model> {
-    let path = match std::env::var("ALPHAOW_VALUE_NET_PATH") {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("[alphaow] ALPHAOW_VALUE_NET_PATH not set; using duck heuristic");
-            return None;
-        }
-    };
+struct ModelSet {
+    default: Option<Model>,
+    two_p: Option<Model>,
+    four_p: Option<Model>,
+}
+
+fn load_model_from_path(path: &str, label: &str) -> Option<Model> {
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("[alphaow] could not read weights at {}: {}", path, e);
+            eprintln!("[alphaow] could not read {} weights at {}: {}", label, path, e);
             return None;
         }
     };
@@ -386,14 +399,14 @@ fn load_weights() -> Option<Model> {
         let model = match crate::xgb::load(&bytes) {
             Some(m) => m,
             None => {
-                eprintln!("[alphaow] failed to parse XGB JSON at {}", path);
+                eprintln!("[alphaow] failed to parse {} XGB JSON at {}", label, path);
                 return None;
             }
         };
         let kind = detect_kind(model.num_feature)?;
         eprintln!(
-            "[alphaow] loaded XGB value net (kind={:?}, num_feature={}, base_score_logit={:.4}) from {}",
-            kind, model.num_feature, model.base_score_logit, path
+            "[alphaow] loaded {} XGB value net (kind={:?}, objective={:?}, num_feature={}, base_score={:.4}) from {}",
+            label, kind, model.objective, model.num_feature, model.base_score, path
         );
         return Some(Model::Xgb { model, kind });
     }
@@ -405,26 +418,81 @@ fn load_weights() -> Option<Model> {
                 .map(|d| d.to_string())
                 .collect();
             eprintln!(
-                "[alphaow] loaded value net (kind={:?}, arch={}) from {}",
+                "[alphaow] loaded {} value net (kind={:?}, arch={}) from {}",
+                label,
                 mw.kind,
                 arch.join("->"),
                 path
             );
         }
-        None => eprintln!("[alphaow] failed to parse value net weights at {}", path),
+        None => eprintln!("[alphaow] failed to parse {} value net weights at {}", label, path),
     }
     w.map(Model::Mlp)
 }
 
-static WEIGHTS: OnceLock<Option<Model>> = OnceLock::new();
+fn load_weights() -> ModelSet {
+    let default = std::env::var("ALPHAOW_VALUE_NET_PATH")
+        .ok()
+        .and_then(|p| load_model_from_path(&p, "default"));
+    let two_p = std::env::var("ALPHAOW_VALUE_NET_PATH_2P")
+        .ok()
+        .and_then(|p| load_model_from_path(&p, "2P"));
+    let four_p = std::env::var("ALPHAOW_VALUE_NET_PATH_4P")
+        .ok()
+        .and_then(|p| load_model_from_path(&p, "4P"));
+    if default.is_none() && two_p.is_none() && four_p.is_none() {
+        eprintln!(
+            "[alphaow] no value net paths set (ALPHAOW_VALUE_NET_PATH, _2P, _4P); using duck heuristic"
+        );
+    }
+    ModelSet { default, two_p, four_p }
+}
 
-fn weights() -> Option<&'static Model> {
-    WEIGHTS.get_or_init(load_weights).as_ref()
+static WEIGHTS: OnceLock<ModelSet> = OnceLock::new();
+static SAW_4P_GAME: AtomicBool = AtomicBool::new(false);
+
+fn weights() -> &'static ModelSet {
+    WEIGHTS.get_or_init(load_weights)
+}
+
+fn looks_like_4p_state(state: &GameState) -> bool {
+    if state.player >= 2 {
+        SAW_4P_GAME.store(true, Ordering::Relaxed);
+        return true;
+    }
+    let mut owners = [false; 4];
+    for p in &state.planets {
+        if (0..4).contains(&p.owner) {
+            owners[p.owner as usize] = true;
+        }
+    }
+    for f in &state.fleets {
+        if (0..4).contains(&f.owner) {
+            owners[f.owner as usize] = true;
+        }
+    }
+    let n = owners.iter().filter(|&&x| x).count();
+    if n >= 3 || owners[2] || owners[3] {
+        SAW_4P_GAME.store(true, Ordering::Relaxed);
+        true
+    } else {
+        SAW_4P_GAME.load(Ordering::Relaxed)
+    }
+}
+
+fn routed_model(state: &GameState) -> Option<&'static Model> {
+    let w = weights();
+    if looks_like_4p_state(state) {
+        w.four_p.as_ref().or(w.default.as_ref())
+    } else {
+        w.two_p.as_ref().or(w.default.as_ref())
+    }
 }
 
 /// True iff weights are loaded and ready for inference.
 pub fn is_ready() -> bool {
-    weights().is_some()
+    let w = weights();
+    w.default.is_some() || w.two_p.is_some() || w.four_p.is_some()
 }
 
 /// Inner-product `row · input + bias`. On aarch64+NEON we use 4× FMA
@@ -535,7 +603,7 @@ fn forward_full(w: &MlpWeights, features: &Features) -> f32 {
 /// if no weights are loaded (caller should fall back to the heuristic).
 /// Output is in `[-1, 1]` — MY perspective.
 pub fn predict(state: &GameState, me: i32) -> Option<f64> {
-    let m = weights()?;
+    let m = routed_model(state)?;
     let y = match m {
         Model::Mlp(w) => match w.kind {
             InputKind::Full => {
@@ -576,6 +644,14 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
             }
             InputKind::SummaryV9 => {
                 let feats = summary_features_v9::extract(state, me);
+                forward_raw(w, &feats)
+            }
+            InputKind::FourPV1 => {
+                let feats = summary_features_4p_v1::extract(state, me);
+                forward_raw(w, &feats)
+            }
+            InputKind::FourPV2 => {
+                let feats = summary_features_4p_v1::extract_v2(state, me);
                 forward_raw(w, &feats)
             }
         },
@@ -623,6 +699,14 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
             }
             InputKind::SummaryV9 => {
                 let feats = summary_features_v9::extract(state, me);
+                model.predict_value(&feats)
+            }
+            InputKind::FourPV1 => {
+                let feats = summary_features_4p_v1::extract(state, me);
+                model.predict_value(&feats)
+            }
+            InputKind::FourPV2 => {
+                let feats = summary_features_4p_v1::extract_v2(state, me);
                 model.predict_value(&feats)
             }
         },
@@ -1795,5 +1879,693 @@ pub mod summary_features_v9 {
         out[..summary_features_v8::DIM].copy_from_slice(&core);
         out[summary_features_v8::DIM..].copy_from_slice(&tempo);
         out
+    }
+}
+
+/// 236-d 4-player-specific evaluator features.
+///
+/// Layout:
+///   global/map features (18)
+///   player blocks for me + three threat-ordered opponents (4 * 26)
+///   aggregate enemy field (22)
+///   per-opponent relational blocks (3 * 24)
+///   rank/field summary (20)
+pub mod summary_features_4p_v1 {
+    use super::*;
+
+    pub const GLOBAL_DIM: usize = 18;
+    pub const PLAYER_BLOCK_DIM: usize = 26;
+    pub const ENEMY_AGG_DIM: usize = 22;
+    pub const OPP_REL_DIM: usize = 24;
+    pub const RANK_DIM: usize = 20;
+    pub const DIM: usize = GLOBAL_DIM + 4 * PLAYER_BLOCK_DIM + ENEMY_AGG_DIM + 3 * OPP_REL_DIM + RANK_DIM;
+
+    #[derive(Clone, Copy, Default)]
+    struct PStats {
+        ships_planets: f32,
+        ships_flying: f32,
+        n_static: f32,
+        n_orbit: f32,
+        n_comet: f32,
+        prod_static: f32,
+        prod_orbit: f32,
+        prod_comet: f32,
+        neutrals_closer: f32,
+        enemies_closer: f32,
+    }
+
+    impl PStats {
+        #[inline]
+        fn ships_total(self) -> f32 {
+            self.ships_planets + self.ships_flying
+        }
+        #[inline]
+        fn planets(self) -> f32 {
+            self.n_static + self.n_orbit + self.n_comet
+        }
+        #[inline]
+        fn prod_total(self) -> f32 {
+            self.prod_static + self.prod_orbit + self.prod_comet
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct OppInfo {
+        owner: i32,
+        cur: PStats,
+        ext: PStats,
+        threat: f32,
+        nearest_now: f32,
+        nearest_ext: f32,
+        my_to_opp_pressure: f32,
+        opp_to_my_pressure: f32,
+    }
+
+    #[inline]
+    fn share(a: f32, b: f32) -> f32 {
+        (a - b) / (a + b).max(1.0)
+    }
+
+    #[inline]
+    fn fleet_speed(ships: f32) -> f32 {
+        let s = ships.max(1.0);
+        let speed = 1.0 + 5.0 * (s.ln() / 1000.0f32.ln()).powf(1.5);
+        speed.clamp(1.0, 6.0)
+    }
+
+    fn owners(state: &GameState, me: i32) -> Vec<i32> {
+        let mut out = vec![0, 1, 2, 3, me];
+        for p in &state.planets {
+            if p.owner >= 0 {
+                out.push(p.owner);
+            }
+        }
+        for f in &state.fleets {
+            if f.owner >= 0 {
+                out.push(f.owner);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn owner_of(
+        state: &GameState,
+        extrap: Option<&std::collections::HashMap<i64, (i32, i64)>>,
+        planet: &Planet,
+    ) -> i32 {
+        extrap
+            .and_then(|m| m.get(&planet.id).copied())
+            .map(|x| x.0)
+            .unwrap_or_else(|| state.planets.iter().find(|p| p.id == planet.id).map(|p| p.owner).unwrap_or(planet.owner))
+    }
+
+    fn ships_of(extrap: Option<&std::collections::HashMap<i64, (i32, i64)>>, planet: &Planet) -> i64 {
+        extrap
+            .and_then(|m| m.get(&planet.id).copied())
+            .map(|x| x.1)
+            .unwrap_or(planet.ships)
+    }
+
+    fn min_dist_to_owner(
+        state: &GameState,
+        x: f64,
+        y: f64,
+        owner: i32,
+        extrap: Option<&std::collections::HashMap<i64, (i32, i64)>>,
+        exclude_id: Option<i64>,
+    ) -> f32 {
+        let mut best = f32::INFINITY;
+        for p in &state.planets {
+            if Some(p.id) == exclude_id {
+                continue;
+            }
+            if owner_of(state, extrap, p) != owner {
+                continue;
+            }
+            let dx = (p.x - x) as f32;
+            let dy = (p.y - y) as f32;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d < best {
+                best = d;
+            }
+        }
+        best
+    }
+
+    fn closer_counts(
+        state: &GameState,
+        owner: i32,
+        player_ids: &[i32],
+        extrap: Option<&std::collections::HashMap<i64, (i32, i64)>>,
+    ) -> (f32, f32) {
+        let mut neutrals = 0.0;
+        let mut enemies = 0.0;
+        for o in &state.planets {
+            let oo = owner_of(state, extrap, o);
+            if oo == owner {
+                continue;
+            }
+            let d_me = min_dist_to_owner(state, o.x, o.y, owner, extrap, None);
+            if !d_me.is_finite() {
+                continue;
+            }
+            if oo == -1 {
+                let mut best_enemy = f32::INFINITY;
+                for &pid in player_ids {
+                    if pid == owner {
+                        continue;
+                    }
+                    best_enemy = best_enemy.min(min_dist_to_owner(state, o.x, o.y, pid, extrap, None));
+                }
+                if d_me < best_enemy {
+                    neutrals += 1.0;
+                }
+            } else {
+                let mut best_other = f32::INFINITY;
+                for &pid in player_ids {
+                    if pid == owner {
+                        continue;
+                    }
+                    best_other = best_other.min(min_dist_to_owner(state, o.x, o.y, pid, extrap, Some(o.id)));
+                }
+                if d_me < best_other {
+                    enemies += 1.0;
+                }
+            }
+        }
+        (neutrals, enemies)
+    }
+
+    fn stats_for(
+        state: &GameState,
+        owner: i32,
+        player_ids: &[i32],
+        extrap: Option<&std::collections::HashMap<i64, (i32, i64)>>,
+    ) -> PStats {
+        let mut s = PStats::default();
+        for p in &state.planets {
+            if owner_of(state, extrap, p) != owner {
+                continue;
+            }
+            s.ships_planets += ships_of(extrap, p).max(0) as f32;
+            let prod = p.production as f32;
+            if p.is_comet {
+                s.n_comet += 1.0;
+                s.prod_comet += prod;
+            } else if p.is_orbiting {
+                s.n_orbit += 1.0;
+                s.prod_orbit += prod;
+            } else {
+                s.n_static += 1.0;
+                s.prod_static += prod;
+            }
+        }
+        if extrap.is_none() {
+            for f in &state.fleets {
+                if f.owner == owner {
+                    s.ships_flying += f.ships as f32;
+                }
+            }
+        }
+        let (neutrals, enemies) = closer_counts(state, owner, player_ids, extrap);
+        s.neutrals_closer = neutrals;
+        s.enemies_closer = enemies;
+        s
+    }
+
+    fn nearest_owner_dist(
+        state: &GameState,
+        a_owner: i32,
+        b_owner: i32,
+        extrap: Option<&std::collections::HashMap<i64, (i32, i64)>>,
+    ) -> f32 {
+        let mut best = f32::INFINITY;
+        for a in &state.planets {
+            if owner_of(state, extrap, a) != a_owner {
+                continue;
+            }
+            for b in &state.planets {
+                if owner_of(state, extrap, b) != b_owner {
+                    continue;
+                }
+                let dx = (a.x - b.x) as f32;
+                let dy = (a.y - b.y) as f32;
+                let d = (dx * dx + dy * dy).sqrt();
+                if d < best {
+                    best = d;
+                }
+            }
+        }
+        if best.is_finite() { best } else { 0.0 }
+    }
+
+    fn pressure_from_to(
+        state: &GameState,
+        from_owner: i32,
+        to_owner: i32,
+        extrap: Option<&std::collections::HashMap<i64, (i32, i64)>>,
+    ) -> f32 {
+        let mut total = 0.0;
+        for src in &state.planets {
+            if owner_of(state, extrap, src) != from_owner {
+                continue;
+            }
+            let ships = ships_of(extrap, src).max(0) as f32;
+            let d = min_dist_to_owner(state, src.x, src.y, to_owner, extrap, None);
+            if d.is_finite() {
+                total += ships / (1.0 + d);
+            }
+        }
+        total
+    }
+
+    fn push_player_block(out: &mut Vec<f32>, cur: PStats, ext: PStats, remaining: f32) {
+        let cur_planets = cur.planets();
+        let cur_prod = cur.prod_total();
+        let cur_total = cur.ships_total();
+        let ext_planets = ext.planets();
+        let ext_prod = ext.prod_total();
+        let horizon = remaining.min(100.0);
+        out.extend_from_slice(&[
+            cur.ships_planets,
+            cur.ships_flying,
+            cur_total,
+            cur.n_static,
+            cur.n_orbit,
+            cur.n_comet,
+            cur_planets,
+            cur.prod_static,
+            cur.prod_orbit,
+            cur.prod_comet,
+            cur_prod,
+            cur.neutrals_closer,
+            cur.enemies_closer,
+            cur_total / cur_planets.max(1.0),
+            cur_prod / cur_planets.max(1.0),
+            cur.ships_flying / cur_total.max(1.0),
+            fleet_speed(cur_total),
+            ext.ships_planets,
+            ext.n_static,
+            ext.n_orbit,
+            ext.n_comet,
+            ext_planets,
+            ext_prod,
+            ext.ships_planets - cur.ships_planets,
+            ext_planets - cur_planets,
+            cur_total + cur_prod * horizon,
+        ]);
+    }
+
+    fn rank_desc(values: &[(i32, f32)], owner: i32) -> f32 {
+        let mine = values.iter().find(|x| x.0 == owner).map(|x| x.1).unwrap_or(0.0);
+        1.0 + values.iter().filter(|x| x.1 > mine).count() as f32
+    }
+
+    fn top_value(values: &[(i32, f32)]) -> f32 {
+        values.iter().map(|x| x.1).fold(f32::NEG_INFINITY, f32::max).max(0.0)
+    }
+
+    fn sorted_values(mut values: Vec<f32>) -> Vec<f32> {
+        values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        values
+    }
+
+    #[inline]
+    fn sigmoid_margin(x: f32, scale: f32) -> f32 {
+        1.0 / (1.0 + (-x / scale.max(1.0)).exp())
+    }
+
+    pub const V2_EXTRA_DIM: usize = 42;
+    pub const DIM_V2: usize = DIM + V2_EXTRA_DIM;
+
+    fn extract_vec(state: &GameState, me: i32, include_v2: bool) -> Vec<f32> {
+        let player_ids = owners(state, me);
+        let extrap = extrapolate_fleets(state);
+        let remaining = (500.0 - state.step as f32).max(0.0);
+        let h25 = remaining.min(25.0);
+        let h50 = remaining.min(50.0);
+        let h100 = remaining.min(100.0);
+
+        let me_cur = stats_for(state, me, &player_ids, None);
+        let me_ext = stats_for(state, me, &player_ids, Some(&extrap));
+        let my_proj_100 = me_cur.ships_total() + me_cur.prod_total() * h100;
+
+        let mut opps: Vec<OppInfo> = player_ids
+            .iter()
+            .copied()
+            .filter(|&p| p != me && p >= 0)
+            .map(|owner| {
+                let cur = stats_for(state, owner, &player_ids, None);
+                let ext = stats_for(state, owner, &player_ids, Some(&extrap));
+                let nearest_now = nearest_owner_dist(state, me, owner, None);
+                let nearest_ext = nearest_owner_dist(state, me, owner, Some(&extrap));
+                let my_to_opp_pressure = pressure_from_to(state, me, owner, None);
+                let opp_to_my_pressure = pressure_from_to(state, owner, me, None);
+                let threat = cur.ships_total()
+                    + cur.prod_total() * h100
+                    + opp_to_my_pressure * 200.0
+                    - my_to_opp_pressure * 50.0
+                    - my_proj_100 * 0.25;
+                OppInfo {
+                    owner,
+                    cur,
+                    ext,
+                    threat,
+                    nearest_now,
+                    nearest_ext,
+                    my_to_opp_pressure,
+                    opp_to_my_pressure,
+                }
+            })
+            .collect();
+        opps.sort_by(|a, b| {
+            b.threat
+                .partial_cmp(&a.threat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.owner.cmp(&b.owner))
+        });
+        while opps.len() < 3 {
+            opps.push(OppInfo {
+                owner: -1,
+                cur: PStats::default(),
+                ext: PStats::default(),
+                threat: 0.0,
+                nearest_now: 0.0,
+                nearest_ext: 0.0,
+                my_to_opp_pressure: 0.0,
+                opp_to_my_pressure: 0.0,
+            });
+        }
+        opps.truncate(3);
+
+        let mut out = Vec::with_capacity(DIM);
+
+        let mut n_static = 0.0;
+        let mut n_orbit = 0.0;
+        let mut n_comet = 0.0;
+        let mut n_neutral = 0.0;
+        let mut neutral_ships = 0.0;
+        let mut neutral_prod = 0.0;
+        let mut neutral_comet_time = 0.0;
+        let mut total_ships_planets = 0.0;
+        let mut total_prod = 0.0;
+        let mut total_planets_owned = 0.0;
+        for p in &state.planets {
+            if p.is_comet {
+                n_comet += 1.0;
+            } else if p.is_orbiting {
+                n_orbit += 1.0;
+            } else {
+                n_static += 1.0;
+            }
+            if p.owner == -1 {
+                n_neutral += 1.0;
+                neutral_ships += p.ships as f32;
+                neutral_prod += p.production as f32;
+                if p.is_comet {
+                    neutral_comet_time += state.comet_remaining(p) as f32;
+                }
+            } else {
+                total_planets_owned += 1.0;
+                total_ships_planets += p.ships as f32;
+                total_prod += p.production as f32;
+            }
+        }
+        let total_ships_flying: f32 = state.fleets.iter().map(|f| f.ships as f32).sum();
+        let enemy_count = opps
+            .iter()
+            .filter(|o| o.cur.planets() + o.cur.ships_flying + o.ext.planets() > 0.0)
+            .count() as f32;
+
+        out.extend_from_slice(&[
+            state.step as f32,
+            (state.step as f32 / 500.0).clamp(0.0, 1.0),
+            (remaining / 500.0).clamp(0.0, 1.0),
+            state.angular_velocity as f32,
+            state.planets.len() as f32,
+            n_static,
+            n_orbit,
+            n_comet,
+            n_neutral,
+            neutral_ships,
+            neutral_prod,
+            neutral_comet_time,
+            total_ships_planets,
+            total_ships_flying,
+            total_prod,
+            total_planets_owned,
+            enemy_count,
+            state.angular_velocity as f32 * n_orbit,
+        ]);
+
+        push_player_block(&mut out, me_cur, me_ext, remaining);
+        for opp in &opps {
+            push_player_block(&mut out, opp.cur, opp.ext, remaining);
+        }
+
+        let mut enemy_sum_cur = PStats::default();
+        let mut enemy_sum_ext = PStats::default();
+        let mut max_cur_ships = 0.0f32;
+        let mut max_cur_prod = 0.0f32;
+        let mut max_ext_proj = 0.0f32;
+        let mut sum_threat = 0.0f32;
+        let mut max_threat = 0.0f32;
+        let mut sum_pressure_to_me = 0.0f32;
+        let mut max_pressure_to_me = 0.0f32;
+        for opp in &opps {
+            enemy_sum_cur.ships_planets += opp.cur.ships_planets;
+            enemy_sum_cur.ships_flying += opp.cur.ships_flying;
+            enemy_sum_cur.n_static += opp.cur.n_static;
+            enemy_sum_cur.n_orbit += opp.cur.n_orbit;
+            enemy_sum_cur.n_comet += opp.cur.n_comet;
+            enemy_sum_cur.prod_static += opp.cur.prod_static;
+            enemy_sum_cur.prod_orbit += opp.cur.prod_orbit;
+            enemy_sum_cur.prod_comet += opp.cur.prod_comet;
+            enemy_sum_cur.neutrals_closer += opp.cur.neutrals_closer;
+            enemy_sum_cur.enemies_closer += opp.cur.enemies_closer;
+            enemy_sum_ext.ships_planets += opp.ext.ships_planets;
+            enemy_sum_ext.n_static += opp.ext.n_static;
+            enemy_sum_ext.n_orbit += opp.ext.n_orbit;
+            enemy_sum_ext.n_comet += opp.ext.n_comet;
+            enemy_sum_ext.prod_static += opp.ext.prod_static;
+            enemy_sum_ext.prod_orbit += opp.ext.prod_orbit;
+            enemy_sum_ext.prod_comet += opp.ext.prod_comet;
+            max_cur_ships = max_cur_ships.max(opp.cur.ships_total());
+            max_cur_prod = max_cur_prod.max(opp.cur.prod_total());
+            max_ext_proj = max_ext_proj.max(opp.cur.ships_total() + opp.cur.prod_total() * h100);
+            sum_threat += opp.threat;
+            max_threat = max_threat.max(opp.threat);
+            sum_pressure_to_me += opp.opp_to_my_pressure;
+            max_pressure_to_me = max_pressure_to_me.max(opp.opp_to_my_pressure);
+        }
+        let enemy_count_safe = enemy_count.max(1.0);
+        out.extend_from_slice(&[
+            enemy_sum_cur.ships_planets,
+            enemy_sum_cur.ships_flying,
+            enemy_sum_cur.ships_total(),
+            enemy_sum_cur.planets(),
+            enemy_sum_cur.prod_total(),
+            enemy_sum_cur.n_static,
+            enemy_sum_cur.n_orbit,
+            enemy_sum_cur.n_comet,
+            enemy_sum_cur.neutrals_closer,
+            enemy_sum_cur.enemies_closer,
+            enemy_sum_ext.ships_planets,
+            enemy_sum_ext.planets(),
+            enemy_sum_ext.prod_total(),
+            max_cur_ships,
+            max_cur_prod,
+            max_ext_proj,
+            enemy_sum_cur.ships_total() / enemy_count_safe,
+            enemy_sum_cur.prod_total() / enemy_count_safe,
+            max_threat,
+            sum_threat,
+            max_pressure_to_me,
+            sum_pressure_to_me,
+        ]);
+
+        for (rank, opp) in opps.iter().enumerate() {
+            let opp_total = opp.cur.ships_total();
+            let my_total = me_cur.ships_total();
+            let my_prod = me_cur.prod_total();
+            let opp_prod = opp.cur.prod_total();
+            let my_planets = me_cur.planets();
+            let opp_planets = opp.cur.planets();
+            let cur_ship_diff = my_total - opp_total;
+            let cur_prod_diff = my_prod - opp_prod;
+            let ext_ship_diff = me_ext.ships_planets - opp.ext.ships_planets;
+            let ext_prod_diff = me_ext.prod_total() - opp.ext.prod_total();
+            out.extend_from_slice(&[
+                if opp.owner >= 0 && (opp.cur.planets() + opp.cur.ships_flying + opp.ext.planets()) > 0.0 { 1.0 } else { 0.0 },
+                (rank + 1) as f32,
+                opp.threat,
+                opp.nearest_now,
+                opp.nearest_ext,
+                opp.my_to_opp_pressure,
+                opp.opp_to_my_pressure,
+                cur_ship_diff,
+                share(my_total, opp_total),
+                cur_prod_diff,
+                share(my_prod, opp_prod),
+                my_planets - opp_planets,
+                me_cur.n_static - opp.cur.n_static,
+                me_cur.n_orbit - opp.cur.n_orbit,
+                me_cur.n_comet - opp.cur.n_comet,
+                me_cur.ships_flying - opp.cur.ships_flying,
+                cur_ship_diff + cur_prod_diff * h25,
+                cur_ship_diff + cur_prod_diff * h50,
+                cur_ship_diff + cur_prod_diff * h100,
+                cur_ship_diff + cur_prod_diff * remaining,
+                ext_ship_diff,
+                ext_prod_diff,
+                me_ext.planets() - opp.ext.planets(),
+                ext_ship_diff + ext_prod_diff * h100,
+            ]);
+        }
+
+        let all_cur: Vec<(i32, PStats)> = player_ids
+            .iter()
+            .copied()
+            .filter(|&p| p >= 0)
+            .map(|p| (p, stats_for(state, p, &player_ids, None)))
+            .collect();
+        let ship_vals: Vec<(i32, f32)> = all_cur.iter().map(|(p, s)| (*p, s.ships_total())).collect();
+        let prod_vals: Vec<(i32, f32)> = all_cur.iter().map(|(p, s)| (*p, s.prod_total())).collect();
+        let planet_vals: Vec<(i32, f32)> = all_cur.iter().map(|(p, s)| (*p, s.planets())).collect();
+        let adv50_vals: Vec<(i32, f32)> = all_cur
+            .iter()
+            .map(|(p, s)| (*p, s.ships_total() + s.prod_total() * h50))
+            .collect();
+        let my_adv50 = me_cur.ships_total() + me_cur.prod_total() * h50;
+        let my_adv100 = me_cur.ships_total() + me_cur.prod_total() * h100;
+        let adv_sorted = sorted_values(adv50_vals.iter().map(|x| x.1).collect());
+        let leader_adv50 = *adv_sorted.first().unwrap_or(&0.0);
+        let second_adv50 = *adv_sorted.get(1).unwrap_or(&leader_adv50);
+        let last_adv50 = *adv_sorted.last().unwrap_or(&0.0);
+        out.extend_from_slice(&[
+            rank_desc(&ship_vals, me),
+            rank_desc(&prod_vals, me),
+            rank_desc(&planet_vals, me),
+            rank_desc(&adv50_vals, me),
+            if rank_desc(&ship_vals, me) <= 1.0 { 1.0 } else { 0.0 },
+            if rank_desc(&prod_vals, me) <= 1.0 { 1.0 } else { 0.0 },
+            if rank_desc(&planet_vals, me) <= 1.0 { 1.0 } else { 0.0 },
+            if rank_desc(&adv50_vals, me) <= 1.0 { 1.0 } else { 0.0 },
+            me_cur.ships_total() - top_value(&ship_vals),
+            me_cur.prod_total() - top_value(&prod_vals),
+            me_cur.planets() - top_value(&planet_vals),
+            my_adv50 - leader_adv50,
+            my_adv50 - second_adv50,
+            my_adv50 - last_adv50,
+            me_cur.ships_total() - enemy_sum_cur.ships_total(),
+            me_cur.prod_total() - enemy_sum_cur.prod_total(),
+            me_cur.planets() - enemy_sum_cur.planets(),
+            my_adv50 - enemy_sum_cur.ships_total() - enemy_sum_cur.prod_total() * h50,
+            my_adv100 - enemy_sum_cur.ships_total() - enemy_sum_cur.prod_total() * h100,
+            me_cur.neutrals_closer - opps.iter().map(|o| o.cur.neutrals_closer).fold(0.0, f32::max),
+        ]);
+
+        if include_v2 {
+            let mut pair_margins_25 = Vec::with_capacity(3);
+            let mut pair_margins_50 = Vec::with_capacity(3);
+            let mut pair_margins_100 = Vec::with_capacity(3);
+            let mut pair_margins_remaining = Vec::with_capacity(3);
+            let mut pair_ext_100 = Vec::with_capacity(3);
+            let mut pair_probs_50 = Vec::with_capacity(3);
+            let mut pair_probs_100 = Vec::with_capacity(3);
+            let mut pressure_balances = Vec::with_capacity(3);
+
+            for opp in &opps {
+                let my_total = me_cur.ships_total();
+                let opp_total = opp.cur.ships_total();
+                let my_prod = me_cur.prod_total();
+                let opp_prod = opp.cur.prod_total();
+                let ship_margin = my_total - opp_total;
+                let prod_margin = my_prod - opp_prod;
+                let m25 = ship_margin + prod_margin * h25;
+                let m50 = ship_margin + prod_margin * h50;
+                let m100 = ship_margin + prod_margin * h100;
+                let mrem = ship_margin + prod_margin * remaining;
+                let ext100 = (me_ext.ships_planets - opp.ext.ships_planets)
+                    + (me_ext.prod_total() - opp.ext.prod_total()) * h100;
+                let pressure_balance = opp.my_to_opp_pressure - opp.opp_to_my_pressure;
+                pair_margins_25.push(m25);
+                pair_margins_50.push(m50);
+                pair_margins_100.push(m100);
+                pair_margins_remaining.push(mrem);
+                pair_ext_100.push(ext100);
+                pair_probs_50.push(sigmoid_margin(m50, 75.0));
+                pair_probs_100.push(sigmoid_margin(m100, 125.0));
+                pressure_balances.push(pressure_balance);
+
+                out.extend_from_slice(&[
+                    m25,
+                    m50,
+                    m100,
+                    mrem,
+                    ext100,
+                    sigmoid_margin(m50, 75.0),
+                    sigmoid_margin(m100, 125.0),
+                    pressure_balance,
+                    pressure_balance / (me_cur.ships_total() + opp.cur.ships_total()).max(1.0),
+                ]);
+            }
+
+            let mean = |xs: &[f32]| -> f32 {
+                if xs.is_empty() {
+                    0.0
+                } else {
+                    xs.iter().sum::<f32>() / xs.len() as f32
+                }
+            };
+            let minv = |xs: &[f32]| -> f32 {
+                xs.iter().copied().fold(f32::INFINITY, f32::min)
+            };
+            let maxv = |xs: &[f32]| -> f32 {
+                xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            };
+            let lead_count = |xs: &[f32]| -> f32 { xs.iter().filter(|&&x| x > 0.0).count() as f32 };
+            let incoming_pressure = sum_pressure_to_me;
+            let outgoing_pressure: f32 = opps.iter().map(|o| o.my_to_opp_pressure).sum();
+            let dogpile_pressure = incoming_pressure / me_cur.ships_total().max(1.0);
+            let is_adv50_leader = if rank_desc(&adv50_vals, me) <= 1.0 { 1.0 } else { 0.0 };
+            let lead_over_second = my_adv50 - if is_adv50_leader > 0.0 { second_adv50 } else { leader_adv50 };
+            out.extend_from_slice(&[
+                mean(&pair_probs_50),
+                mean(&pair_probs_100),
+                lead_count(&pair_margins_50),
+                lead_count(&pair_margins_100),
+                minv(&pair_margins_50),
+                minv(&pair_margins_100),
+                maxv(&pair_margins_50),
+                mean(&pair_margins_50),
+                mean(&pair_ext_100),
+                mean(&pressure_balances),
+                incoming_pressure,
+                outgoing_pressure,
+                dogpile_pressure,
+                is_adv50_leader * dogpile_pressure,
+                lead_over_second,
+            ]);
+        }
+
+        debug_assert_eq!(out.len(), if include_v2 { DIM_V2 } else { DIM });
+        out
+    }
+
+    pub fn extract(state: &GameState, me: i32) -> [f32; DIM] {
+        let out = extract_vec(state, me, false);
+        let mut arr = [0.0f32; DIM];
+        arr.copy_from_slice(&out[..DIM]);
+        arr
+    }
+
+    pub fn extract_v2(state: &GameState, me: i32) -> [f32; DIM_V2] {
+        let out = extract_vec(state, me, true);
+        let mut arr = [0.0f32; DIM_V2];
+        arr.copy_from_slice(&out[..DIM_V2]);
+        arr
     }
 }

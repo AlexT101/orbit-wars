@@ -425,6 +425,22 @@ def baseline_accuracy_comparisons(
         ("tempo.planet_count_diff_slope_50", "planet count tempo", "Predict win when planet-count difference has been improving over the last 50 turns."),
         ("tempo.adv100_slope_50", "projected 100 tempo", "Predict win when projected 100-turn advantage has been improving over the last 50 turns."),
         ("tempo.development_score_50", "development score", "Predict win from the sign of the combined recent ship and production tempo score."),
+        ("4p.gap.adv50_to_second", "adv50 over second", "Predict win when my 50-turn projected advantage is ahead of second place."),
+        ("4p.gap.adv50_to_leader", "adv50 over leader", "Predict win when my 50-turn projected advantage is tied for or ahead of the leader."),
+        ("4p.field.adv50_diff", "adv50 vs field", "Predict win when my 50-turn projection exceeds the combined enemy field."),
+        ("4p.field.adv100_diff", "adv100 vs field", "Predict win when my 100-turn projection exceeds the combined enemy field."),
+        ("4p.field.prod_diff", "production vs field", "Predict win when my total production exceeds the combined enemy field."),
+        ("4p.field.planet_diff", "planets vs field", "Predict win when I own more planets than the combined enemy field."),
+        ("4p.field.ships_total_diff", "total ships vs field", "Predict win when my standing plus flying ships exceed the combined enemy field."),
+        ("4p.opp1.rel.cur.ships_total_diff", "ships vs top threat", "Predict win when my total ships exceed the top threat's total ships."),
+        ("4p.opp1.rel.cur.prod_diff", "production vs top threat", "Predict win when my production exceeds the top threat's production."),
+        ("4p.opp1.rel.cur.adv_25", "adv25 vs top threat", "Predict win from 25-turn projected advantage against the top threat."),
+        ("4p.opp1.rel.cur.adv_50", "adv50 vs top threat", "Predict win from 50-turn projected advantage against the top threat."),
+        ("4p.opp1.rel.cur.adv_100", "adv100 vs top threat", "Predict win from 100-turn projected advantage against the top threat."),
+        ("4p.opp1.rel.ext.adv_100", "ext adv100 vs top threat", "Predict win from extrapolated 100-turn advantage against the top threat."),
+        ("4p.opp2.rel.cur.ships_total_diff", "ships vs second threat", "Predict win when my total ships exceed the second threat's total ships."),
+        ("4p.opp3.rel.cur.ships_total_diff", "ships vs third threat", "Predict win when my total ships exceed the third threat's total ships."),
+        ("4p.opp3.rel.cur.adv_remaining", "remaining adv vs third threat", "Predict win from remaining-game projected advantage against the third threat."),
     ]
     seen: set[str] = set()
     for name, label, description in specs:
@@ -439,7 +455,73 @@ def baseline_accuracy_comparisons(
             {
                 "kind": "baseline",
                 "name": name,
-                "label": str(info.get("label") or label),
+                "label": label,
+                "description": description,
+                "accuracy": float((hard == yb).mean()),
+                "positive_prediction_rate": float(hard.mean()),
+                "tie_rate": float((vals == 0.0).mean()),
+                "n": int(yb.shape[0]),
+            }
+        )
+    def col(name: str) -> np.ndarray | None:
+        idx = by_name.get(name)
+        if idx is None:
+            return None
+        return X[:, idx].astype(np.float64, copy=False)
+
+    derived_specs: list[tuple[str, str, str, np.ndarray | None]] = [
+        (
+            "4p.derived.standing_ships_vs_field",
+            "standing ships vs field",
+            "Predict win when my stationed ships exceed all opponents' stationed ships combined.",
+            None if col("4p.me.cur.ships_planets") is None or col("4p.enemy.sum.cur.ships_planets") is None
+            else col("4p.me.cur.ships_planets") - col("4p.enemy.sum.cur.ships_planets"),
+        ),
+        (
+            "4p.derived.static_prod_vs_field",
+            "static production vs field",
+            "Predict win when my static-planet production exceeds all opponents' static production combined.",
+            None if col("4p.me.cur.prod_static") is None or any(col(name) is None for name in (
+                "4p.opp1.cur.prod_static",
+                "4p.opp2.cur.prod_static",
+                "4p.opp3.cur.prod_static",
+            ))
+            else col("4p.me.cur.prod_static")
+            - sum((col(name) if col(name) is not None else 0.0) for name in (
+                "4p.opp1.cur.prod_static",
+                "4p.opp2.cur.prod_static",
+                "4p.opp3.cur.prod_static",
+            )),
+        ),
+        (
+            "4p.derived.prod_total_vs_best",
+            "production vs best enemy",
+            "Predict win when my production exceeds the best enemy production.",
+            None if col("4p.me.cur.prod_total") is None or col("4p.enemy.best.cur.prod_total") is None
+            else col("4p.me.cur.prod_total") - col("4p.enemy.best.cur.prod_total"),
+        ),
+        (
+            "4p.derived.static_planets_vs_field",
+            "static planets vs field",
+            "Predict win when I own more static planets than all opponents combined.",
+            None if col("4p.me.cur.n_static") is None
+            else col("4p.me.cur.n_static")
+            - sum((col(name) if col(name) is not None else 0.0) for name in (
+                "4p.opp1.cur.n_static",
+                "4p.opp2.cur.n_static",
+                "4p.opp3.cur.n_static",
+            )),
+        ),
+    ]
+    for name, label, description, vals in derived_specs:
+        if vals is None:
+            continue
+        hard = (vals >= 0.0).astype(np.int32)
+        out.append(
+            {
+                "kind": "baseline",
+                "name": name,
+                "label": label,
                 "description": description,
                 "accuracy": float((hard == yb).mean()),
                 "positive_prediction_rate": float(hard.mean()),
@@ -723,7 +805,9 @@ def training_curve_from_xgb(evals_result: dict | None, best_iteration: int | Non
     val_logloss = metric("val", "logloss")
     train_error = metric("train", "error")
     val_error = metric("val", "error")
-    n = max(len(train_logloss), len(val_logloss), len(train_error), len(val_error), 0)
+    train_rmse = metric("train", "rmse")
+    val_rmse = metric("val", "rmse")
+    n = max(len(train_logloss), len(val_logloss), len(train_error), len(val_error), len(train_rmse), len(val_rmse), 0)
     out = []
     for i in range(n):
         row: dict[str, float | int] = {"iteration": i}
@@ -735,6 +819,10 @@ def training_curve_from_xgb(evals_result: dict | None, best_iteration: int | Non
             row["train_accuracy"] = 1.0 - train_error[i]
         if i < len(val_error):
             row["val_accuracy"] = 1.0 - val_error[i]
+        if i < len(train_rmse):
+            row["train_rmse"] = train_rmse[i]
+        if i < len(val_rmse):
+            row["val_rmse"] = val_rmse[i]
         if best_iteration is not None and i == int(best_iteration):
             row["best"] = 1
         out.append(row)
@@ -748,12 +836,14 @@ def render_xgb_dashboard(
     X_val: np.ndarray,
     y_val: np.ndarray,
     pred_prob: np.ndarray,
+    pred_transform: Callable[[np.ndarray], np.ndarray] | None = None,
     feature_name_list: list[str] | None = None,
     phase_frac: np.ndarray | None = None,
     top_n: int = 18,
     permutation: bool = True,
     permutation_rows: int = 20000,
     training_curve: list[dict] | None = None,
+    extra_baselines: list[dict] | None = None,
     json_out: str | Path | None = None,
     html_out: str | Path | None = None,
 ) -> dict:
@@ -763,6 +853,8 @@ def render_xgb_dashboard(
     cal = calibration_bins(y_val, pred_prob)
     phases = phase_accuracy_buckets(y_val, pred_prob, X_val, names, phase_frac=phase_frac)
     baselines = baseline_accuracy_comparisons(X_val, y_val, pred_prob, names, infos)
+    if extra_baselines:
+        baselines.extend(extra_baselines)
     imp = xgb_importance(booster, X_val.shape[1])
     gain = imp["gain"]
     weight = imp["weight"]
@@ -777,7 +869,8 @@ def render_xgb_dashboard(
             import xgboost as xgb
 
             def pred_fn(x: np.ndarray) -> np.ndarray:
-                return booster.predict(xgb.DMatrix(x.astype(np.float32, copy=False)))
+                raw = booster.predict(xgb.DMatrix(x.astype(np.float32, copy=False)))
+                return pred_transform(raw) if pred_transform is not None else raw
 
             perm = permutation_importance(X_val, y_val, pred_fn, max_rows=permutation_rows)
         except Exception as exc:  # keep training output alive if diagnostics fail
@@ -885,7 +978,7 @@ def render_xgb_dashboard(
     }
     if json_out:
         Path(json_out).parent.mkdir(parents=True, exist_ok=True)
-        Path(json_out).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        Path(json_out).write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False) + "\n", encoding="utf-8")
         print(f"dashboard_json={json_out}")
     if html_out:
         append_html_dashboard(html_out, payload)
@@ -941,8 +1034,22 @@ def _json_default(o):
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
+def _json_safe(o):
+    if isinstance(o, np.generic):
+        return _json_safe(o.item())
+    if isinstance(o, np.ndarray):
+        return [_json_safe(x) for x in o.tolist()]
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    if isinstance(o, dict):
+        return {str(k): _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v) for v in o]
+    return o
+
+
 def _render_html(records: list[dict]) -> str:
-    data = json.dumps(records, default=_json_default, separators=(",", ":"))
+    data = json.dumps(_json_safe(records), default=_json_default, separators=(",", ":"), allow_nan=False)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1159,8 +1266,10 @@ function renderBoostingCurve() {{
     rangeText(curve, 'train_logloss') ? `train logloss ${{rangeText(curve, 'train_logloss')}}` : null,
     rangeText(curve, 'val_logloss') ? `val logloss ${{rangeText(curve, 'val_logloss')}}` : null,
     rangeText(curve, 'val_accuracy') ? `val acc ${{rangeText(curve, 'val_accuracy')}}` : null,
+    rangeText(curve, 'train_rmse') ? `train rmse ${{rangeText(curve, 'train_rmse')}}` : null,
+    rangeText(curve, 'val_rmse') ? `val rmse ${{rangeText(curve, 'val_rmse')}}` : null,
   ].filter(Boolean).join(' | ');
-  document.getElementById('trend').innerHTML = `<svg viewBox="0 0 720 210" role="img"><line class="axis" x1="42" y1="182" x2="706" y2="182"/><line class="axis" x1="42" y1="16" x2="42" y2="182"/>${{curveLine(curve,'train_logloss','lineTrain',true)}}${{curveLine(curve,'val_logloss','lineLoss',true)}}${{curveLine(curve,'val_accuracy','lineEval')}}${{bestLine}}</svg><div class="trend-note">One point per XGBoost boosting round/tree; each series is independently normalized, and logloss is inverted so up is better. ${{esc(notes)}}</div>`;
+  document.getElementById('trend').innerHTML = `<svg viewBox="0 0 720 210" role="img"><line class="axis" x1="42" y1="182" x2="706" y2="182"/><line class="axis" x1="42" y1="16" x2="42" y2="182"/>${{curveLine(curve,'train_logloss','lineTrain',true)}}${{curveLine(curve,'val_logloss','lineLoss',true)}}${{curveLine(curve,'val_accuracy','lineEval')}}${{curveLine(curve,'train_rmse','lineTrain',true)}}${{curveLine(curve,'val_rmse','lineLoss',true)}}${{bestLine}}</svg><div class="trend-note">One point per XGBoost boosting round/tree; each series is independently normalized; loss/RMSE curves are inverted so up is better. ${{esc(notes)}}</div>`;
 }}
 function renderTrend() {{
   const train = [], loss = [], evalScore = [];

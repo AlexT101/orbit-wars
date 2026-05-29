@@ -58,7 +58,7 @@ def normalize_obs(o: dict) -> dict:
 def process_chunk(args):
     """One worker: stream all assigned games' obs through one extract_v3
     subprocess, collect 216-byte records, return (gid, step, slot, extras5)."""
-    zip_path, entries, worker_id = args
+    zip_path, entries, worker_id, n_players = args
     proc = subprocess.Popen(
         [str(BIN)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -87,12 +87,12 @@ def process_chunk(args):
             continue
         rewards = data.get("rewards") or []
         steps = data.get("steps") or []
-        if len(rewards) != 2 or not steps:
+        if len(rewards) != n_players or not steps:
             continue
         for step in steps:
-            if not isinstance(step, list) or len(step) < 2:
+            if not isinstance(step, list) or len(step) < n_players:
                 continue
-            for slot in range(2):
+            for slot in range(n_players):
                 entry_obj = step[slot]
                 if not isinstance(entry_obj, dict):
                     continue
@@ -139,7 +139,14 @@ def build(npz_path: str | Path, zip_paths: list[str] | list[Path], out_path: str
     meta = d["meta"]
     game_files = d["game_files"]
     n_games = game_files.shape[0]
-    print(f"NPZ rows={meta.shape[0]} games={n_games}")
+    n_players = 2
+    if "game_player_count" in d.files:
+        counts = np.unique(d["game_player_count"].astype(np.int32))
+        if len(counts) == 1:
+            n_players = int(counts[0])
+    elif "game_names" in d.files and d["game_names"].ndim == 2:
+        n_players = int(d["game_names"].shape[1])
+    print(f"NPZ rows={meta.shape[0]} games={n_games} players={n_players}")
 
     tag_to_zip = {source_tag(z): str(z) for z in zip_paths}
     # Build per-zip ordered list of (gid, entry) so worker chunks balance.
@@ -165,7 +172,7 @@ def build(npz_path: str | Path, zip_paths: list[str] | list[Path], out_path: str
     for zip_path, entries in by_zip.items():
         chunks = [entries[i::workers] for i in range(workers)]
         with mp.Pool(workers) as pool:
-            results = pool.map(process_chunk, [(zip_path, c, i) for i, c in enumerate(chunks)])
+            results = pool.map(process_chunk, [(zip_path, c, i, n_players) for i, c in enumerate(chunks)])
         for rows in results:
             for (gid, step, slot, extras) in rows:
                 row_extras[(gid, step, slot)] = extras

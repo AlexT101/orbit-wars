@@ -238,6 +238,42 @@ fn focused_candidates_enabled() -> bool {
     })
 }
 
+fn is_four_player_state(state: &GameState) -> bool {
+    if state.player >= 2 {
+        return true;
+    }
+    let mut seen = [false; 4];
+    let mut count = 0usize;
+    let mut visit_player = |p: i32| {
+        if !(0..4).contains(&p) {
+            return;
+        }
+        let idx = p as usize;
+        if !seen[idx] {
+            seen[idx] = true;
+            count += 1;
+        }
+    };
+    visit_player(state.player);
+    for p in &state.planets {
+        visit_player(p.owner);
+    }
+    for f in &state.fleets {
+        visit_player(f.owner);
+    }
+    seen[2] || seen[3] || count >= 3
+}
+
+fn extra_movegen_allowed(state: &GameState) -> bool {
+    if !is_four_player_state(state) {
+        return true;
+    }
+    matches!(
+        std::env::var("OW_4P_EXTRA_MOVEGEN").ok().as_deref(),
+        Some("1") | Some("true") | Some("on")
+    )
+}
+
 fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: bool) -> Vec<Vec<Action>> {
     // Single-target focused candidate generator (apollo single-target eval
     // + healing fleets). Opt-in via OW_FOCUSED_CANDIDATES=1.
@@ -247,7 +283,8 @@ fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: boo
     //     so MCTS sees the full branching factor.
     //   * non-root: race-filter + sort by production/ships, keep top 3 + no-op.
     // We pass is_root through and skip the outer `k` truncation entirely.
-    if focused_candidates_enabled() {
+    let allow_extra_movegen = extra_movegen_allowed(state);
+    if allow_extra_movegen && focused_candidates_enabled() {
         let alts = crate::focused_plan::focused_candidates(state, player, is_root);
         if !alts.is_empty() {
             return alts;
@@ -257,19 +294,27 @@ fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: boo
         let mut alts = with_cache_at(state.step, |cache| match movegen_mode() {
             "apollo" | "full_apollo" => crate::apollo_bridge::apollo_candidates(state, player, cache),
             "apollo_plus" | "hybrid" => {
-                let mut full = crate::apollo_bridge::apollo_candidates(state, player, cache);
-                for alt in crate::apollo_movegen::candidates(state, player, cache, k, is_root) {
-                    if full.len() >= k {
-                        break;
+                if allow_extra_movegen {
+                    let mut full = crate::apollo_bridge::apollo_candidates(state, player, cache);
+                    for alt in crate::apollo_movegen::candidates(state, player, cache, k, is_root) {
+                        if full.len() >= k {
+                            break;
+                        }
+                        if !full.iter().any(|prev| actions_equal(prev, &alt)) {
+                            full.push(alt);
+                        }
                     }
-                    if !full.iter().any(|prev| actions_equal(prev, &alt)) {
-                        full.push(alt);
-                    }
+                    full
+                } else {
+                    crate::apollo_bridge::apollo_candidates(state, player, cache)
                 }
-                full
             }
             "prometheus" | "cheap" | "apollo_movegen" => {
-                crate::apollo_movegen::candidates(state, player, cache, k, is_root)
+                if allow_extra_movegen {
+                    crate::apollo_movegen::candidates(state, player, cache, k, is_root)
+                } else {
+                    crate::apollo_bridge::apollo_candidates(state, player, cache)
+                }
             }
             _ => crate::apollo_bridge::apollo_candidates(state, player, cache),
         });
@@ -311,7 +356,14 @@ fn enumerate_pair(
     k: usize,
     is_root: bool,
 ) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
-    if !focused_candidates_enabled() && apollo_candidates_enabled() && matches!(movegen_mode(), "apollo" | "full_apollo") {
+    let allow_extra_movegen = extra_movegen_allowed(state);
+    let focused_active = allow_extra_movegen && focused_candidates_enabled();
+    let mode = movegen_mode();
+    let plain_apollo_pair =
+        matches!(mode, "apollo" | "full_apollo")
+            || (!allow_extra_movegen
+                && matches!(mode, "apollo_plus" | "hybrid" | "prometheus" | "cheap" | "apollo_movegen"));
+    if !focused_active && apollo_candidates_enabled() && plain_apollo_pair {
         let (mut my, mut op) = with_cache_at(state.step, |cache| {
             crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache)
         });
@@ -323,7 +375,11 @@ fn enumerate_pair(
         // One side empty — fall back to the per-player path (its ow2 fallback
         // fills the empty side; the non-empty side is recomputed, rare).
     }
-    if !focused_candidates_enabled() && apollo_candidates_enabled() && matches!(movegen_mode(), "apollo_plus" | "hybrid") {
+    if !focused_active
+        && apollo_candidates_enabled()
+        && matches!(mode, "apollo_plus" | "hybrid")
+        && allow_extra_movegen
+    {
         let (mut my, mut op) = with_cache_at(state.step, |cache| {
             let (mut my, mut op) = crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache);
             for alt in crate::apollo_movegen::candidates(state, me, cache, k, is_root) {

@@ -17,8 +17,8 @@ fn main() -> io::Result<()> {
     let bytes = fs::read(&args[1])?;
     let model = xgb::load(&bytes).expect("failed to load XGB model");
     eprintln!(
-        "loaded model num_feature={} base_logit={:.6}",
-        model.num_feature, model.base_score_logit
+        "loaded model objective={:?} num_feature={} base_score={:.6}",
+        model.objective, model.num_feature, model.base_score
     );
 
     let f = fs::File::open(&args[2])?;
@@ -41,11 +41,9 @@ fn main() -> io::Result<()> {
             );
             continue;
         }
-        let logit = model.predict_logit(&vec);
-        // Python returns sigmoid(logit) = probability.
-        let prob = 1.0f32 / (1.0 + (-logit).exp());
+        let margin = model.predict_margin(&vec);
         let value = model.predict_value(&vec);
-        println!("logit={:.6}  prob={:.6}  value={:.6}", logit, prob, value);
+        println!("margin={:.6}  value={:.6}", margin, value);
     }
     Ok(())
 }

@@ -47,6 +47,14 @@ path = "src/bin/extract_v3.rs"
 name = "extract_v4"
 path = "src/bin/extract_v4.rs"
 
+[[bin]]
+name = "extract_4p_v1"
+path = "src/bin/extract_4p_v1.rs"
+
+[[bin]]
+name = "extract_4p_v2"
+path = "src/bin/extract_4p_v2.rs"
+
 [features]
 # Mirrors the vendored apollo engine: cfg-gates its per-section timers.
 profile = []

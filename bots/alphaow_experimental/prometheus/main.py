@@ -14,10 +14,13 @@ import threading
 _PROC = None
 _LOCK = threading.Lock()
 
-# Value net bundled with the bot. main.py points ALPHAOW_VALUE_NET_PATH here
-# when the caller hasn't set it, so a bare submission runs the trained net
-# instead of silently falling back to the duck heuristic (value_net.rs).
-_DEFAULT_VALUE_NET = "train/weights/xgb_46p12e88t11_latest.json"
+# Value nets bundled with the bot. main.py points the Rust runtime at both
+# when the caller hasn't set them, so mixed 2P/4P runs route automatically.
+_DEFAULT_VALUE_NET_2P = "train/weights/xgb_46p12e88t11_latest.json"
+_DEFAULT_VALUE_NET_4P_CANDIDATES = (
+    "train/weights/xgb_4p_v2_rank4_latest.json",
+    "train/weights/xgb_4p_v1_latest.json",
+)
 
 
 def _here():
@@ -81,9 +84,15 @@ def _ensure():
         env.pop(k, None)
     env["OW_ROLLOUT"] = "none"
     env["OW_ROLLOUT_DEPTH"] = "0"
-    default_net = os.path.join(_here(), _DEFAULT_VALUE_NET)
-    if os.path.isfile(default_net):
-        env.setdefault("ALPHAOW_VALUE_NET_PATH", default_net)
+    default_net_2p = os.path.join(_here(), _DEFAULT_VALUE_NET_2P)
+    if os.path.isfile(default_net_2p):
+        env.setdefault("ALPHAOW_VALUE_NET_PATH_2P", default_net_2p)
+        env.setdefault("ALPHAOW_VALUE_NET_PATH", default_net_2p)
+    for rel in _DEFAULT_VALUE_NET_4P_CANDIDATES:
+        default_net_4p = os.path.join(_here(), rel)
+        if os.path.isfile(default_net_4p):
+            env.setdefault("ALPHAOW_VALUE_NET_PATH_4P", default_net_4p)
+            break
     _PROC = subprocess.Popen(
         [bin_path],
         stdin=subprocess.PIPE,
