@@ -9,8 +9,10 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::blockers::{self, BlockerTable};
-use crate::constants::{CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, ROTATION_LIMIT};
-use crate::engine::{CometGroup, Planet};
+use crate::constants::{
+    CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, MAX_SHIP_SPEED, ROTATION_LIMIT,
+};
+use crate::engine::{fleet_speed, CometGroup, Planet};
 
 /// Aim solver result tuple: `(angle, turns, target_x, target_y,
 /// fractional_flight_time)`. See [`crate::blockers::AimResult`].
@@ -89,11 +91,12 @@ pub struct EntityCache {
     ///     `current_turn`) likewise share slots with the bot's real turns.
     aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
     /// Lazily-built [`BlockerTable`]s keyed by
-    /// `(shooter_id, absolute_launch_turn, speed_bucket)`. Two different
-    /// `ships` counts that round to the same speed bucket share a table —
-    /// see [`blockers::speed_bucket`]. Cleared on comet spawn; orbiter
-    /// geometry is permanent but a fresh comet may have introduced entries
-    /// not in the cached table.
+    /// `(shooter_id, absolute_launch_turn, ships)`, built at the exact
+    /// `fleet_speed(ships)`. Only consulted on the blocked path of
+    /// [`blockers::aim_with_prediction`] for the blocked arc's angular edges
+    /// (clear/blocked verdicts use the table-free [`blockers::shot_blocked_exact`]).
+    /// Cleared on comet spawn; orbiter geometry is permanent but a fresh comet
+    /// may have introduced entries not in the cached table.
     blocker_tables: Mutex<HashMap<(i64, i64, i64), Arc<BlockerTable>>>,
 }
 
@@ -168,25 +171,28 @@ impl EntityCache {
         self.entities.get(&id)
     }
 
-    /// Cached blocker table for `(shooter_id, launch_turn_offset, ships)`.
-    /// Keyed internally by the *absolute* launch turn so the same entry is
-    /// reused across `set_current_turn` calls during rollout forward-sim,
-    /// and by the *speed bucket* so different `ships` counts that round to
-    /// the same fleet speed share one table.
+    /// Cached blocker table for `(shooter_id, launch_turn_offset, ships)`, built
+    /// at the **exact** fleet speed `fleet_speed(ships)` and keyed internally by
+    /// the *absolute* launch turn (so entries are reused across `set_current_turn`
+    /// during rollout forward-sim) and by `ships` (so the table matches the engine
+    /// trajectory exactly — no speed quantization). This is only consulted on the
+    /// blocked path of [`blockers::aim_with_prediction`] to obtain the blocked
+    /// arc's angular edges; clear/blocked verdicts themselves come from the
+    /// table-free exact swept-pair in [`blockers::shot_blocked_exact`].
     pub fn blocker_table(
         &self,
         shooter_id: i64,
         launch_turn_offset: i64,
         ships: i64,
     ) -> Arc<BlockerTable> {
-        let bucket = blockers::speed_bucket(ships);
+        let ships = ships.max(1);
+        let v = fleet_speed(ships, MAX_SHIP_SPEED);
         let abs_launch = self.current_turn + launch_turn_offset;
-        let key = (shooter_id, abs_launch, bucket);
+        let key = (shooter_id, abs_launch, ships);
         let mut guard = self.blocker_tables.lock().unwrap();
         if let Some(t) = guard.get(&key) {
             return t.clone();
         }
-        let v = blockers::bucket_to_speed(bucket);
         let table = Arc::new(blockers::build_blocker_table(
             self,
             shooter_id,

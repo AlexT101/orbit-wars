@@ -1,37 +1,32 @@
-//! Parametric line-of-sight obstacle tester.
+//! Line-of-sight obstacle tester for fleet shots.
 //!
-//! For each potential shooter L and launch turn t0, a [`BlockerTable`] is
-//! built lazily and cached. The table is a flat list of [`BlockerEntry`]
-//! records — one per (obstacle, turn) pair on which a swept-pair collision
-//! is geometrically feasible. Each entry stores the exact arc of launch
-//! bearings that produces a collision at that turn, plus the fractional
-//! flight-time of the closest-approach moment within the turn.
+//! Primary path — [`shot_blocked_exact`]: given a lead angle and arrival time,
+//! decide whether any obstacle (sun, planet, comet) is struck before arrival by
+//! running the engine's own swept-pair collision
+//! ([`crate::engine::swept_pair_hit`]) per turn at the true fleet speed, over
+//! the already-cached entity positions. This is bit-for-bit what the simulator
+//! does, so the hot (unobstructed) path needs no precomputed, speed-quantized
+//! arc table.
 //!
-//! Shot queries are O(N_entries) with a tight bounding-box prefilter: each
-//! entry's `[aim_min, aim_max]` interval is narrow (one turn's worth of arc
-//! widening), so the vast majority of entries reject in two compares.
+//! Secondary path — [`BlockerTable`]: only when a shot is blocked does
+//! [`aim_with_prediction`] build the arc table (lazily, cached per
+//! `(shooter, launch turn, ships)`) to recover the *angular edges* of the
+//! blocked region, so it can try nudging the aim just past them.
 //!
-//! Geometry primer
+//! Geometry primer (for the arc envelope)
 //! ───────────────
 //! Fleet at launch L, angle θ, speed v sweeps from `f(s) = L + (launch_offset
-//! + (t−1+s)·v)·û(θ)` to `f(s=1)` during turn `t`. The blocker (orbiter, comet)
-//! sweeps from `Q(t−1)` to `Q(t)` over the same `s ∈ [0, 1]` — same chord
-//! linearization the engine uses in `swept_pair_hit` for orbital motion.
-//!
-//! Per-turn arc construction. For each turn `t` we compute the **envelope**
-//! of the per-`s` blocking arcs over `s ∈ [0, 1]`:
-//!   1. At each `s`, the law of cosines on the (L, Q(s), fleet) triangle
-//!      gives a per-`s` arc `θ ∈ [bearing(s) − α(s), bearing(s) + α(s)]`
-//!      with `α(s) = acos((K² + D² − r²) / (2 D K))`.
-//!   2. The union of those arcs over `s ∈ [0, 1]` is the set of aim angles
-//!      blocked during turn `t`. Since `bearing(s)` and `α(s)` are smooth,
-//!      the envelope edges are `max_s (bearing + α)` and `min_s (bearing − α)`
-//!      — located via a coarse scan + parabolic refinement (no closed form
-//!      since the critical-point equation is transcendental).
-//!
-//! Each [`BlockerEntry`] is one such envelope: a single bearing, a single
-//! earliest-collision flight time, and a single tight half-arc per
-//! (obstacle, turn). No max-pooling across turns.
+//! + (t−1+s)·v)·û(θ)` to `f(s=1)` during turn `t`; the blocker sweeps from
+//! `Q(t−1)` to `Q(t)` over the same `s ∈ [0, 1]` — the chord linearization the
+//! engine uses in `swept_pair_hit`.
+//!   1. At each `s`, the law of cosines on the (L, Q(s), fleet) triangle gives a
+//!      per-`s` arc `θ ∈ [bearing(s) − α(s), bearing(s) + α(s)]` with
+//!      `α(s) = acos((K² + D² − r²) / (2 D K))`.
+//!   2. The union over `s ∈ [0, 1]` is the aim angles blocked during turn `t`;
+//!      its edges `max_s(bearing + α)` / `min_s(bearing − α)` are found by a
+//!      coarse scan + golden-section refinement (the critical-point equation is
+//!      transcendental). Each [`BlockerEntry`] is one such per-(obstacle, turn)
+//!      envelope.
 
 #![allow(dead_code)]
 
@@ -46,12 +41,6 @@ use crate::entity_cache::{EntityCache, EntityKind};
 /// Synthetic id used for the sun in [`BlockerEntry::blocker_id`]. Negative so
 /// it cannot collide with any real planet/comet id.
 const SUN_BLOCKER_ID: i64 = -1;
-
-/// Fleet-speed quantization granularity for the blocker-table cache key.
-/// Tables built with speeds within `1 / V_QUANT` of each other are pooled,
-/// so different `ships` counts that round to the same speed bucket share
-/// one cached table. 20 → 0.05 speed steps → ~2.5% max speed error.
-const V_QUANT: f64 = 20.0;
 
 /// Aim solver result: `(angle_radians, integer_turns, target_x, target_y,
 /// fractional_flight_time)`. The fifth component is the real-valued flight
@@ -89,19 +78,6 @@ fn wrap_pi(a: f64) -> f64 {
     a - 2.0 * PI * ((a + PI) * (1.0 / (2.0 * PI))).floor()
 }
 
-/// Map a raw fleet speed to a quantized bucket key.
-#[inline]
-pub fn speed_bucket(ships: i64) -> i64 {
-    let v_raw = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
-    (v_raw * V_QUANT).round() as i64
-}
-
-/// Inverse of [`speed_bucket`] — the canonical speed for a bucket.
-#[inline]
-pub fn bucket_to_speed(bucket: i64) -> f64 {
-    bucket as f64 / V_QUANT
-}
-
 /// True iff `(aim, flight_time)` lies inside the entry's blocking arc.
 /// `target_id` is skipped (the target isn't a blocker of itself).
 #[inline]
@@ -116,17 +92,9 @@ fn entry_blocks(e: &BlockerEntry, target_id: i64, aim: f64, flight_time: f64) ->
     aim_w >= e.aim_min && aim_w <= e.aim_max
 }
 
-/// `true` iff any non-target blocker in `table` blocks `(aim, flight_time)`.
-pub fn is_blocked(table: &BlockerTable, target_id: i64, aim: f64, flight_time: f64) -> bool {
-    table
-        .entries
-        .iter()
-        .any(|e| entry_blocks(e, target_id, aim, flight_time))
-}
-
-
-/// Build the full blocker table for `(shooter_id, launch_turn_offset, v)`.
-/// `v` is the quantized fleet speed — see [`speed_bucket`] / [`bucket_to_speed`].
+/// Build the blocker table for `(shooter_id, launch_turn_offset, v)` at the
+/// exact fleet speed `v`. Built only on the blocked path of
+/// [`aim_with_prediction`] to supply the blocked arc's angular edges.
 pub fn build_blocker_table(
     cache: &EntityCache,
     shooter_id: i64,
@@ -439,21 +407,11 @@ fn feasibility_range(
 ///   `aim_max(t) = max_{s ∈ [0,1]} (bearing(s) + α(s))`
 ///   `aim_min(t) = min_{s ∈ [0,1]} (bearing(s) − α(s))`
 ///
-/// The earlier per-`s` sample union (DYN_SAMPLES entries per turn, plus
-/// analytical `K(s) = D(s)` ring-touch samples) had two bugs:
-///   1. *Tunneling*: the envelope peak `s*` falls between grid points; each
-///      grid sample's arc just barely misses the engine's swept-pair aim,
-///      while the continuous envelope covers it. Adding `K = D` samples
-///      didn't fix this — `K = D` maximizes `α(s)`, but the envelope edge is
-///      `bearing(s) + α(s)`, a different critical point.
-///   2. Bloated entry count: ~23 entries / turn / blocker, all hit on every
-///      `is_blocked` query.
-///
-/// The envelope is smooth (`bearing(s)` and `α(s)` are both C¹ on the
-/// feasibility range), so a coarse scan reliably brackets each extremum's
-/// grid cell. A golden-section search over the bracketing cell then
-/// refines to the continuous extremum, closing the tunneling gap that
-/// uniform sampling alone could not.
+/// The envelope (not a uniform per-`s` sample union) avoids *tunneling*: the
+/// envelope peak `s*` can fall between sample points, so a sampled arc just
+/// misses an aim the continuous envelope covers. `bearing(s)` and `α(s)` are
+/// C¹ on the feasibility range, so a coarse scan brackets each extremum's cell
+/// and a golden-section search refines it to the continuous extremum.
 fn add_dynamic_bands(
     out: &mut Vec<BlockerEntry>,
     cache: &EntityCache,
@@ -841,16 +799,138 @@ pub fn lead_target(
     None
 }
 
+/// Earliest swept-pair contact fraction `s ∈ [0, 1]` within one turn between
+/// the fleet segment `a → b` and a blocker disk of radius `r` sweeping
+/// `p0 → p1`, or `None` if they don't collide this turn. Uses the **exact**
+/// coefficients of the engine's [`crate::engine::swept_pair_hit`] (and its
+/// `t2 ≥ 0 && t1 ≤ 1` interval test), so the verdict matches the simulator's
+/// collision rule bit-for-bit rather than approximating it. A static disk is
+/// the degenerate `p0 == p1` case and needs no special handling.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn segment_contact_s(
+    ax: f64, ay: f64, bx: f64, by: f64,
+    p0x: f64, p0y: f64, p1x: f64, p1y: f64,
+    r: f64,
+) -> Option<f64> {
+    let d0x = ax - p0x;
+    let d0y = ay - p0y;
+    let dvx = (bx - ax) - (p1x - p0x);
+    let dvy = (by - ay) - (p1y - p0y);
+    let aco = dvx * dvx + dvy * dvy;
+    let bco = 2.0 * (d0x * dvx + d0y * dvy);
+    let cco = d0x * d0x + d0y * d0y - r * r;
+    if aco < 1e-12 {
+        return if cco <= 0.0 { Some(0.0) } else { None };
+    }
+    let disc = bco * bco - 4.0 * aco * cco;
+    if disc < 0.0 {
+        return None;
+    }
+    let sq = disc.sqrt();
+    let t1 = (-bco - sq) / (2.0 * aco);
+    let t2 = (-bco + sq) / (2.0 * aco);
+    if t2 >= 0.0 && t1 <= 1.0 {
+        Some(t1.max(0.0))
+    } else {
+        None
+    }
+}
+
+/// Exact obstacle verdict for a fleet leaving `shooter_id` at bearing `angle`
+/// with speed `v` (launching `launch_turn_offset` turns ahead) that reaches its
+/// target at fractional `flight_time`. Returns `true` iff some obstacle
+/// (sun, planet, comet) is struck **at or before** `flight_time`.
+///
+/// This is computed directly at the true engine speed `v` over the already-cached
+/// per-turn entity positions — there is no precomputed, speed-quantized arc
+/// table, so there is no `V_QUANT` mismatch: every per-turn test is the engine's
+/// own swept-pair ([`segment_contact_s`]). The source planet is **not** skipped
+/// (the engine doesn't either — an orbiting source can overtake a slow prograde
+/// launch within turn 1); a static source is filtered out naturally because the
+/// outbound fleet never re-enters its disk. The target is skipped (reaching it
+/// is success, not a block) and obstacle contacts strictly after `flight_time`
+/// don't count — matching the launch-now arrival ordering.
+pub fn shot_blocked_exact(
+    cache: &EntityCache,
+    shooter_id: i64,
+    target_id: i64,
+    angle: f64,
+    flight_time: f64,
+    v: f64,
+    launch_turn_offset: i64,
+) -> bool {
+    let Some([lx, ly]) = cache.position(shooter_id, launch_turn_offset) else {
+        return false;
+    };
+    let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
+    let launch_offset = shooter_radius + LAUNCH_CLEARANCE;
+    let ux = angle.cos();
+    let uy = angle.sin();
+
+    // Only turns whose `[t-1, t]` flight-time window can contain a contact at or
+    // before arrival matter; later turns are irrelevant.
+    let max_turn = (flight_time.ceil() as i64).max(1);
+
+    // Fleet segment for turn `t`: ring distance `D(s) = launch_offset + (t-1+s)·v`
+    // along the fixed bearing. Returns true iff the disk is struck by arrival.
+    let contact_before = |p0x: f64, p0y: f64, p1x: f64, p1y: f64, r: f64, t: i64| -> bool {
+        let d_start = launch_offset + (t as f64 - 1.0) * v;
+        let d_end = launch_offset + t as f64 * v;
+        let ax = lx + d_start * ux;
+        let ay = ly + d_start * uy;
+        let bx = lx + d_end * ux;
+        let by = ly + d_end * uy;
+        match segment_contact_s(ax, ay, bx, by, p0x, p0y, p1x, p1y, r) {
+            Some(s) => (t as f64 - 1.0 + s) <= flight_time + 1e-9,
+            None => false,
+        }
+    };
+
+    // Sun: static disk at board center.
+    for t in 1..=max_turn {
+        if contact_before(CENTER, CENTER, CENTER, CENTER, SUN_RADIUS, t) {
+            return true;
+        }
+    }
+
+    // Planets and comets (including the source — see above).
+    let abs_base = cache.current_turn + launch_turn_offset;
+    for (&bid, ent) in cache.entities.iter() {
+        if bid == target_id {
+            continue;
+        }
+        let r = ent.radius;
+        let positions = &ent.positions;
+        for t in 1..=max_turn {
+            let abs0 = abs_base + t - 1;
+            let abs1 = abs_base + t;
+            if abs0 < 0 || abs1 < 0 || (abs1 as usize) >= positions.len() {
+                continue;
+            }
+            let (Some(p0), Some(p1)) = (positions[abs0 as usize], positions[abs1 as usize]) else {
+                continue;
+            };
+            if contact_before(p0[0], p0[1], p1[0], p1[1], r, t) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Aim from `shooter_id` to `target_id` with `ships`, for a fleet launching
 /// at `launch_turn_offset` turns after the cache's current turn (pass `0`
 /// for "launch now"). Source, target, and obstacle positions are all
-/// evaluated at the launch turn so the blocker table reflects the real
-/// flight window — required by the early-game DFS, which scores delayed
-/// launches and would otherwise falsely assume current geometry.
+/// evaluated at the launch turn so obstacle tests reflect the real flight
+/// window — required by the early-game DFS, which scores delayed launches and
+/// would otherwise falsely assume current geometry.
 ///
-/// Quantizes the speed once, then routes the quantized value through both
-/// the leader and the cached blocker table so the (angle, turns) result is
-/// consistent with what the table tested.
+/// The common (unobstructed) path is decided entirely by [`shot_blocked_exact`]
+/// at the true engine speed — no arc table is built. Only when the direct shot
+/// is blocked do we build the exact `v_true` blocker table (for its arc edges)
+/// and try to nudge a clear angle around the blocked arc, re-verifying each
+/// candidate with the exact swept-pair verdict.
 pub fn aim_with_prediction(
     cache: &EntityCache,
     shooter_id: i64,
@@ -858,18 +938,23 @@ pub fn aim_with_prediction(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    // Lead the target at the **exact** engine speed so the (angle, turns) we
-    // emit lands on the actual orbital intercept point — quantizing here was
-    // a real bug: a ~2.5% speed mismatch is enough for the planet to rotate
-    // out from under our predicted hit point on long shots.
+    // Lead the target at the exact engine speed so (angle, turns) land on the
+    // actual orbital intercept point.
     let v_true = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
     let (angle, turns, tx, ty, flight_time) =
         lead_target(cache, shooter_id, target_id, launch_turn_offset, v_true)?;
-    // The blocker table is still keyed by the quantized bucket so different
-    // ship counts that round to the same speed share a cached table; the
-    // angle/flight_time we query it with come from the precise lead solve,
-    // which is the conservative direction (slight over-rejection at the
-    // boundary, never under-rejection).
+
+    // Fast path: exact swept-pair verdict at v_true over cached positions.
+    if !shot_blocked_exact(cache, shooter_id, target_id, angle, flight_time, v_true, launch_turn_offset) {
+        return Some((angle, turns, tx, ty, flight_time));
+    }
+
+    // Direct path is blocked. Build the exact v_true blocker table only now, to
+    // get the blocked arc's angular edges, and try angles just outside them. The
+    // table envelope is a superset of the exact blocked set at this speed, so its
+    // edges over-cover the true block — a sound place to step past. Each
+    // candidate that still lands within the target's radius at `flight_time` is
+    // re-verified by the exact swept-pair before being accepted.
     let table = cache.blocker_table(shooter_id, launch_turn_offset, ships);
 
     // Extreme edges of the union of blocking arcs, computed as signed deltas
@@ -877,7 +962,6 @@ pub fn aim_with_prediction(
     // sides of the ±π branch cut are compared in the same coordinate frame.
     // entry_blocks guarantees lo ≤ 0 ≤ hi for any blocking entry.
     let (mut delta_lo, mut delta_hi) = (0.0_f64, 0.0_f64);
-    let mut any_blocked = false;
     for e in table.entries.iter() {
         if entry_blocks(e, target_id, angle, flight_time) {
             let lo = wrap_pi(e.aim_min - angle);
@@ -888,18 +972,9 @@ pub fn aim_with_prediction(
             if hi > delta_hi {
                 delta_hi = hi;
             }
-            any_blocked = true;
         }
     }
-    if !any_blocked {
-        return Some((angle, turns, tx, ty, flight_time));
-    }
 
-    // Direct path is blocked. Try angles just outside the full blocked arc's
-    // edges — if either still hits the target at the same arrival turn and
-    // clears all obstacles, prefer it over returning None. Target validity is
-    // checked by placing the fleet at `flight_time` along the candidate angle
-    // and verifying its distance to (tx, ty) is within target_radius.
     let [lx, ly] = cache.position(shooter_id, launch_turn_offset)?;
     let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
     let target_radius = cache.get(target_id).map(|e| e.radius).unwrap_or(0.0);
@@ -919,7 +994,7 @@ pub fn aim_with_prediction(
         if dx * dx + dy * dy > r_sq {
             continue; // outside target's valid arc at this turn
         }
-        if !is_blocked(&table, target_id, theta_try, flight_time) {
+        if !shot_blocked_exact(cache, shooter_id, target_id, theta_try, flight_time, v_true, launch_turn_offset) {
             return Some((theta_try, turns, tx, ty, flight_time));
         }
     }
@@ -933,8 +1008,8 @@ pub fn aim_with_prediction(
 /// `launch_turn_offset` is the offset of the launch turn *relative to the
 /// cache's current turn* at re-verification time — for a delayed-launch
 /// entry whose abs-launch slot has been partially overtaken, this is
-/// `slot - current_turn`. The blocker table is built for that offset so
-/// re-verification sees obstacle positions at the actual launch time.
+/// `slot - current_turn`, so the exact swept-pair sees obstacle positions at
+/// the actual launch time.
 pub fn shot_still_clear(
     cache: &EntityCache,
     shooter_id: i64,
@@ -944,6 +1019,6 @@ pub fn shot_still_clear(
     flight_time: f64,
     launch_turn_offset: i64,
 ) -> bool {
-    let table = cache.blocker_table(shooter_id, launch_turn_offset, ships);
-    !is_blocked(&table, target_id, angle, flight_time)
+    let v = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
+    !shot_blocked_exact(cache, shooter_id, target_id, angle, flight_time, v, launch_turn_offset)
 }
