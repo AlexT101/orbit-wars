@@ -8,7 +8,6 @@ mod entity_cache;
 mod helpers;
 mod hellburner;
 mod rollout;
-mod sim_probe;
 mod world;
 
 #[cfg(test)]
@@ -18,9 +17,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
-use crate::constants::{COMET_SPAWN_STEPS, TOTAL_OVERAGE_TIME};
-use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
+use crate::constants::{COMET_SPAWN_STEPS, HORIZON, TOTAL_OVERAGE_TIME};
+use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 use crate::entity_cache::EntityCache;
+use crate::helpers::ArrivalLedger;
 use crate::rollout::pick_plan_by_rollout;
 use crate::world::WorldState;
 
@@ -216,16 +216,21 @@ impl Bot {
             obs.comet_planet_ids,
             obs.comets,
             num_players,
-            Configuration::default(),
         );
 
-        // Plan candidates inside a block so the WorldState's immutable borrow
-        // on the cache ends before the rollout reborrows it mutably.
-        let candidates = {
+        // The turn-0 arrival ledger is player-agnostic, so build it once here and
+        // reuse it both for candidate generation and for the opponent turn-0
+        // modelling inside the rollout — saving a redundant HORIZON-turn walk.
+        // Built in a block so the WorldState's immutable borrow on the cache
+        // ends before the rollout reborrows it mutably.
+        let (candidates, initial_ledger) = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
-            let mut world = WorldState::from_engine(player, &initial_state, cache_ref);
+            let initial_sim = Simulator::new(&initial_state);
+            let ledger = ArrivalLedger::build(&initial_sim, HORIZON, cache_ref);
+            let mut world =
+                WorldState::from_simulator_with_ledger(player, &initial_sim, &ledger, cache_ref);
             world.remaining_overage_time = obs.remaining_overage_time;
-            crate::hellburner::search_candidates(&world)
+            (crate::hellburner::search_candidates(&world), ledger)
         };
 
         let cache_mut = self.cache.as_mut().expect("entity cache populated above");
@@ -237,6 +242,7 @@ impl Bot {
             crate::hellburner::search_candidates,
             cache_mut,
             obs.remaining_overage_time,
+            Some(&initial_ledger),
         );
         self.current_turn += 1;
         Ok(moves)
