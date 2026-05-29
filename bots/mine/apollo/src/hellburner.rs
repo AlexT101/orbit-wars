@@ -1000,7 +1000,7 @@ fn early_production_of(world: &WorldState, planet_id: i64) -> i64 {
     world
         .planet_by_id
         .get(&planet_id)
-        .map(|p| p.production)
+        .map(|&idx| world.planets[idx].production)
         .unwrap_or(0)
 }
 

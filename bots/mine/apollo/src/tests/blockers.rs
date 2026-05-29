@@ -3,12 +3,13 @@
 //! independently re-simulate the fleet trajectory and the per-turn swept-pair
 //! collision against every obstacle, and require the two to agree.
 
+use super::reference_engine::RefEngine;
 use crate::blockers::{aim_with_prediction, bucket_to_speed, lead_target, speed_bucket};
 use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
-use crate::engine::{fleet_speed, swept_pair_hit, Configuration, EngineState, MoveAction};
+use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
 use crate::entity_cache::{EntityCache, EntityKind};
 
-fn cache_for(state: &EngineState) -> EntityCache {
+fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(
         &state.initial_planets,
         &state.comets,
@@ -162,7 +163,7 @@ fn reaches_target_with_engine_speed(
 #[ignore]
 fn dump_failing_case_geometry() {
     use crate::blockers::{bucket_to_speed, build_blocker_table, speed_bucket};
-    let state = crate::engine::EngineState::new(100, 2, crate::engine::Configuration::default());
+    let state = RefEngine::new(100, 2, Configuration::default());
     let cache = cache_for(&state);
     let shooter = 8i64;
     let blocker = 12i64;
@@ -243,7 +244,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
 
     let mut clear_cases = 0usize;
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -309,7 +310,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
     let mut missing = Vec::new();
 
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -365,7 +366,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
 /// happens to miss the sun-blocking geometry on these seeds.
 #[test]
 fn sun_blocks_chords_passing_through_center() {
-    let state = EngineState::new(42, 2, Configuration::default());
+    let state = RefEngine::new(42, 2, Configuration::default());
     let cache = cache_for(&state);
 
     let statics: Vec<(i64, f64, f64, f64)> = cache
@@ -430,7 +431,7 @@ fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
 
     let mut mismatches = Vec::new();
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -508,7 +509,7 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
 
     let mut misses = Vec::new();
     for seed in seeds {
-        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut state = RefEngine::new(seed, 2, Configuration::default());
         let mut cache = cache_for(&state);
 
         for &step in &future_steps {
@@ -594,7 +595,7 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
 
     let mut misses = Vec::new();
     for seed in seeds {
-        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut state = RefEngine::new(seed, 2, Configuration::default());
         let mut cache = cache_for(&state);
 
         for &step in &future_steps {
