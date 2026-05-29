@@ -1,0 +1,10 @@
+name: "Orbit Wars Heuristic"
+description: "unknown"
+author: "vkhydras"
+kernel_slug: "vickimar/orbit-wars-heuristic-1000"
+kernel_version: "3"
+date_fetched: 2026-05-29
+license: "unknown"
+tags: [heuristic]
+author_claimed_lb_score: 1094.3
+disabled: false

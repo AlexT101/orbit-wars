@@ -10,6 +10,8 @@ from orbit_wars_app.tournament import Tournament
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+from tests.zoo import REAL_ZOO
+
 
 def test_tournament_writes_is_quick_match_true(tmp_path: Path):
     cfg = TournamentConfig(
@@ -21,7 +23,7 @@ def test_tournament_writes_is_quick_match_true(tmp_path: Path):
     run_id = Tournament(
         config=cfg,
         runs_root=tmp_path,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     ).run()
     run_json = json.loads((tmp_path / run_id / "run.json").read_text())
     assert run_json["is_quick_match"] is True
@@ -36,7 +38,7 @@ def test_tournament_writes_is_quick_match_false_by_default(tmp_path: Path):
     run_id = Tournament(
         config=cfg,
         runs_root=tmp_path,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     ).run()
     run_json = json.loads((tmp_path / run_id / "run.json").read_text())
     assert run_json["is_quick_match"] is False

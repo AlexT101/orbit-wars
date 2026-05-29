@@ -231,6 +231,19 @@ ul.runs > li:hover {
 .status-completed { color: var(--success); }
 .status-running { color: var(--warning); }
 .status-aborted { color: var(--error); }
+.status-queued { color: var(--text-dim, var(--text)); opacity: 0.75; }
+.status-stopping { color: var(--warning); opacity: 0.8; }
+
+/* Scheduler "Active now" panel + settings rows */
+.sched-concurrency { font-size: 0.85rem; opacity: 0.75; }
+.sched-match {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 0.8rem;
+}
 
 ul.matches {
   list-style: none;

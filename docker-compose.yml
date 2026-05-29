@@ -24,4 +24,7 @@ services:
     environment:
       # Point the Kaggle SDK at the non-root home so `user:` mapping works.
       HOME: /home/app
+      # Host-side port (same default as the ports mapping above) so the app can
+      # print a correct "running at http://localhost:<port>" line on startup.
+      PORT: "${PORT:-6001}"
     restart: unless-stopped

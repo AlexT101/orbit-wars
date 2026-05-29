@@ -43,14 +43,6 @@ use crate::constants::{
 use crate::engine::fleet_speed;
 use crate::entity_cache::{EntityCache, EntityKind};
 
-/// Per-turn sub-sampling resolution for [`lead_target`]. For each candidate
-/// arrival turn we sample the target's chord at this many evenly-spaced `s`
-/// values and pick the one that best aligns the fleet's radial chord with the
-/// target's tangential chord (smallest radial gap). 11 samples gives ~0.1
-/// turn-fraction resolution — enough to land within `target_radius` whenever
-/// a swept-pair hit is geometrically possible.
-const LEAD_SAMPLES: usize = 11;
-
 /// Synthetic id used for the sun in [`BlockerEntry::blocker_id`]. Negative so
 /// it cannot collide with any real planet/comet id.
 const SUN_BLOCKER_ID: i64 = -1;
@@ -647,6 +639,123 @@ fn add_dynamic_bands(
     }
 }
 
+/// Fraction `s* ∈ [0, 1]` of closest fleet-to-target approach during one turn,
+/// and that minimum gap `|K(s*) − D(s*)|`. The fleet ring distance is
+/// `D(s) = d0 + s·v`; the target's distance from launch is
+/// `K(s) = |Q0 + s·dq − L|`. Aiming at `bearing(L → Q(s*))` makes the
+/// fleet-to-target distance exactly `|K(s*) − D(s*)|`, so the engine's
+/// swept-pair test fires this turn iff the returned gap ≤ `target_radius`.
+///
+/// `h(s) = K(s) − D(s)` is convex (norm of an affine function, minus an affine
+/// function), so the closest approach is solved exactly rather than by uniform
+/// sub-sampling (which could tunnel past the true minimum between samples):
+///   * Exact contact (`h = 0`) is the quadratic `K²(s) = D²(s)` — the dominant
+///     intercept case. `K, D > 0`, so a real root in `[0, 1]` is a genuine
+///     `K = D` crossing (no spurious `K = −D`); the earliest gives gap 0.
+///   * With no crossing `h` keeps one sign on `[0, 1]`. If `h > 0` the closest
+///     approach is the convex interior minimum, where `h'(s) = 0` ⇒
+///     `(b + c·s) = v·√g(s)`; squaring gives a quadratic whose in-range root
+///     (plus the two endpoints) are the only argmin candidates. If `h < 0`
+///     the minimum of `|h|` is at the endpoint where `h` is largest — a convex
+///     function attains its maximum over an interval at an endpoint.
+#[allow(clippy::too_many_arguments)]
+fn closest_approach(
+    lx: f64,
+    ly: f64,
+    q0x: f64,
+    q0y: f64,
+    dqx: f64,
+    dqy: f64,
+    d0: f64,
+    v: f64,
+) -> (f64, f64) {
+    let ux = q0x - lx;
+    let uy = q0y - ly;
+    let a = ux * ux + uy * uy; // K²(0)
+    let b = ux * dqx + uy * dqy; // ½ dK²/ds at s=0
+    let c = dqx * dqx + dqy * dqy; // ½ d²K²/ds² (constant)
+    let h = |s: f64| (a + 2.0 * b * s + c * s * s).max(0.0).sqrt() - (d0 + v * s);
+
+    // Exact contact: roots of K²(s) = D²(s) → (c−v²)s² + 2(b−d0·v)s + (a−d0²)=0,
+    // written `big_a·s² + 2·big_b·s + big_c` so roots are (−big_b ± √disc)/big_a.
+    let big_a = c - v * v;
+    let big_b = b - d0 * v;
+    let big_c = a - d0 * d0;
+    let mut earliest_root = f64::INFINITY;
+    if big_a.abs() < 1e-12 {
+        // Degenerate (target chord speed equals fleet speed): linear in s.
+        if big_b.abs() >= 1e-12 {
+            let s = -big_c / (2.0 * big_b);
+            if (0.0..=1.0).contains(&s) {
+                earliest_root = s;
+            }
+        }
+    } else {
+        let disc = big_b * big_b - big_a * big_c;
+        if disc >= 0.0 {
+            let sq = disc.sqrt();
+            for &root in &[(-big_b - sq) / big_a, (-big_b + sq) / big_a] {
+                if (0.0..=1.0).contains(&root) && root < earliest_root {
+                    earliest_root = root;
+                }
+            }
+        }
+    }
+    if earliest_root.is_finite() {
+        return (earliest_root, 0.0);
+    }
+
+    // No crossing → h is single-signed on [0, 1] (h = 0 at s = 0 would have
+    // been caught above as a root, so h(0) ≠ 0 here).
+    let h0 = h(0.0);
+    if h0 <= 0.0 {
+        // h < 0 throughout: |h| is smallest where h is largest; a convex
+        // function attains its max over an interval at an endpoint.
+        let h1 = h(1.0);
+        return if h0 >= h1 { (0.0, -h0) } else { (1.0, -h1) };
+    }
+
+    // h > 0 throughout and convex → the closest approach is the interior
+    // minimum where h'(s) = 0. Squaring `(b + c·s) = v·√g(s)` gives
+    // `c(c−v²)s² + 2b(c−v²)s + (b²−v²a) = 0`. The convex stationary point is a
+    // root of this; the two endpoints are the only other argmin candidates.
+    // Evaluating h at each and taking the minimum is exact and degrades
+    // gracefully when the quadratic is degenerate (c → 0 static target, or
+    // c → v²): no in-range root ⇒ the minimum is at an endpoint.
+    let mut best_s = 0.0;
+    let mut best_gap = h0;
+    let h1 = h(1.0);
+    if h1 < best_gap {
+        best_s = 1.0;
+        best_gap = h1;
+    }
+    let qa = c * (c - v * v);
+    let qb = 2.0 * b * (c - v * v);
+    let qc = b * b - v * v * a;
+    let consider = |s: f64, best_s: &mut f64, best_gap: &mut f64| {
+        if (0.0..=1.0).contains(&s) {
+            let hs = h(s);
+            if hs < *best_gap {
+                *best_gap = hs;
+                *best_s = s;
+            }
+        }
+    };
+    if qa.abs() < 1e-12 {
+        if qb.abs() >= 1e-12 {
+            consider(-qc / qb, &mut best_s, &mut best_gap);
+        }
+    } else {
+        let disc = qb * qb - 4.0 * qa * qc;
+        if disc >= 0.0 {
+            let sq = disc.sqrt();
+            consider((-qb - sq) / (2.0 * qa), &mut best_s, &mut best_gap);
+            consider((-qb + sq) / (2.0 * qa), &mut best_s, &mut best_gap);
+        }
+    }
+    (best_s, best_gap.max(0.0))
+}
+
 /// Lead a (possibly moving) target. Returns `(angle, integer_turns, target_x,
 /// target_y, fractional_flight_time)` where `(target_x, target_y) = Q(s*)` is
 /// the point on the target's chord during turn `integer_turns` at which the
@@ -654,11 +763,13 @@ fn add_dynamic_bands(
 /// − 1 + s*`. `v` is the quantized fleet speed.
 ///
 /// Approach: walk integer turn `t` forward from the earliest geometrically
-/// feasible turn. For each `t`, find `s* ∈ [0, 1]` that minimizes the radial
-/// gap `|K(s) − D(s)|` between the target's chord position `Q(s)` and the
-/// fleet's chord distance `D(s) = launch_offset + (t − 1 + s)·v` (same chord
-/// linearization the engine uses). Aiming `θ = bearing(L → Q(s*))` puts the
-/// fleet at distance `D(s*)` along the line through `Q(s*)`, so the actual
+/// feasible turn. For each `t`, [`closest_approach`] solves for the
+/// `s* ∈ [0, 1]` minimizing the radial gap `|K(s) − D(s)|` between the target's
+/// chord position `Q(s)` and the fleet's chord distance
+/// `D(s) = launch_offset + (t − 1 + s)·v` (same chord linearization the engine
+/// uses) — exactly, since `K − D` is convex (closed-form `K = D` crossing, else
+/// golden-section on the convex minimum). Aiming `θ = bearing(L → Q(s*))` puts
+/// the fleet at distance `D(s*)` along the line through `Q(s*)`, so the actual
 /// fleet-to-target distance at `s*` is exactly `|K(s*) − D(s*)|`. If that is
 /// ≤ `target_radius`, the engine's `swept_pair_hit` fires for turn `t` —
 /// return immediately with the earliest such turn.
@@ -698,8 +809,6 @@ pub fn lead_target(
     let start: i64 = 1;
     let [_seed_x, _seed_y] = cache.position(target_id, launch_turn_offset)?;
 
-    let inv_samples = 1.0 / (LEAD_SAMPLES - 1) as f64;
-
     for t in start..=max_lookahead {
         let [q0x, q0y] = cache.position(target_id, launch_turn_offset + t - 1)?;
         let [q1x, q1y] = cache.position(target_id, launch_turn_offset + t)?;
@@ -707,23 +816,9 @@ pub fn lead_target(
         let dqy = q1y - q0y;
         let d0 = launch_offset + (t as f64 - 1.0) * v;
 
-        // `sqrt(a² + b²)` over `hypot`: coordinates are bounded by BOARD_SIZE
-        // ≈ 100 so overflow guards are dead weight; ~3-4× faster in this hot
-        // argmin loop.
-        let mut best_gap = f64::INFINITY;
-        let mut best_s = 0.0_f64;
-        for i in 0..LEAD_SAMPLES {
-            let s = i as f64 * inv_samples;
-            let qx = q0x + s * dqx - lx;
-            let qy = q0y + s * dqy - ly;
-            let k = (qx * qx + qy * qy).sqrt();
-            let d = d0 + s * v;
-            let gap = (k - d).abs();
-            if gap < best_gap {
-                best_gap = gap;
-                best_s = s;
-            }
-        }
+        // Exact closest fleet-to-target approach this turn (convex `K − D`):
+        // closed-form `K = D` crossing, else golden-section minimum.
+        let (best_s, best_gap) = closest_approach(lx, ly, q0x, q0y, dqx, dqy, d0, v);
 
         if best_gap > tr {
             continue;
