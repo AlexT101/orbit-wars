@@ -8,6 +8,7 @@ pub const BOARD_SIZE: f64 = 100.0;
 pub const CENTER: f64 = BOARD_SIZE / 2.0;                           // Sun / orbital center.
 pub const EPISODE_STEPS: i64 = 500;
 pub const MAX_PLAYERS: usize = 4;
+pub const TOTAL_OVERAGE_TIME: f64 = 60.0;                               // Total overage time (in seconds).
 
 // Physics rules
 pub const SUN_RADIUS: f64 = 10.0;                                   // Radius of sun's destruction zone.

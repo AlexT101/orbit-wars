@@ -107,8 +107,15 @@
   transition: background-color 120ms;
 }
 
-.scrape-btn:hover {
+.scrape-btn:hover:not(:disabled) {
   background: var(--accent-bg);
+}
+
+.scrape-btn:disabled {
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  cursor: not-allowed;
+  background: transparent;
 }
 
 .scrape-btn.go {
@@ -310,6 +317,16 @@
 
 .replay-name {
   color: inherit;
+}
+
+.replay-name-winner {
+  color: var(--success);
+  font-weight: 700;
+}
+
+.replay-name-loser {
+  color: var(--text-primary);
+  font-weight: 300;
 }
 
 .replay-vs {

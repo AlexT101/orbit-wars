@@ -1,0 +1,9 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "orbit-wars-model"
+version = "0.1.0"
+description = "Stateless Orbit Wars forward model (no RNG, set state and step)"
+requires-python = ">=3.9"

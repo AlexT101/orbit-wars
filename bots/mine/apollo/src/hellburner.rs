@@ -412,10 +412,19 @@ fn zero_sum_mult(world: &WorldState, target: &Planet) -> f64 {
 /// (relative to current step). The integral `prod × remaining` automatically
 /// trades arrival-time against production: waiting 2 turns for a 5-prod
 /// target beats grabbing a 2-prod target now once `5(H−A−2) > 2(H−A)`.
+///
+/// For neutral captures, the garrison cost (`target.ships`) is subtracted so
+/// expensive low-production neutrals don't drain frontline ships — mirrors
+/// the early-game DFS gain formula.
 fn score_capture(world: &WorldState, target: &Planet, arrival_turn: i64) -> f64 {
     let h = world.timeline_cache.horizon;
     let remaining = (h - arrival_turn).max(0) as f64;
-    target.production as f64 * remaining * zero_sum_mult(world, target)
+    let reward = target.production as f64 * remaining * zero_sum_mult(world, target);
+    if target.owner == -1 {
+        reward - target.ships as f64
+    } else {
+        reward
+    }
 }
 
 // ── evaluate_frontline_strategy ──────────────────────────────────────────
@@ -991,7 +1000,7 @@ fn early_production_of(world: &WorldState, planet_id: i64) -> i64 {
     world
         .planet_by_id
         .get(&planet_id)
-        .map(|p| p.production)
+        .map(|&idx| world.planets[idx].production)
         .unwrap_or(0)
 }
 

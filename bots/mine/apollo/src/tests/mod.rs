@@ -1,6 +1,9 @@
 mod blockers;
+mod combat;
 mod engine;
 mod entity_cache;
 mod hellburner;
+mod reference_engine;
 mod rollout_bench;
-mod sim_probe;
+mod simulator;
+mod timeline;

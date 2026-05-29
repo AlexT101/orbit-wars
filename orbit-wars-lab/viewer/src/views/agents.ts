@@ -123,7 +123,6 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
     }
     listEl.innerHTML = filtered
       .map((a) => {
-        const tags = (a.tags || []).slice(0, 4).map(escapeHtml).join(" · ");
         const desc = a.description ? escapeHtml(a.description.slice(0, 160)) : "";
         const errBadge = a.last_error?.trim()
           ? `<span class="replay-source" style="color: var(--error); background: rgba(255,138,138,0.08);">error</span>`
@@ -141,17 +140,19 @@ export async function renderAgents(root: HTMLElement): Promise<void> {
         const clearBtn = hasSamples
           ? `<button class="replay-delete runtime-clear" data-id="${safeId}" title="Clear runtime samples for this agent">↺</button>`
           : "";
+        const author = a.author
+          ? `<span class="replay-winner" style="margin-left: 8px;">by <strong>${escapeHtml(a.author)}</strong></span>`
+          : "";
         return `
           <div class="replay-item" data-id="${safeId}">
             <div class="replay-meta-row">
               <span class="replay-source ${escapeHtml(a.bucket)}">${escapeHtml(a.bucket)}</span>
               ${errBadge}${disabledBadge}
-              <span class="replay-title">${escapeHtml(a.name)}</span>
-              <span class="replay-winner">${a.author ? "by <strong>" + escapeHtml(a.author) + "</strong>" : ""}</span>
+              <span class="replay-title">${escapeHtml(a.name)}${author}</span>
               <span class="agent-runtime" title="${rtTooltip}">${rtText}/turn</span>
             </div>
             <div class="replay-meta-sub">
-              ${safeId}${tags ? " · " + tags : ""}${desc ? " · " + desc : ""}
+              ${desc || "&mdash;"}
             </div>
             ${clearBtn}
             <button class="replay-delete" data-id="${safeId}" title="Delete agent">×</button>

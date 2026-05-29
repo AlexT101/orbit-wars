@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from parity.engine import Snapshot
+from engine_parity_checker.engine import Snapshot
 
 
 @dataclass

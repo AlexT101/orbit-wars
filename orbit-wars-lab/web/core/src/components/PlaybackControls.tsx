@@ -103,7 +103,12 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({
     onStepChange(parseInt(e.target.value, 10));
   };
 
-  const stepDisplay = `${currentStep + 1} / ${totalSteps}`;
+  // 0-indexed step counter so this matches the canvas overlay ("Step N"),
+  // the Quick Match sidebar ("Turn N / total-1"), the debug panel header,
+  // and any agent-emitted `=== turn N ===` markers. Kaggle's stock bundle
+  // shows `currentStep + 1` (1-indexed); displaying that next to a bunch
+  // of 0-indexed counters elsewhere reads as off-by-one drift.
+  const stepDisplay = `${currentStep} / ${Math.max(0, totalSteps - 1)}`;
 
   return (
     <div className={className} style={{ ...controlsStyles, ...style }}>

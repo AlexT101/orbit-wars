@@ -1,0 +1,135 @@
+_wandb:
+    value:
+        cli_version: 0.27.0
+        e:
+            yanzt5oghpc0zg7zb0hp6cq4dyndhei7:
+                args:
+                    - --total-steps
+                    - "100000"
+                    - --rollout-steps
+                    - "256"
+                    - --opponent
+                    - nearest,hellburner,heuristic,snapshot_sample
+                    - --snapshot-every-updates
+                    - "25"
+                    - --snapshot-pool-size
+                    - "4"
+                    - --eval-opponents
+                    - noop,random,nearest,hellburner,heuristic,self
+                    - --eval-games
+                    - "16"
+                    - --checkpoint-dir
+                    - experimental_arch/checkpoints/run1
+                    - --wandb-project
+                    - orbit-wars-rl-experimental
+                    - --wandb-name
+                    - run1-mlp-mixed
+                codePath: experimental_arch/train.py
+                codePathLocal: experimental_arch/train.py
+                cpu_count: 6
+                cpu_count_logical: 12
+                disk:
+                    /:
+                        total: "1081101176832"
+                        used: "225397600256"
+                email: kenny.chau@ucalgary.ca
+                executable: /usr/bin/python
+                git:
+                    commit: 5cb67e49f4da52b0d65ef39fa31420037d426886
+                    remote: https://github.com/AlexT101/orbit-wars
+                host: ThisDevice
+                memory:
+                    total: "12542115840"
+                os: Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.35
+                program: /home/sunrise/orbitwars/pantheow/experimental_arch/train.py
+                python: CPython 3.12.12
+                root: /home/sunrise/orbitwars/pantheow
+                startedAt: "2026-05-28T04:36:35.743829Z"
+                writerId: yanzt5oghpc0zg7zb0hp6cq4dyndhei7
+        m: []
+        python_version: 3.12.12
+        t:
+            "1":
+                - 1
+                - 95
+            "2":
+                - 1
+                - 95
+            "3":
+                - 13
+                - 16
+                - 61
+            "4": 3.12.12
+            "5": 0.27.0
+            "8":
+                - 2
+            "12": 0.27.0
+            "13": linux-x86_64
+checkpoint_dir:
+    value: experimental_arch/checkpoints/run1
+clip_coef:
+    value: 0.2
+device:
+    value: cpu
+ent_coef:
+    value: 0.05
+ent_coef_final:
+    value: 0.01
+eval_every_updates:
+    value: 25
+eval_games:
+    value: 16
+eval_opponents:
+    value: noop,random,nearest,hellburner,heuristic,self
+gae_lambda:
+    value: 0.95
+gamma:
+    value: 0.99
+hidden:
+    value: 128
+init_checkpoint:
+    value: null
+learning_rate:
+    value: 3e-05
+lr_schedule:
+    value: linear
+lr_warmup_steps:
+    value: 0
+max_grad_norm:
+    value: 1
+minibatch_size:
+    value: 256
+model:
+    value: mlp
+opponent:
+    value: nearest,hellburner,heuristic,snapshot_sample
+resume_checkpoint:
+    value: null
+rollout_steps:
+    value: 256
+seed:
+    value: 7
+snapshot_every_updates:
+    value: 25
+snapshot_pool_size:
+    value: 4
+total_steps:
+    value: 100000
+transformer_heads:
+    value: 4
+transformer_layers:
+    value: 3
+update_epochs:
+    value: 1
+use_wandb:
+    value: true
+vf_coef:
+    value: 0.5
+wandb_mode:
+    value: online
+wandb_name:
+    value: run1-mlp-mixed
+wandb_project:
+    value: orbit-wars-rl-experimental
+weight_decay:
+    value: 0.0001
