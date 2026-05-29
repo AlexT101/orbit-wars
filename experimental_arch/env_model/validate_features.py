@@ -1,120 +1,197 @@
-"""Validate the Rust feature encoder across the pyo3 boundary.
+"""Validate the Rust feature encoder against kaggle's reference engine.
 
-The Rust unit/property tests (`cargo test`) cover the core `encode` on
-in-memory states. This script covers the *Python-facing* surface that training
-will actually call:
+Two things are checked, both against the official `kaggle_environments` engine
+(the source of truth) rather than env_model, for safety:
 
-  - `orbit_wars_model.encode_obs(obs, player)`         (obs-dict path, training)
-  - `OrbitWarsModel.set_state(obs).features(player)`   (model path, bot)
+1. Frame caches. `encode_obs` builds frames at t, t+1, t+10, t_resolved by
+   forward-simulating with empty actions. We step a kaggle env the same number
+   of empty turns and assert the planet states (owner / ships / position) match.
 
-For each random observation it checks the distance matrix against an
-independent NumPy brute-force reference and asserts the two code paths agree.
-Prints `N / N checks pass` in the repo's usual validator style.
+2. Aim solver. For a sample of actions the mask marks valid, we replay the move
+   `[source, angle, count]` in a fresh kaggle env (reached deterministically
+   from the same seed) and assert the fleet lands on the intended target on
+   exactly the predicted turn, uninterrupted.
 
-Run:
-    python env_model/validate_features.py --states 200
+Run (from experimental_arch/):
+    python env_model/validate_features.py
 """
 
-import argparse
-import math
+from __future__ import annotations
+
+import contextlib
+import io
 import random
 
-import numpy as np
+from orbit_wars_model import encode_obs
 
-from orbit_wars_model import OrbitWarsModel, encode_obs
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    from kaggle_environments import make
 
-BOARD = 100.0
-
-
-def random_obs(rng: random.Random) -> dict:
-    n = rng.randint(0, 12)
-    planets = []
-    for pid in range(n):
-        planets.append([
-            pid,                              # id
-            rng.choice([-1, 0, 1]),           # owner
-            rng.uniform(0.0, BOARD),          # x
-            rng.uniform(0.0, BOARD),          # y
-            rng.uniform(1.0, 3.0),            # radius
-            rng.randint(0, 50),               # ships
-            rng.randint(0, 3),                # production
-        ])
-    return {
-        "step": rng.randint(0, 499),
-        "angular_velocity": rng.uniform(-0.05, 0.05),
-        "planets": planets,
-        "initial_planets": [list(p) for p in planets],
-        "fleets": [],
-        "comets": [],
-        "comet_planet_ids": [],
-        "next_fleet_id": 0,
-    }
+SEEDS = [1, 2, 3, 4, 5]
+PLAYERS = 2
+WARMUP = 6            # empty steps before we encode, so planets have moved
+ACTIONS_PER_STATE = 12
+POS_TOL = 1e-6
+PLANET_SLOTS = 44
+ACTIONS_DIM = 6
 
 
-def numpy_reference(planets: list) -> np.ndarray:
-    """Independent brute-force L2 distance matrix (the oracle)."""
-    xy = np.array([[p[2], p[3]] for p in planets], dtype=np.float64)
-    n = len(planets)
-    ref = np.zeros((n, n), dtype=np.float64)
-    for i in range(n):
-        for j in range(n):
-            ref[i, j] = math.hypot(xy[i, 0] - xy[j, 0], xy[i, 1] - xy[j, 1])
-    return ref
+def fresh_env(seed: int, warmup: int):
+    """Reset a kaggle env and step `warmup` empty turns (deterministic)."""
+    env = make("orbit_wars", configuration={"seed": seed}, debug=False)
+    env.reset(PLAYERS)
+    for _ in range(warmup):
+        if env.done:
+            break
+        env.step([[], []])
+    return env
 
 
-def check_one(obs: dict, eps: float) -> list[str]:
-    """Return a list of failure messages (empty == all checks passed)."""
-    fails: list[str] = []
-    planets = obs["planets"]
-    n = len(planets)
+def obs_of(env, player=0) -> dict:
+    return dict(env.state[player].observation)
 
-    feat = encode_obs(obs, 0)
-    mat = np.asarray(feat["distance_matrix"], dtype=np.float64).reshape(n, n) if n else np.zeros((0, 0))
 
-    # planet_ids preserved, in order.
-    if feat["planet_ids"] != [p[0] for p in planets]:
-        fails.append("planet_ids mismatch")
-    if feat["n"] != n:
-        fails.append(f"n mismatch: {feat['n']} != {n}")
+def planets_by_id(obs) -> dict:
+    return {int(p[0]): p for p in obs["planets"]}
 
-    if n:
-        ref = numpy_reference(planets)
-        if not np.allclose(mat, ref, atol=eps):
-            fails.append(f"matrix != numpy reference (max diff {np.max(np.abs(mat - ref)):.2e})")
-        if not np.allclose(mat, mat.T, atol=eps):
-            fails.append("matrix not symmetric")
-        if np.any(np.abs(np.diag(mat)) > eps):
-            fails.append("diagonal not zero")
 
-    # The model path (set_state + .features) must agree with encode_obs exactly.
-    model = OrbitWarsModel(num_players=2)
-    model.set_state(obs)
-    feat2 = model.features(0)
-    if feat2["distance_matrix"] != feat["distance_matrix"] or feat2["planet_ids"] != feat["planet_ids"]:
-        fails.append("model.features() disagrees with encode_obs()")
+# --------------------------------------------------------------------------- #
+# 1. Frame-cache validation
+# --------------------------------------------------------------------------- #
+def check_frames(seed: int) -> list[str]:
+    fails = []
+    env = fresh_env(seed, WARMUP)
+    if env.done:
+        return fails
+    obs0 = obs_of(env, 0)
+    feat = encode_obs(obs0, 0)
+    offsets = feat["frame_offsets"]
+    frame_planets = feat["frame_planets"]
 
+    for f, off in enumerate(offsets):
+        # Step a parallel env `off` empty turns from the encoded state.
+        sub = fresh_env(seed, WARMUP)
+        ok = True
+        for _ in range(off):
+            if sub.done:
+                ok = False
+                break
+            sub.step([[], []])
+        if not ok:
+            continue  # game ended before this offset; encoder freezes too
+        kag = planets_by_id(obs_of(sub, 0))
+        got = {int(p[0]): p for p in frame_planets[f]}
+        if got.keys() != kag.keys():
+            fails.append(f"seed {seed} frame {f}(off {off}): planet ids {sorted(got)} vs {sorted(kag)}")
+            continue
+        for pid, gp in got.items():
+            kp = kag[pid]
+            _, gowner, gx, gy, gships = gp
+            if gowner != int(kp[1]) or gships != int(kp[5]):
+                fails.append(f"seed {seed} frame {f} planet {pid}: owner/ships ({gowner},{gships}) vs ({int(kp[1])},{int(kp[5])})")
+            if abs(gx - float(kp[2])) > POS_TOL or abs(gy - float(kp[3])) > POS_TOL:
+                fails.append(f"seed {seed} frame {f} planet {pid}: pos ({gx:.4f},{gy:.4f}) vs ({float(kp[2]):.4f},{float(kp[3]):.4f})")
     return fails
 
 
+# --------------------------------------------------------------------------- #
+# 2. Aim / arrival validation
+# --------------------------------------------------------------------------- #
+def kaggle_arrival(seed: int, src_id: int, angle: float, count: int, max_turns: int):
+    """Issue one launch in a fresh kaggle env (reached from `seed` + WARMUP empty
+    steps) and report (hit_planet_id | None, arrival_turn). The hit planet is the
+    one whose ship count deviates from the production-only expectation when our
+    (sole) fleet disappears."""
+    env = fresh_env(seed, WARMUP)
+    if env.done:
+        return (None, 0)
+    prev = planets_by_id(obs_of(env, 0))
+    for turn in range(1, max_turns + 1):
+        action0 = [[src_id, angle, count]] if turn == 1 else []
+        env.step([action0, []])
+        obs = obs_of(env, 0)
+        cur = planets_by_id(obs)
+        fleets = obs.get("fleets", [])
+        if not fleets:  # our (only) fleet has resolved
+            for pid, pp in prev.items():
+                if pid not in cur:
+                    continue
+                cp = cur[pid]
+                prev_owner, prev_ships, prod = int(pp[1]), int(pp[5]), int(pp[6])
+                expected = prev_ships + (prod if prev_owner >= 0 else 0)
+                if int(cp[1]) != prev_owner or int(cp[5]) != expected:
+                    return (pid, turn)
+            return (None, turn)  # left board / hit sun
+        prev = cur
+    return (None, 0)
+
+
+def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
+    fails = []
+    env = fresh_env(seed, WARMUP)
+    if env.done:
+        return 0, fails
+    obs0 = obs_of(env, 0)
+    feat = encode_obs(obs0, 0)
+    ids = feat["planet_ids"]
+    turns = feat["turns"]      # flat (NUM_FRAMES,44,44,6); frame 0 is first block
+    angles = feat["angles"]    # flat (44,44,6)
+    mask = feat["mask"]        # flat (44,44,6)
+    src_ships = {int(p[0]): int(p[5]) for p in obs0["planets"]}
+
+    valid = [
+        (si, sj, a)
+        for si in range(PLANET_SLOTS)
+        for sj in range(PLANET_SLOTS)
+        for a in range(ACTIONS_DIM)
+        if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]
+    ]
+    rng.shuffle(valid)
+    checked = 0
+    for si, sj, a in valid[:ACTIONS_PER_STATE]:
+        mi = (si * PLANET_SLOTS + sj) * ACTIONS_DIM + a
+        id_i, id_j = ids[si], ids[sj]
+        angle = angles[mi]
+        # recover the integer count for this action from frame-t source ships
+        ss = src_ships[id_i]
+        if a <= 3:
+            count = int(ss * (0.25, 0.50, 0.75, 1.00)[a])
+        elif a == 4:
+            count = 42
+        else:
+            # resolved+1: invert the predicted move by trusting the mask/count
+            # relationship is exercised by the fraction/const actions; for the
+            # resolved bin we just send what the engine reports it took, derived
+            # below from a probe. Simplest: skip resolved bin here (covered by
+            # the Rust engine-replay test).
+            continue
+        pred_turn = round(turns[mi] * 20.0)
+        hit, turn = kaggle_arrival(seed, id_i, angle, count, max_turns=80)
+        if hit != id_j:
+            fails.append(f"seed {seed} {id_i}->{id_j} a{a} cnt{count}: kaggle hit {hit}, expected {id_j}")
+        elif turn != pred_turn:
+            fails.append(f"seed {seed} {id_i}->{id_j} a{a} cnt{count}: arrival turn {turn} != predicted {pred_turn}")
+        checked += 1
+    return checked, fails
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--states", type=int, default=200)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--eps", type=float, default=1e-5)
-    args = ap.parse_args()
+    rng = random.Random(0)
+    frame_fails = []
+    aim_fails = []
+    aim_checked = 0
+    for seed in SEEDS:
+        frame_fails += check_frames(seed)
+        c, f = check_aim(seed, rng)
+        aim_checked += c
+        aim_fails += f
 
-    rng = random.Random(args.seed)
-    total = 0
-    failed = 0
-    for _ in range(args.states):
-        total += 1
-        fails = check_one(random_obs(rng), args.eps)
-        if fails:
-            failed += 1
-            print("  FAIL:", "; ".join(fails))
+    for m in (frame_fails + aim_fails)[:20]:
+        print("  FAIL:", m)
 
-    print(f"{total - failed} / {total} checks pass")
-    return 1 if failed else 0
+    print(f"frame caches:  {'OK' if not frame_fails else f'{len(frame_fails)} MISMATCHES'} ({len(SEEDS)} seeds)")
+    print(f"aim arrivals:  {aim_checked - len(aim_fails)} / {aim_checked} land on target at predicted turn")
+    return 1 if (frame_fails or aim_fails) else 0
 
 
 if __name__ == "__main__":
