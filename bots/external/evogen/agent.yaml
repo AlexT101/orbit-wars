@@ -1,0 +1,10 @@
+name: "Evogen v5"
+description: "unknown"
+author: "Penguin"
+kernel_slug: "penguin069/evogen-v5"
+kernel_version: "3"
+date_fetched: 2026-05-29
+license: "unknown"
+tags: [heuristic]
+author_claimed_lb_score: 925.7
+disabled: false
