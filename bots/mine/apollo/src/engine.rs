@@ -145,6 +145,33 @@ pub fn point_to_segment_distance(p: (f64, f64), v: (f64, f64), w: (f64, f64)) ->
     distance(p, projection)
 }
 
+/// Squared distance from `p` to segment `v→w`. Same projection math as
+/// [`point_to_segment_distance`] but without the final `sqrt`, for callers
+/// that only compare against a threshold: `dist < R ⟺ dist_sq < R²` for
+/// non-negative `R`, so the boolean is identical save for a 1-ULP knife edge
+/// at exactly `R`.
+#[inline]
+pub fn point_to_segment_distance_sq(p: (f64, f64), v: (f64, f64), w: (f64, f64)) -> f64 {
+    let l2 = (v.0 - w.0).powi(2) + (v.1 - w.1).powi(2);
+    let (qx, qy) = if l2 == 0.0 {
+        (v.0, v.1)
+    } else {
+        let t = (((p.0 - v.0) * (w.0 - v.0) + (p.1 - v.1) * (w.1 - v.1)) / l2).clamp(0.0, 1.0);
+        (v.0 + t * (w.0 - v.0), v.1 + t * (w.1 - v.1))
+    };
+    let dx = p.0 - qx;
+    let dy = p.1 - qy;
+    dx * dx + dy * dy
+}
+
+/// Axis-aligned bounds `(x_min, x_max, y_min, y_max)` of the segment `old→new`.
+#[inline]
+pub fn swept_bounds(old: (f64, f64), new: (f64, f64)) -> (f64, f64, f64, f64) {
+    let (x_min, x_max) = if old.0 <= new.0 { (old.0, new.0) } else { (new.0, old.0) };
+    let (y_min, y_max) = if old.1 <= new.1 { (old.1, new.1) } else { (new.1, old.1) };
+    (x_min, x_max, y_min, y_max)
+}
+
 pub fn swept_pair_hit(
     a: (f64, f64),
     b: (f64, f64),
@@ -297,6 +324,13 @@ pub struct Simulator<'a> {
     // ── Scratch buffers reused across step calls (kept allocated for the
     // simulator's lifetime; cleared, not re-allocated, on each step).
     planet_paths: Vec<Option<PlanetPath>>,
+    /// Broad-phase reject cache, parallel to `planet_paths`. Each present entry
+    /// is the planet's swept-segment AABB expanded by its radius, stored as
+    /// `[x_min, x_max, y_min, y_max]`. A fleet whose own swept AABB is strictly
+    /// disjoint from this on any axis cannot collide (see the collision loop),
+    /// so the full `swept_pair_hit` is skipped. Computed once per planet per
+    /// step; only valid where `planet_paths[i]` is `Some`.
+    planet_collision_aabb: Vec<[f64; 4]>,
     fleets_to_remove: Vec<bool>,
     combat_lists: Vec<Vec<(i64, i64)>>,
     comet_id_set: HashSet<i64>,
@@ -355,6 +389,7 @@ impl<'a> Simulator<'a> {
             planet_index_by_id,
 
             planet_paths: vec![None; planet_count],
+            planet_collision_aabb: vec![[0.0; 4]; planet_count],
             fleets_to_remove: vec![false; fleet_count],
             combat_lists: (0..planet_count).map(|_| Vec::new()).collect(),
             comet_id_set: HashSet::with_capacity_and_hasher(
@@ -421,6 +456,7 @@ impl<'a> Simulator<'a> {
                 .collect(),
             planet_index_by_id: self.planet_index_by_id.clone(),
             planet_paths: vec![None; planet_count],
+            planet_collision_aabb: vec![[0.0; 4]; planet_count],
             fleets_to_remove: vec![false; fleet_count],
             combat_lists: (0..planet_count).map(|_| Vec::new()).collect(),
             comet_id_set: HashSet::with_capacity_and_hasher(
@@ -574,6 +610,16 @@ impl<'a> Simulator<'a> {
             }
         }
 
+        // Precompute each moving planet's radius-expanded swept AABB once for
+        // this step. The collision loop below uses it as a broad-phase reject.
+        for (idx, slot) in self.planet_paths[..planet_count].iter().enumerate() {
+            if let Some(path) = slot {
+                let r = self.planets[idx].radius;
+                let (x_min, x_max, y_min, y_max) = swept_bounds(path.old_pos, path.new_pos);
+                self.planet_collision_aabb[idx] = [x_min - r, x_max + r, y_min - r, y_max + r];
+            }
+        }
+
         for (fleet_idx, fleet) in self.fleets.iter_mut().enumerate() {
             let old_pos = (fleet.x, fleet.y);
             let speed = fleet_speed(fleet.ships, MAX_SHIP_SPEED);
@@ -581,12 +627,25 @@ impl<'a> Simulator<'a> {
             fleet.y += fleet.angle.sin() * speed;
             let new_pos = (fleet.x, fleet.y);
 
+            // Fleet's own swept-segment AABB (no expansion — the planet AABB
+            // already carries the radius margin).
+            let (fx_min, fx_max, fy_min, fy_max) = swept_bounds(old_pos, new_pos);
+
             let mut hit_planet = false;
             for (planet_idx, planet) in self.planets.iter().enumerate() {
                 let Some(path) = &self.planet_paths[planet_idx] else {
                     continue;
                 };
                 if !path.check_collision {
+                    continue;
+                }
+                // Broad phase: if the fleet's swept AABB is strictly disjoint
+                // from the planet's radius-expanded swept AABB on any axis, no
+                // same-`s` pair of points can be within `radius`, so
+                // `swept_pair_hit` cannot fire. Strict `<`/`>` keeps boundary
+                // ties falling through to the exact test below.
+                let [px_min, px_max, py_min, py_max] = self.planet_collision_aabb[planet_idx];
+                if fx_max < px_min || fx_min > px_max || fy_max < py_min || fy_min > py_max {
                     continue;
                 }
                 if swept_pair_hit(old_pos, new_pos, path.old_pos, path.new_pos, planet.radius) {
@@ -612,7 +671,9 @@ impl<'a> Simulator<'a> {
                 self.fleets_to_remove[fleet_idx] = true;
                 continue;
             }
-            if point_to_segment_distance((CENTER, CENTER), old_pos, new_pos) < SUN_RADIUS {
+            if point_to_segment_distance_sq((CENTER, CENTER), old_pos, new_pos)
+                < SUN_RADIUS * SUN_RADIUS
+            {
                 self.fleets_to_remove[fleet_idx] = true;
                 continue;
             }
@@ -800,6 +861,13 @@ impl<'a> Simulator<'a> {
         }
         for slot in &mut self.planet_paths[..planet_count] {
             *slot = None;
+        }
+
+        // Parallel to `planet_paths`; entries are (re)written for every present
+        // path before the collision loop reads them, so no per-step clear is
+        // needed — only grow to fit.
+        if self.planet_collision_aabb.len() < planet_count {
+            self.planet_collision_aabb.resize(planet_count, [0.0; 4]);
         }
 
         if self.combat_lists.len() < planet_count {
