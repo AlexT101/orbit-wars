@@ -32,15 +32,22 @@
 //! bit-identical to what the engine accepts. Planet trajectories are
 //! precomputed once (forward-sim with empty actions) and shared across frames.
 
-use std::collections::{HashMap, HashSet};
-
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     distance, fleet_speed, point_to_segment_distance, swept_pair_hit, EngineState, MoveAction,
     Planet, BOARD_SIZE, CENTER, ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
+
+use std::cell::RefCell;
+
+thread_local! {
+    /// Reused per-projection scratch marking which planet ids survive the
+    /// broad-phase cull. Avoids an allocation on every `project` call.
+    static CULL_KEEP: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+}
 
 pub const PLANET_SLOTS: usize = 44;
 pub const ACTIONS_DIM: usize = 6;
@@ -110,17 +117,24 @@ struct Trajectory {
     /// `snapshots[turn]` = planets (full state) after `turn` empty steps from `t`.
     snapshots: Vec<Vec<Planet>>,
     /// `comet_ids[turn]` = set of comet planet ids at that turn.
-    comet_ids: Vec<HashSet<i64>>,
+    comet_ids: Vec<FxHashSet<i64>>,
     /// `by_id[id][turn]` = that planet's geometry, or None if absent.
-    by_id: HashMap<i64, Vec<Option<Geom>>>,
+    by_id: FxHashMap<i64, Vec<Option<Geom>>>,
     /// `segments[turn]` = swept `old->new` segments of every planet present at
     /// `turn`, for the projection hot loop (no per-step hashmap lookups).
     segments: Vec<Vec<Seg>>,
     /// Turn offsets of the 4 frames: `[0, 1, 10, resolved]`.
     offsets: [usize; NUM_FRAMES],
     /// Initial (t=0 game start) planet positions, for the `is_orbiting` token.
-    initial_xy: HashMap<i64, (f64, f64)>,
+    initial_xy: FxHashMap<i64, (f64, f64)>,
     ship_speed: f64,
+    /// Planets whose position never changes over the horizon, as
+    /// `(id, x, y, radius)`. These admit a cheap once-per-projection broad-phase
+    /// cull (a fleet ray that stays farther than `radius` from the planet can
+    /// never hit it), so far stationary planets are skipped in the hot loop.
+    stationary: Vec<(i64, f64, f64, f64)>,
+    /// `max(planet id) + 1` over the whole trajectory — sizes the cull scratch.
+    id_bound: usize,
 }
 
 impl Trajectory {
@@ -131,7 +145,7 @@ impl Trajectory {
 
         let mut sim = state.clone();
         let mut snapshots: Vec<Vec<Planet>> = Vec::with_capacity(total + 1);
-        let mut comet_ids: Vec<HashSet<i64>> = Vec::with_capacity(total + 1);
+        let mut comet_ids: Vec<FxHashSet<i64>> = Vec::with_capacity(total + 1);
         let mut resolved: Option<usize> = if sim.fleets.is_empty() { Some(0) } else { None };
 
         snapshots.push(sim.planets.clone());
@@ -148,7 +162,7 @@ impl Trajectory {
         let len = snapshots.len();
 
         // Per-id geometry timeline for O(1) target lookup.
-        let mut by_id: HashMap<i64, Vec<Option<Geom>>> = HashMap::new();
+        let mut by_id: FxHashMap<i64, Vec<Option<Geom>>> = FxHashMap::default();
         for (turn, planets) in snapshots.iter().enumerate() {
             for p in planets {
                 let slot = by_id.entry(p.id).or_insert_with(|| vec![None; len]);
@@ -173,6 +187,21 @@ impl Trajectory {
             segments.push(segs);
         }
 
+        // Classify globally-stationary planets (constant position across the
+        // horizon) for the broad-phase cull, and find the id bound.
+        let mut stationary = Vec::new();
+        let mut id_bound = 0usize;
+        for (&id, tl) in &by_id {
+            id_bound = id_bound.max(id as usize + 1);
+            let mut iter = tl.iter().flatten();
+            if let Some(first) = iter.next() {
+                let moves = iter.any(|g| (g.x - first.x).abs() > 1e-12 || (g.y - first.y).abs() > 1e-12);
+                if !moves {
+                    stationary.push((id, first.x, first.y, first.r));
+                }
+            }
+        }
+
         let initial_xy = state
             .initial_planets
             .iter()
@@ -187,6 +216,8 @@ impl Trajectory {
             offsets: [0, FRAME_T1, FRAME_T10, resolved],
             initial_xy,
             ship_speed: state.configuration.ship_speed,
+            stationary,
+            id_bound,
         }
     }
 
@@ -201,28 +232,55 @@ impl Trajectory {
     /// reaches `dst_id` within the horizon. Mirrors env_model's per-step
     /// collision order (planets, then bounds, then sun).
     fn project(&self, frame_off: usize, launch: (f64, f64), speed: f64, theta: f64, dst_id: i64) -> Option<usize> {
-        let (vx, vy) = (theta.cos() * speed, theta.sin() * speed);
-        let mut pos = launch;
-        for k in 0..AIM_HORIZON {
-            let t_old = frame_off + k;
-            if t_old >= self.segments.len() {
-                break;
-            }
-            let new = (pos.0 + vx, pos.1 + vy);
-            for s in &self.segments[t_old] {
-                if swept_pair_hit(pos, new, (s.ox, s.oy), (s.nx, s.ny), s.r) {
-                    return if s.id == dst_id { Some(k + 1) } else { None };
+        let (uhx, uhy) = (theta.cos(), theta.sin());
+        let (vx, vy) = (uhx * speed, uhy * speed);
+
+        // Broad-phase cull: a stationary planet whose center is farther than its
+        // radius from the (infinite) fleet line can never be hit by any segment
+        // on that line, so skip its per-turn swept test. Exact — culled planets
+        // provably never collide — so the vector-order first-hit is unchanged.
+        // Uses squared distances (no sqrt) and a reused scratch (no per-call
+        // alloc), so the cull setup is near-free.
+        CULL_KEEP.with(|cell| {
+            let mut keep = cell.borrow_mut();
+            keep.clear();
+            keep.resize(self.id_bound, true);
+            for &(id, cx, cy, r) in &self.stationary {
+                let dx = cx - launch.0;
+                let dy = cy - launch.1;
+                let along = dx * uhx + dy * uhy;
+                let perp2 = (dx * dx + dy * dy) - along * along;
+                let rr = r + 1e-6;
+                if perp2 > rr * rr {
+                    keep[id as usize] = false;
                 }
             }
-            if !(0.0..=BOARD_SIZE).contains(&new.0) || !(0.0..=BOARD_SIZE).contains(&new.1) {
-                return None;
+
+            let mut pos = launch;
+            for k in 0..AIM_HORIZON {
+                let t_old = frame_off + k;
+                if t_old >= self.segments.len() {
+                    break;
+                }
+                let new = (pos.0 + vx, pos.1 + vy);
+                for s in &self.segments[t_old] {
+                    if !keep[s.id as usize] {
+                        continue;
+                    }
+                    if swept_pair_hit(pos, new, (s.ox, s.oy), (s.nx, s.ny), s.r) {
+                        return if s.id == dst_id { Some(k + 1) } else { None };
+                    }
+                }
+                if !(0.0..=BOARD_SIZE).contains(&new.0) || !(0.0..=BOARD_SIZE).contains(&new.1) {
+                    return None;
+                }
+                if point_to_segment_distance((CENTER, CENTER), pos, new) < SUN_RADIUS {
+                    return None;
+                }
+                pos = new;
             }
-            if point_to_segment_distance((CENTER, CENTER), pos, new) < SUN_RADIUS {
-                return None;
-            }
-            pos = new;
-        }
-        None
+            None
+        })
     }
 
     /// Solve for a clean intercept of planet `dst_id` from planet `src_id` at
@@ -328,7 +386,7 @@ impl Features {
     }
 }
 
-fn fill_token(tk: &mut [f32], p: &Planet, player: i64, comet: &HashSet<i64>, initial: &HashMap<i64, (f64, f64)>) {
+fn fill_token(tk: &mut [f32], p: &Planet, player: i64, comet: &FxHashSet<i64>, initial: &FxHashMap<i64, (f64, f64)>) {
     let is_comet = comet.contains(&p.id);
     tk[0] = (p.owner == player) as i32 as f32; // is_mine
     tk[1] = (p.owner >= 0 && p.owner != player) as i32 as f32; // is_enemy
@@ -350,6 +408,67 @@ fn fill_token(tk: &mut [f32], p: &Planet, player: i64, comet: &HashSet<i64>, ini
     tk[7] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
 }
 
+/// Compute the `(44, ACTIONS_DIM)` turns row for one source slot `si` at frame
+/// `f` (offset `off`), writing into `t_row`. For frame t (`extra` = Some), also
+/// fills that source's angles row and legal-action mask row. Pure / read-only
+/// over the trajectory, so it's safe to run across sources in parallel.
+#[allow(clippy::too_many_arguments)]
+fn compute_source_row(
+    traj: &Trajectory,
+    off: usize,
+    si: usize,
+    slot_id: &[i64],
+    by: &FxHashMap<i64, &Planet>,
+    resolved: &FxHashMap<i64, (i64, i64)>,
+    player: i64,
+    t_row: &mut [f32],
+    mut extra: Option<(&mut [f32], &mut [u8])>,
+) {
+    let id_i = slot_id[si];
+    if id_i < 0 {
+        return;
+    }
+    let Some(pi) = by.get(&id_i) else { return };
+    for sj in 0..PLANET_SLOTS {
+        if si == sj {
+            continue;
+        }
+        let id_j = slot_id[sj];
+        if id_j < 0 || !by.contains_key(&id_j) {
+            continue;
+        }
+        let (rj_owner, rj_ships) = resolved.get(&id_j).copied().unwrap_or((-2, 0));
+        // Different actions that send the same count share one aim solve.
+        let mut memo: [(i64, Option<(usize, f64)>); ACTIONS_DIM] = [(i64::MIN, None); ACTIONS_DIM];
+        let mut memo_len = 0usize;
+        for a in 0..ACTIONS_DIM {
+            let Some(count) = action_count(a, pi.ships, rj_ships, rj_owner == player, rj_owner == -2)
+            else {
+                continue;
+            };
+            let res = match memo[..memo_len].iter().find(|(c, _)| *c == count) {
+                Some(&(_, r)) => r,
+                None => {
+                    let r = traj.aim(off, id_i, id_j, count);
+                    memo[memo_len] = (count, r);
+                    memo_len += 1;
+                    r
+                }
+            };
+            if let Some((turn, theta)) = res {
+                let k = sj * ACTIONS_DIM + a;
+                t_row[k] = norm_turns(turn);
+                if let Some((a_row, m_row)) = extra.as_mut() {
+                    a_row[k] = theta as f32;
+                    if pi.owner == player {
+                        m_row[k] = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Encode an [`EngineState`] into model features from `player`'s perspective.
 pub fn encode(state: &EngineState, player: i64) -> Features {
     let traj = Trajectory::build(state);
@@ -363,7 +482,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
     }
 
     // Resolved garrisons (for the resolved+1 action) from the last frame.
-    let resolved: HashMap<i64, (i64, i64)> = traj
+    let resolved: FxHashMap<i64, (i64, i64)> = traj
         .frame_planets(NUM_FRAMES - 1)
         .iter()
         .map(|p| (p.id, (p.owner, p.ships)))
@@ -379,7 +498,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
     for f in 0..NUM_FRAMES {
         let off = traj.offsets[f];
         let fp = traj.frame_planets(f);
-        let by: HashMap<i64, &Planet> = fp.iter().map(|p| (p.id, p)).collect();
+        let by: FxHashMap<i64, &Planet> = fp.iter().map(|p| (p.id, p)).collect();
         let comet = &traj.comet_ids[off];
         frame_planets.push(fp.iter().map(|p| (p.id, p.owner, p.x, p.y, p.ships)).collect());
 
@@ -396,59 +515,17 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
             }
         }
 
-        // Turns tensor (+ angles & mask for frame t).
+        // Turns tensor (+ angles & mask for frame t). Each source writes a
+        // disjoint `PLANET_SLOTS*ACTIONS_DIM` row, so we just walk them.
+        const ROW: usize = PLANET_SLOTS * ACTIONS_DIM;
+        let frame_base = f * PLANET_SLOTS * ROW;
         for si in 0..PLANET_SLOTS {
-            let id_i = slot_id[si];
-            if id_i < 0 {
-                continue;
-            }
-            let Some(pi) = by.get(&id_i) else { continue };
-            for sj in 0..PLANET_SLOTS {
-                if si == sj {
-                    continue;
-                }
-                let id_j = slot_id[sj];
-                if id_j < 0 || !by.contains_key(&id_j) {
-                    continue;
-                }
-                let (rj_owner, rj_ships) = resolved.get(&id_j).copied().unwrap_or((-2, 0));
-                // The aim solve depends on the source/target geometry and the
-                // ship *count* only — different actions that send the same count
-                // share one solve. Memoize by count within this (i,j) pair.
-                let mut memo: [(i64, Option<(usize, f64)>); ACTIONS_DIM] =
-                    [(i64::MIN, None); ACTIONS_DIM];
-                let mut memo_len = 0usize;
-                for a in 0..ACTIONS_DIM {
-                    let Some(count) = action_count(
-                        a,
-                        pi.ships,
-                        rj_ships,
-                        rj_owner == player,
-                        rj_owner == -2,
-                    ) else {
-                        continue;
-                    };
-                    let res = match memo[..memo_len].iter().find(|(c, _)| *c == count) {
-                        Some(&(_, r)) => r,
-                        None => {
-                            let r = traj.aim(off, id_i, id_j, count);
-                            memo[memo_len] = (count, r);
-                            memo_len += 1;
-                            r
-                        }
-                    };
-                    if let Some((turn, theta)) = res {
-                        let di = ((f * PLANET_SLOTS + si) * PLANET_SLOTS + sj) * ACTIONS_DIM + a;
-                        turns[di] = norm_turns(turn);
-                        if f == 0 {
-                            let mi = (si * PLANET_SLOTS + sj) * ACTIONS_DIM + a;
-                            angles[mi] = theta as f32;
-                            if pi.owner == player {
-                                mask[mi] = 1;
-                            }
-                        }
-                    }
-                }
+            let t_row = &mut turns[frame_base + si * ROW..frame_base + (si + 1) * ROW];
+            if f == 0 {
+                let (a_row, m_row) = (&mut angles[si * ROW..(si + 1) * ROW], &mut mask[si * ROW..(si + 1) * ROW]);
+                compute_source_row(&traj, off, si, &slot_id, &by, &resolved, player, t_row, Some((a_row, m_row)));
+            } else {
+                compute_source_row(&traj, off, si, &slot_id, &by, &resolved, player, t_row, None);
             }
         }
     }
@@ -547,7 +624,7 @@ mod tests {
         s.next_fleet_id += 1;
 
         for turn in 1..=AIM_HORIZON {
-            let before: HashMap<i64, (i64, i64)> =
+            let before: FxHashMap<i64, (i64, i64)> =
                 s.planets.iter().map(|p| (p.id, (p.owner, p.ships))).collect();
             let _ = s.step_with_actions(&empty);
             if !s.fleets.iter().any(|fl| fl.id == fleet_id) {
@@ -618,7 +695,7 @@ mod tests {
                         let pi = st.planets.iter().find(|p| p.id == id_i).unwrap();
                         assert_eq!(pi.owner, 0, "mask allowed a non-owned source");
                         // recompute count the same way encode did
-                        let resolved: HashMap<i64, (i64, i64)> = Trajectory::build(&st)
+                        let resolved: FxHashMap<i64, (i64, i64)> = Trajectory::build(&st)
                             .frame_planets(NUM_FRAMES - 1)
                             .iter()
                             .map(|p| (p.id, (p.owner, p.ships)))

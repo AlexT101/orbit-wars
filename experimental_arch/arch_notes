@@ -50,10 +50,13 @@ I also think normalising stuff would be good.
 
 Always validate / test to make ensure correctness. 
 
-I'm concerned about action "fractions" taking a long time to compute at test/train time
-just because there are so many equivalance classes - any suggestions on this?
-In the worst case we would have to do 44*44*ACTIONS_DIM sims to compute them. That's cooked.
-Ok so Mr Claude Opus 4.8 said it's ok - "only" 25M rust ops... let's see.
+
+* I'm concerned about action "fractions" taking a long time to compute at test/train time
+  just because there are so many equivalance classes - any suggestions on this?
+  In the worst case we would have to do 44*44*ACTIONS_DIM sims to compute them. That's cooked.
+* Ok so Mr Claude Opus 4.8 said it's ok - "only" 25M rust ops... let's see. Supposedly not cooked.
+* Claude made the changes and now the env runs at 30 steps/s (down from 20k steps/s).
+* We can add some optimisation where we parallelise the action check.
 
 
 

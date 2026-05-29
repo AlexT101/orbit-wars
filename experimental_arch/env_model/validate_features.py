@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import math
 import random
 
 from orbit_wars_model import encode_obs
@@ -175,23 +176,85 @@ def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
     return checked, fails
 
 
+AIM_HORIZON = 64  # must match features.rs; arrivals beyond this are masked out
+
+
+def check_mask_completeness(seed: int, rng: random.Random) -> tuple[int, list[str]]:
+    """Mask *completeness*: a masked-OUT action that is otherwise legal (owned
+    source, sendable count, distinct present target) must genuinely fail to
+    reach its target cleanly within the horizon. If kaggle shows such an action
+    landing on the target by turn <= AIM_HORIZON, the mask wrongly excluded a
+    valid move."""
+    fails = []
+    env = fresh_env(seed, WARMUP)
+    if env.done:
+        return 0, fails
+    obs0 = obs_of(env, 0)
+    feat = encode_obs(obs0, 0)
+    ids = feat["planet_ids"]
+    mask = feat["mask"]
+    pmap = planets_by_id(obs0)
+
+    # Candidate masked-out actions that are *non-trivially* invalid: source
+    # owned by us, count sendable, target a distinct present planet. The only
+    # legal reason for mask=0 here is a blocked/unreachable trajectory.
+    cands = []
+    for si in range(PLANET_SLOTS):
+        id_i = ids[si]
+        if id_i < 0 or id_i not in pmap or int(pmap[id_i][1]) != 0:
+            continue
+        ss = int(pmap[id_i][5])
+        for sj in range(PLANET_SLOTS):
+            id_j = ids[sj]
+            if sj == si or id_j < 0 or id_j not in pmap:
+                continue
+            for a in range(4):  # fractions only (count is unambiguous here)
+                if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]:
+                    continue
+                count = int(ss * (0.25, 0.50, 0.75, 1.00)[a])
+                if 1 <= count <= ss:
+                    cands.append((si, sj, a, id_i, id_j, count))
+    rng.shuffle(cands)
+
+    checked = 0
+    for si, sj, a, id_i, id_j, count in cands[:ACTIONS_PER_STATE]:
+        # We must pick an angle to fire. The mask gives no angle for invalid
+        # actions, so aim straight at the target's current position — if even a
+        # direct shot can't reach j cleanly, masking it is at least plausible;
+        # but if the direct shot DOES reach j by the horizon, masking was wrong.
+        tx, ty = float(pmap[id_j][2]), float(pmap[id_j][3])
+        sx, sy = float(pmap[id_i][2]), float(pmap[id_i][3])
+        angle = math.atan2(ty - sy, tx - sx)
+        hit, turn = kaggle_arrival(seed, id_i, angle, count, max_turns=AIM_HORIZON)
+        if hit == id_j and turn <= AIM_HORIZON:
+            fails.append(f"seed {seed} {id_i}->{id_j} a{a} cnt{count}: masked-out but direct shot reaches j at turn {turn}")
+        checked += 1
+    return checked, fails
+
+
 def main() -> int:
     rng = random.Random(0)
     frame_fails = []
     aim_fails = []
     aim_checked = 0
+    mask_fails = []
+    mask_checked = 0
     for seed in SEEDS:
         frame_fails += check_frames(seed)
         c, f = check_aim(seed, rng)
         aim_checked += c
         aim_fails += f
+        mc, mf = check_mask_completeness(seed, rng)
+        mask_checked += mc
+        mask_fails += mf
 
-    for m in (frame_fails + aim_fails)[:20]:
+    for m in (frame_fails + aim_fails + mask_fails)[:20]:
         print("  FAIL:", m)
 
-    print(f"frame caches:  {'OK' if not frame_fails else f'{len(frame_fails)} MISMATCHES'} ({len(SEEDS)} seeds)")
-    print(f"aim arrivals:  {aim_checked - len(aim_fails)} / {aim_checked} land on target at predicted turn")
-    return 1 if (frame_fails or aim_fails) else 0
+    print(f"frame caches:      {'OK' if not frame_fails else f'{len(frame_fails)} MISMATCHES'} ({len(SEEDS)} seeds)")
+    print(f"aim arrivals:      {aim_checked - len(aim_fails)} / {aim_checked} land on target at predicted turn")
+    print(f"mask completeness: {mask_checked - len(mask_fails)} / {mask_checked} masked-out actions confirmed unreachable")
+    return 1 if (frame_fails or aim_fails or mask_fails) else 0
 
 
 if __name__ == "__main__":
