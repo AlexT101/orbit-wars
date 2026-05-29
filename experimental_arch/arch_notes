@@ -71,9 +71,22 @@ OPTIMISATION LOG (encode_obs, ~21-planet states, single-thread):
 * broad-phase cull of far stationary planets + FxHashMap:   ~40 calls/s (25 ms)
   (modest: the swept tests were only ~3ms of the loop; profiling showed the cost
    was spread across the 4-frame full action grid, not any single hot spot.)
-* turns/angles/mask at frame t only (above):               ~155 calls/s (6.5 ms)  <-- ~4x, current
+* turns/angles/mask at frame t only (above):               ~155 calls/s (6.5 ms)  <-- ~4x
+* zero-copy numpy returns (below):                          ~165 calls/s (~6 ms), current
 * parallelisation: tried, then REVERTED (kept single-threaded by choice; the
   per-source loop is embarrassingly parallel if we ever want cores x later).
+
+OUTPUT FORMAT: tokens/presence/turns/angles/mask come back as 1-D numpy arrays
+(numpy takes ownership of the Rust Vec's buffer -> no copy), plus a `*_shape`
+tuple. On the Python side: `f["turns"].reshape(f["turns_shape"])` is a zero-copy
+view and `torch.from_numpy(...)` shares the same memory (verified). So encode ->
+torch tensors is ~5.9 ms with no copies. planet_ids/frame_offsets/frame_planets
+stay plain Python (small, metadata/debug only). The wall-clock win over the old
+Vec->PyList path is small (the ~5.5 ms aim compute is the floor) but it removes
+the downstream np.asarray reparse and is the correct from_numpy interface.
+NOTE: this is also why env_model now depends on the `numpy` rust crate; modules
+that only do forward-sim (e.g. the graph bot) link it but never trigger a numpy
+import since array ops are lazy.
 
 Validation (all green after each change): env_model/validate_features.py checks,
 against the official kaggle engine, that (a) the t+1/t+10/t_resolved frame caches

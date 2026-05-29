@@ -35,6 +35,7 @@
 //! bit-identical to what the engine accepts. Planet trajectories are
 //! precomputed once (forward-sim with empty actions) and shared across frames.
 
+use numpy::IntoPyArray;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -369,22 +370,30 @@ pub struct Features {
 }
 
 impl Features {
-    pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// Serialize to a Python dict, consuming `self`. The big numeric buffers
+    /// (`tokens`/`presence`/`turns`/`angles`/`mask`) are returned as **1-D numpy
+    /// arrays via a zero-copy move** — numpy takes ownership of the Rust `Vec`'s
+    /// allocation, so there's no copy here and `torch.from_numpy` is a view on
+    /// the Python side. Reshape with the accompanying `*_shape` tuple (a numpy
+    /// reshape of a contiguous array is also a zero-copy view).
+    pub fn into_py_dict(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let d = PyDict::new(py);
-        d.set_item("planet_ids", self.slot_id.clone())?;
+        // Small metadata stays as plain Python objects.
+        d.set_item("planet_ids", self.slot_id)?;
         d.set_item("num_planets", self.n)?;
         d.set_item("frame_offsets", self.offsets.to_vec())?;
-        d.set_item("tokens", self.tokens.clone())?;
+        d.set_item("frame_planets", self.frame_planets)?;
+        // Numeric tensors: zero-copy move into numpy (1-D + shape).
+        d.set_item("tokens", self.tokens.into_pyarray(py))?;
         d.set_item("tokens_shape", (NUM_FRAMES, PLANET_SLOTS, TOKEN_DIM))?;
-        d.set_item("presence", self.presence.clone())?;
+        d.set_item("presence", self.presence.into_pyarray(py))?;
         d.set_item("presence_shape", (NUM_FRAMES, PLANET_SLOTS))?;
-        d.set_item("turns", self.turns.clone())?;
+        d.set_item("turns", self.turns.into_pyarray(py))?;
         d.set_item("turns_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
-        d.set_item("angles", self.angles.clone())?;
+        d.set_item("angles", self.angles.into_pyarray(py))?;
         d.set_item("angles_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
-        d.set_item("mask", self.mask.clone())?;
+        d.set_item("mask", self.mask.into_pyarray(py))?;
         d.set_item("mask_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
-        d.set_item("frame_planets", self.frame_planets.clone())?;
         Ok(d.into_any().unbind())
     }
 }

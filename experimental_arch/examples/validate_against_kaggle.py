@@ -27,13 +27,7 @@ from orbit_wars_engine import OrbitWarsEngine
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     from kaggle_environments import make
 
-from train_loop_example import (
-    SEND_FRACTIONS,
-    BotOpponent,
-    TinyPolicy,
-    moves_for_fraction,
-    summarize,
-)
+from train_loop_example import BotOpponent, TinyPolicy, act
 
 # --- config (edit here) ----------------------------------------------------
 SEEDS = [1, 2, 3, 4, 5]
@@ -46,11 +40,9 @@ BENCH_REPEATS = 10            # env_engine replays for a stable sps number
 
 
 def learner_moves(policy: TinyPolicy, obs0: dict) -> list:
-    """The exact player-0 action the training loop would emit for this obs."""
-    g, D, ids = summarize(obs0, player=0)
-    logits = policy(torch.from_numpy(g))
-    action = int(torch.distributions.Categorical(logits=logits).sample())
-    return moves_for_fraction(obs0, 0, D, ids, SEND_FRACTIONS[action])
+    """The exact player-0 move the training loop would emit for this obs."""
+    moves, _ = act(policy, obs0)
+    return moves
 
 
 def diff(es: dict, ko: dict) -> list[str]:

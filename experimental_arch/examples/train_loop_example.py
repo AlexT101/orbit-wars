@@ -7,31 +7,37 @@ This is a *plumbing* example, not a strong agent. It shows how the pieces fit:
     bots/<...>/main.py : agent()   ← the opponent                        (player 1)
     torch                          ← a tiny REINFORCE policy we update
 
+Feature / action interface (the real one)
+------------------------------------------
+`encode_obs(obs, player)` returns numpy arrays (zero-copy; `torch.from_numpy`-ready):
+  - tokens   (NUM_FRAMES, 44, TOKEN_DIM)   per-planet features at t / t+1 / t+10 / t_resolved
+  - presence (NUM_FRAMES, 44)              which slots are real planets
+  - turns    (44, 44, 6)                   turns-to-arrive per (src, tgt, action) at t
+  - angles   (44, 44, 6)                   launch angle to actually issue the move
+  - mask     (44, 44, 6)                   1 = legal action now
+  - planet_ids / frame_planets             slot→id map + raw per-frame planet state
+The policy outputs a logit per action over the (44, 44, 6) space; we mask out the
+illegal ones, sample (src, tgt, action), and convert it to a game move
+`[source_id, angle, ships]` using `angles` and the action's ship count.
+
 How the opponent works
 ----------------------
-Every `/bots` agent is a module exposing `agent(obs)` that consumes the kaggle
-observation dict. `env_engine` emits that exact dict shape per player, so we
-just feed `observations[1]` (player 1's view) to the opponent's `agent`. We load
-it the same way `run_match.py` does (importlib on its `main.py`).
+Every `/bots` agent is a module exposing `agent(obs)` over the kaggle observation
+dict. `env_engine` emits that exact dict shape per player, so we feed
+`observations[1]` (player 1's view) to the opponent's `agent` (loaded the way
+`run_match.py` does). Stateful bots (apollo2, graph) keep state at module scope,
+so we re-exec the module each episode for a fresh opponent.
 
-Stateful bots (apollo2, graph) keep a Bot instance + turn counter at module
-scope, so we **re-exec the module each episode** to give every game a fresh
-opponent. Stateless bots (random, nearest-sniper) don't need this, but it's
-cheap and harmless.
+Run (from experimental_arch/, in a venv with env_engine, orbit_wars_model, torch,
+and — for bots that import it — kaggle_environments):
 
-Run (from experimental_arch/, in a venv with env_engine, orbit_wars_model,
-torch, and — for bots that import it — kaggle_environments):
-
-    python examples/train_loop_example.py --opponents random,nearest-sniper --episodes 20
-
-Add any bot under pantheow/bots/ by name: --opponents graph,hellburner,...
+    python examples/train_loop_example.py
 """
 
 from __future__ import annotations
 
 import contextlib
 import importlib.util
-import math
 import os
 import sys
 from itertools import cycle
@@ -47,7 +53,7 @@ from orbit_wars_model import encode_obs
 # --- config (edit here) ----------------------------------------------------
 OPPONENTS = ["random", "nearest-sniper"]  # bot names under pantheow/bots/
 EPISODES = 20
-LR = 3e-3
+LR = 1e-3
 SEED = 0
 # ---------------------------------------------------------------------------
 
@@ -55,11 +61,12 @@ SEED = 0
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOTS_DIR = REPO_ROOT / "bots"
 
-# Macro-action space for the toy policy: a single "send fraction" per turn,
-# applied to every owned planet (each sends that fraction of its ships toward
-# its nearest non-owned planet). Replace with a real structured action head.
-SEND_FRACTIONS = (0.5, 0.75, 1.0)
-GLOBAL_FEATURES = 9
+# Must match features.rs. The first 4 actions are send-fractions of the source's
+# current ships; action 4 is a constant; action 5 is "resolved garrison + 1".
+SEND_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
+CONST_SEND = 42
+TOKEN_DIM = 8
+GLOBAL_FEATURES = TOKEN_DIM + 2  # pooled frame-t token + [planet_frac, step]
 
 
 # --------------------------------------------------------------------------- #
@@ -109,70 +116,49 @@ class BotOpponent:
 
 
 # --------------------------------------------------------------------------- #
-# Features: turn a Rust-encoded obs into a fixed-size vector for the policy.
+# Features -> fixed-size global vector for the (toy) policy input.
 # --------------------------------------------------------------------------- #
-def summarize(obs: dict, player: int) -> tuple[np.ndarray, np.ndarray, list[int]]:
-    """Return (global_feature_vector, distance_matrix, planet_ids).
+def global_vector(feat: dict, step: int) -> np.ndarray:
+    """Pool the frame-t planet tokens (masked by presence) into a fixed vector,
+    so the MLP input size doesn't depend on planet count. A real model would
+    consume the full token set + action grid; this keeps the example tiny."""
+    tokens = feat["tokens"].reshape(feat["tokens_shape"])      # (NF, 44, TOKEN_DIM)
+    presence = feat["presence"].reshape(feat["presence_shape"])  # (NF, 44)
+    p0 = presence[0]
+    n = float(p0.sum())
+    tok_mean = (tokens[0] * p0[:, None]).sum(0) / n if n > 0 else np.zeros(TOKEN_DIM, np.float32)
+    return np.concatenate([tok_mean, [n / 44.0, step / 500.0]]).astype(np.float32)
 
-    The distance matrix comes from Rust (`encode_obs`) — the SAME code the bot
-    uses at test time. The global vector pools it + ownership into fixed dims so
-    the MLP input size is independent of planet count.
-    """
-    feat = encode_obs(obs, player)
+
+def action_to_move(feat: dict, flat_idx: int):
+    """Convert a flat (src, tgt, action) index into a `[source_id, angle, ships]`
+    game move. Assumes the action is legal (mask == 1), so the count is sendable."""
+    ps, _, ad = feat["mask_shape"]
+    a = flat_idx % ad
+    sj = (flat_idx // ad) % ps
+    si = flat_idx // (ad * ps)
     ids = feat["planet_ids"]
-    n = feat["n"]
-    D = np.asarray(feat["distance_matrix"], dtype=np.float32).reshape(n, n) if n else np.zeros((0, 0), np.float32)
+    id_i, id_j = ids[si], ids[sj]
 
-    planets = obs["planets"]
-    owners = np.array([p[1] for p in planets])
-    ships = np.array([p[5] for p in planets], dtype=np.float32)
-    mine = owners == player
-    enemy = (owners != player) & (owners != -1)
-    neutral = owners == -1
+    ships_t = {p[0]: p[4] for p in feat["frame_planets"][0]}            # at t
+    resolved = {p[0]: p[4] for p in feat["frame_planets"][-1]}          # at t_resolved
+    ss = ships_t[id_i]
+    if a < 4:
+        count = int(ss * SEND_FRACTIONS[a])
+    elif a == 4:
+        count = CONST_SEND
+    else:
+        count = resolved[id_j] + 1
 
-    upper = D[np.triu_indices(n, k=1)] if n > 1 else np.array([0.0], np.float32)
-    g = np.array([
-        mine.sum(), enemy.sum(), neutral.sum(),
-        np.log1p(ships[mine].sum()), np.log1p(ships[enemy].sum()),
-        upper.mean() / 141.42, upper.min() / 141.42, upper.max() / 141.42,
-        obs["step"] / 500.0,
-    ], dtype=np.float32)
-    return g, D, ids
-
-
-def moves_for_fraction(obs: dict, player: int, D: np.ndarray, ids: list[int], frac: float) -> list:
-    """From each owned planet, send `frac` of its ships toward its nearest
-    non-owned planet (nearest chosen via the Rust distance matrix)."""
-    planets = obs["planets"]
-    idx_by_id = {pid: i for i, pid in enumerate(ids)}
-    pos = {p[0]: (p[2], p[3]) for p in planets}
-    owner = {p[0]: p[1] for p in planets}
-    ships = {p[0]: p[5] for p in planets}
-
-    moves = []
-    targets = [p[0] for p in planets if p[1] != player]
-    if not targets:
-        return moves
-    for p in planets:
-        pid = p[0]
-        if owner[pid] != player or ships[pid] < 2:
-            continue
-        i = idx_by_id[pid]
-        nearest = min(targets, key=lambda t: D[i, idx_by_id[t]])
-        send = int(frac * ships[pid])
-        if send < 1:
-            continue
-        (sx, sy), (tx, ty) = pos[pid], pos[nearest]
-        angle = math.atan2(ty - sy, tx - sx)
-        moves.append([pid, angle, send])
-    return moves
+    angle = float(feat["angles"][flat_idx])
+    return [id_i, angle, count]
 
 
 # --------------------------------------------------------------------------- #
-# Toy policy: global features -> Categorical over SEND_FRACTIONS. REINFORCE.
+# Toy policy: global features -> logit per action over (44, 44, 6). REINFORCE.
 # --------------------------------------------------------------------------- #
 class TinyPolicy(nn.Module):
-    def __init__(self, in_dim: int = GLOBAL_FEATURES, hidden: int = 64, n_actions: int = len(SEND_FRACTIONS)):
+    def __init__(self, in_dim: int = GLOBAL_FEATURES, hidden: int = 128, n_actions: int = 44 * 44 * 6):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.Tanh(),
@@ -181,7 +167,22 @@ class TinyPolicy(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)  # logits
+        return self.net(x)  # flat (44*44*6,) logits
+
+
+def act(policy: TinyPolicy, obs: dict):
+    """Pick one legal move from `obs` (player 0). Returns (moves, log_prob).
+
+    The mask gates the logits; if no action is legal we pass (empty moves)."""
+    feat = encode_obs(obs, 0)
+    g = global_vector(feat, obs["step"])
+    logits = policy(torch.from_numpy(g))
+    mask = torch.from_numpy(feat["mask"]).bool()  # (44*44*6,)
+    if not bool(mask.any()):
+        return [], None
+    dist = torch.distributions.Categorical(logits=logits.masked_fill(~mask, float("-inf")))
+    idx = dist.sample()
+    return [action_to_move(feat, int(idx))], dist.log_prob(idx)
 
 
 def run_episode(engine: OrbitWarsEngine, policy: TinyPolicy, opponent: BotOpponent, seed: int):
@@ -192,15 +193,9 @@ def run_episode(engine: OrbitWarsEngine, policy: TinyPolicy, opponent: BotOppone
     total_reward = 0.0
 
     for _ in range(500):
-        # --- learner (player 0): Rust features -> policy -> macro-action -> moves ---
-        g, D, ids = summarize(obs[0], player=0)
-        logits = policy(torch.from_numpy(g))
-        dist = torch.distributions.Categorical(logits=logits)
-        action = dist.sample()
-        log_probs.append(dist.log_prob(action))
-        learner_moves = moves_for_fraction(obs[0], 0, D, ids, SEND_FRACTIONS[int(action)])
-
-        # --- opponent (player 1): a /bots agent on its own observation ---
+        learner_moves, log_prob = act(policy, obs[0])
+        if log_prob is not None:
+            log_probs.append(log_prob)
         opp_moves = opponent.act(obs[1])
 
         out = engine.step([learner_moves, opp_moves])
@@ -228,8 +223,8 @@ def main() -> int:
         returns.append(ret)
 
         # REINFORCE: maximize return -> minimize -(return * sum log_probs).
-        # (Episode-level return as the signal; a real run would use GAE/PPO and
-        # the value head, but this keeps the example to the integration story.)
+        # (Episode-level return; a real run would use GAE/PPO + a value head, but
+        # this keeps the example to the integration story.)
         if log_probs:
             loss = -(ret * torch.stack(log_probs).sum())
             optim.zero_grad()
