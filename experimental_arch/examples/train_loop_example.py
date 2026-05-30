@@ -13,11 +13,12 @@ Feature / action interface (the real one)
   - tokens   (NUM_FRAMES, 44, TOKEN_DIM)   per-planet features at t / t+1 / t+10 / t_resolved
   - globals  (GLOBAL_DIM,)                 board-level summary (scores, shares, …) at t
   - presence (NUM_FRAMES, 44)              which slots are real planets
-  - turns    (44, 44, 6)                   turns-to-arrive per (src, tgt, action) at t
-  - angles   (44, 44, 6)                   launch angle to actually issue the move
-  - mask     (44, 44, 6)                   1 = legal action now
+  - turns    (44, 44, 7)                   turns-to-arrive per (src, tgt, action) at t
+  - angles   (44, 44, 7)                   launch angle to actually issue the move
+  - mask     (44, 44, 7)                   1 = legal action now
+  - ship_counts / reachable_mask            integer ships + clean-arrival bit per action
   - planet_ids / frame_planets             slot→id map + raw per-frame planet state
-The policy outputs a logit per action over the (44, 44, 6) space; we mask out the
+The policy outputs a logit per action over the (44, 44, 7) space; we mask out the
 illegal ones, sample (src, tgt, action), and convert it to a game move
 `[source_id, angle, ships]` using `angles` and the action's ship count.
 
@@ -62,11 +63,12 @@ SEED = 0
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOTS_DIR = REPO_ROOT / "bots"
 
-# Must match features.rs. The first 4 actions are send-fractions of the source's
-# current ships; action 4 is a constant; action 5 is "resolved garrison + 1".
+# Must match features.rs. Action 0 is per-source noop, actions 1-4 are
+# send-fractions, action 5 is a constant, and action 6 is "resolved + 1".
+ACTIONS_DIM = 7
 SEND_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
 CONST_SEND = 42
-TOKEN_DIM = 9
+TOKEN_DIM = 11
 GLOBAL_DIM = 16  # width of the encode_obs `globals` vector (board-level summary)
 
 
@@ -127,34 +129,31 @@ def global_vector(feat: dict) -> np.ndarray:
 
 
 def action_to_move(feat: dict, flat_idx: int):
-    """Convert a flat (src, tgt, action) index into a `[source_id, angle, ships]`
-    game move. Assumes the action is legal (mask == 1), so the count is sendable."""
+    """Convert a flat (src, tgt, action) index into a game move.
+
+    Returns None for the per-source noop action; otherwise returns
+    `[source_id, angle, ships]`. Assumes the action is legal (mask == 1), so the
+    count is sendable."""
     ps, _, ad = feat["mask_shape"]
     a = flat_idx % ad
     sj = (flat_idx // ad) % ps
     si = flat_idx // (ad * ps)
+    if a == 0:
+        return None
+
     ids = feat["planet_ids"]
     id_i, id_j = ids[si], ids[sj]
 
-    ships_t = {p[0]: p[4] for p in feat["frame_planets"][0]}            # at t
-    resolved = {p[0]: p[4] for p in feat["frame_planets"][-1]}          # at t_resolved
-    ss = ships_t[id_i]
-    if a < 4:
-        count = int(ss * SEND_FRACTIONS[a])
-    elif a == 4:
-        count = CONST_SEND
-    else:
-        count = resolved[id_j] + 1
-
+    count = int(feat["ship_counts"][flat_idx])
     angle = float(feat["angles"][flat_idx])
     return [id_i, angle, count]
 
 
 # --------------------------------------------------------------------------- #
-# Toy policy: global features -> logit per action over (44, 44, 6). REINFORCE.
+# Toy policy: global features -> logit per action over (44, 44, 7). REINFORCE.
 # --------------------------------------------------------------------------- #
 class TinyPolicy(nn.Module):
-    def __init__(self, in_dim: int = GLOBAL_DIM, hidden: int = 128, n_actions: int = 44 * 44 * 6):
+    def __init__(self, in_dim: int = GLOBAL_DIM, hidden: int = 128, n_actions: int = 44 * 44 * ACTIONS_DIM):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.Tanh(),
@@ -163,7 +162,7 @@ class TinyPolicy(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)  # flat (44*44*6,) logits
+        return self.net(x)  # flat (44*44*ACTIONS_DIM,) logits
 
 
 def act(policy: TinyPolicy, obs: dict):
@@ -173,12 +172,13 @@ def act(policy: TinyPolicy, obs: dict):
     feat = encode_obs(obs, 0)
     g = global_vector(feat)
     logits = policy(torch.from_numpy(g))
-    mask = torch.from_numpy(feat["mask"]).bool()  # (44*44*6,)
+    mask = torch.from_numpy(feat["mask"]).bool()  # (44*44*ACTIONS_DIM,)
     if not bool(mask.any()):
         return [], None
     dist = torch.distributions.Categorical(logits=logits.masked_fill(~mask, float("-inf")))
     idx = dist.sample()
-    return [action_to_move(feat, int(idx))], dist.log_prob(idx)
+    move = action_to_move(feat, int(idx))
+    return ([] if move is None else [move]), dist.log_prob(idx)
 
 
 def run_episode(engine: OrbitWarsEngine, policy: TinyPolicy, opponent: BotOpponent, seed: int):

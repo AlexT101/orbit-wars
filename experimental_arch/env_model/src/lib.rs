@@ -39,7 +39,15 @@ pub struct Planet {
 
 impl Planet {
     fn as_tuple(&self) -> (i64, i64, f64, f64, f64, i64, i64) {
-        (self.id, self.owner, self.x, self.y, self.radius, self.ships, self.production)
+        (
+            self.id,
+            self.owner,
+            self.x,
+            self.y,
+            self.radius,
+            self.ships,
+            self.production,
+        )
     }
 }
 
@@ -56,7 +64,15 @@ pub struct Fleet {
 
 impl Fleet {
     fn as_tuple(&self) -> (i64, i64, f64, f64, f64, i64, i64) {
-        (self.id, self.owner, self.x, self.y, self.angle, self.from_planet_id, self.ships)
+        (
+            self.id,
+            self.owner,
+            self.x,
+            self.y,
+            self.angle,
+            self.from_planet_id,
+            self.ships,
+        )
     }
 }
 
@@ -75,7 +91,10 @@ pub struct Configuration {
 
 impl Default for Configuration {
     fn default() -> Self {
-        Self { episode_steps: 500, ship_speed: 6.0 }
+        Self {
+            episode_steps: 500,
+            ship_speed: 6.0,
+        }
     }
 }
 
@@ -193,7 +212,12 @@ impl EngineState {
         // been spawned yet.
         let next_fleet_id: i64 = match dict.get_item("next_fleet_id")? {
             Some(v) => v.extract()?,
-            None => fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0),
+            None => fleets
+                .iter()
+                .map(|f| f.id)
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(0),
         };
 
         let comet_planet_ids: Vec<i64> = match dict.get_item("comet_planet_ids")? {
@@ -479,9 +503,12 @@ impl EngineState {
 
     fn remove_comets(&mut self, expired_ids: &[i64]) {
         let expired_set: HashSet<i64> = expired_ids.iter().copied().collect();
-        self.planets.retain(|planet| !expired_set.contains(&planet.id));
-        self.initial_planets.retain(|planet| !expired_set.contains(&planet.id));
-        self.comet_planet_ids.retain(|pid| !expired_set.contains(pid));
+        self.planets
+            .retain(|planet| !expired_set.contains(&planet.id));
+        self.initial_planets
+            .retain(|planet| !expired_set.contains(&planet.id));
+        self.comet_planet_ids
+            .retain(|pid| !expired_set.contains(pid));
         for group in &mut self.comets {
             group.planet_ids.retain(|pid| !expired_set.contains(pid));
         }
@@ -517,7 +544,6 @@ impl EngineState {
             self.next_fleet_id += 1;
         }
     }
-
 }
 
 pub fn distance(p1: (f64, f64), p2: (f64, f64)) -> f64 {
@@ -650,7 +676,11 @@ fn parse_comet(value: &Bound<'_, PyAny>) -> PyResult<CometGroup> {
         .get_item("path_index")?
         .ok_or_else(|| PyRuntimeError::new_err("comet missing path_index"))?
         .extract()?;
-    Ok(CometGroup { planet_ids, paths, path_index })
+    Ok(CometGroup {
+        planet_ids,
+        paths,
+        path_index,
+    })
 }
 
 fn parse_configuration(value: Option<&Bound<'_, PyAny>>) -> PyResult<Configuration> {
@@ -694,7 +724,11 @@ fn parse_actions(actions: &Bound<'_, PyAny>, num_players: usize) -> PyResult<Vec
             let from_id = py_any_to_i64(&parts.get_item(0)?)?;
             let angle = py_any_to_f64(&parts.get_item(1)?)?;
             let ships = py_any_to_i64(&parts.get_item(2)?)?;
-            parsed.push(MoveAction { from_id, angle, ships });
+            parsed.push(MoveAction {
+                from_id,
+                angle,
+                ships,
+            });
         }
         out.push(parsed);
     }
@@ -802,7 +836,8 @@ impl OrbitWarsModel {
         let parsed = parse_actions(actions, np)?;
         let done = {
             let s = self.state.as_mut().expect("state present");
-            s.step_with_actions(&parsed).map_err(PyRuntimeError::new_err)?
+            s.step_with_actions(&parsed)
+                .map_err(PyRuntimeError::new_err)?
         };
         let state = self.state.as_ref().expect("state present");
         let mut observations = Vec::with_capacity(np);
@@ -827,7 +862,8 @@ impl OrbitWarsModel {
         let parsed = parse_actions(actions, np)?;
         let done = {
             let s = self.state.as_mut().expect("state present");
-            s.step_with_actions(&parsed).map_err(PyRuntimeError::new_err)?
+            s.step_with_actions(&parsed)
+                .map_err(PyRuntimeError::new_err)?
         };
         let dict = PyDict::new(py);
         dict.set_item("done", done)?;
@@ -850,7 +886,10 @@ impl OrbitWarsModel {
         )?;
         dict.set_item(
             "initial_planets",
-            s.initial_planets.iter().map(Planet::as_tuple).collect::<Vec<_>>(),
+            s.initial_planets
+                .iter()
+                .map(Planet::as_tuple)
+                .collect::<Vec<_>>(),
         )?;
         dict.set_item(
             "fleets",

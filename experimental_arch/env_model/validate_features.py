@@ -34,7 +34,7 @@ WARMUP = 6            # empty steps before we encode, so planets have moved
 ACTIONS_PER_STATE = 12
 POS_TOL = 1e-6
 PLANET_SLOTS = 44
-ACTIONS_DIM = 6
+ACTIONS_DIM = 7
 
 
 def fresh_env(seed: int, warmup: int):
@@ -135,16 +135,17 @@ def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
     obs0 = obs_of(env, 0)
     feat = encode_obs(obs0, 0)
     ids = feat["planet_ids"]
-    turns = feat["turns"]      # flat (NUM_FRAMES,44,44,6); frame 0 is first block
-    angles = feat["angles"]    # flat (44,44,6)
-    mask = feat["mask"]        # flat (44,44,6)
-    src_ships = {int(p[0]): int(p[5]) for p in obs0["planets"]}
+    turns = feat["turns"]      # flat (44,44,7)
+    angles = feat["angles"]    # flat (44,44,7)
+    mask = feat["mask"]        # flat (44,44,7)
+    ship_counts = feat["ship_counts"]  # flat (44,44,7), integral ships sent
+    reachable = feat["reachable_mask"]  # flat (44,44,7)
 
     valid = [
         (si, sj, a)
         for si in range(PLANET_SLOTS)
         for sj in range(PLANET_SLOTS)
-        for a in range(ACTIONS_DIM)
+        for a in range(1, ACTIONS_DIM)
         if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]
     ]
     rng.shuffle(valid)
@@ -153,18 +154,9 @@ def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
         mi = (si * PLANET_SLOTS + sj) * ACTIONS_DIM + a
         id_i, id_j = ids[si], ids[sj]
         angle = angles[mi]
-        # recover the integer count for this action from frame-t source ships
-        ss = src_ships[id_i]
-        if a <= 3:
-            count = int(ss * (0.25, 0.50, 0.75, 1.00)[a])
-        elif a == 4:
-            count = 42
-        else:
-            # resolved+1: invert the predicted move by trusting the mask/count
-            # relationship is exercised by the fraction/const actions; for the
-            # resolved bin we just send what the engine reports it took, derived
-            # below from a probe. Simplest: skip resolved bin here (covered by
-            # the Rust engine-replay test).
+        count = int(ship_counts[mi])
+        if reachable[mi] != 1:
+            fails.append(f"seed {seed} {id_i}->{id_j} a{a}: mask set but reachable_mask=0")
             continue
         pred_turn = round(turns[mi] * 20.0)
         hit, turn = kaggle_arrival(seed, id_i, angle, count, max_turns=80)
@@ -208,10 +200,10 @@ def check_mask_completeness(seed: int, rng: random.Random) -> tuple[int, list[st
             id_j = ids[sj]
             if sj == si or id_j < 0 or id_j not in pmap:
                 continue
-            for a in range(4):  # fractions only (count is unambiguous here)
+            for a in range(1, 5):  # fractions only (count is unambiguous here)
                 if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]:
                     continue
-                count = int(ss * (0.25, 0.50, 0.75, 1.00)[a])
+                count = int(ss * (0.25, 0.50, 0.75, 1.00)[a - 1])
                 if 1 <= count <= ss:
                     cands.append((si, sj, a, id_i, id_j, count))
     rng.shuffle(cands)

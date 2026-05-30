@@ -5,7 +5,8 @@
 Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
 
 - **Planet ID feature removed** — the per-planet token no longer leaks
-  the slot ordering via `pid/100.0`. That slot now carries
+  the slot ordering via `pid/100.0`, but it does include normalized `x`/`y`
+  board position. That slot now carries
   `ships_resolved` (see below). `PLANET_FEATURES` grows from 19 → 29
   because of the new arrival-bin features (see further below).
 - **Ground-truth ships-resolved.** For each planet we forward-sim the
@@ -27,11 +28,14 @@ Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
   use a default seed and don't match reality. Impact is small (~12% of
   planet-checks see a ship-count diff with mean ~0.9 ships off, max 18)
   and only when crossing those boundaries.
-- **New "resolved+1" send action** — `SEND_FRACTIONS = (0.25, 0.5, 0.75, 1.0)`
-  is unchanged, but there is now a 5th send bin that sends exactly
+- **Noop + resolved+1 action bins** — action 0 is a per-source noop,
+  `SEND_FRACTIONS = (0.25, 0.5, 0.75, 1.0)` are actions 1-4, action 5
+  sends the constant `42`, and action 6 sends exactly
   `target.ships_resolved + 1` — i.e. the minimum needed to capture the
-  target after the currently-flying fleets resolve against it. The action
-  space grows from 16385 → 20481.
+  target after the currently-flying fleets resolve against it. The per-source
+  action width is now 7. `encode_obs` also returns `ship_counts` and
+  `reachable_mask` so training code does not have to recompute ship amounts
+  or infer reachability from zero-valued travel times.
 - **Per-planet arrival bins.** Each planet gets `2 × 5 = 10` extra
   feature dims encoding log-normalized ship counts of incoming **mine**
   vs **enemy** fleets bucketed by arrival-delta-turn:
@@ -156,7 +160,7 @@ python export_submission.py \
 ```
 
 ⚠️ Export was inherited from the parent repo and has **not** been
-re-verified against the new action space (20481 actions, resolved+1
+re-verified against the new action space (7 action bins, resolved+1
 bin, ships_resolved feature). The exported bot will likely need its
 inline `encode_obs` updated to compute `ships_resolved` before this
 works end-to-end.

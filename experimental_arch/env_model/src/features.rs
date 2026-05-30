@@ -6,18 +6,21 @@
 //! Frames: `NUM_FRAMES` snapshots at `t`, `t+1`, `t+10`, `t_resolved` (first
 //! future turn with no fleets in flight). Each frame has `PLANET_SLOTS = 44`
 //! planet tokens. Action space is `(44, 44, ACTIONS_DIM)` = `(source, target,
-//! action)`: send `{25%, 50%, 75%, 100%}` of the source's ships, a constant
-//! `42`, or `target_resolved + 1` (min ships to take the target after in-flight
-//! fleets resolve; invalid if it's ally-held then).
+//! action)`: noop, send `{25%, 50%, 75%, 100%}` of the source's ships, a
+//! constant `42`, or `target_resolved + 1` (min ships to take the target after
+//! in-flight fleets resolve; invalid if it's ally-held then).
 //!
 //! Outputs (dict keys / shapes in [`Features::into_py_dict`]):
 //!   - `tokens`   `(NUM_FRAMES, 44, TOKEN_DIM)`  per-planet features, all frames
 //!   - `globals`  `(GLOBAL_DIM,)`                board-level summary at frame t
 //!   - `presence` `(NUM_FRAMES, 44)`             1 where a slot holds a planet
 //!   - `turns` / `angles` / `mask` `(44, 44, ACTIONS_DIM)`  decision frame (t) only
+//!   - `ship_counts` `(44, 44, ACTIONS_DIM)` integer ships sent by each action
+//!   - `reachable_mask` `(44, 44, ACTIONS_DIM)` 1 when the launch reaches target
 //!
-//! `turns`/`angles`/`mask` are frame t only: the policy acts now and the aim
-//! solve is the whole cost, so it isn't run for lookahead frames.
+//! `turns`/`angles`/`mask`/`ship_counts`/`reachable_mask` are frame t only: the
+//! policy acts now and the aim solve is the whole cost, so it isn't run for
+//! lookahead frames.
 //!
 //! Aim solver: one geometric solve per `(frame, i, j, count)` — lead the moving
 //! target for a launch angle, then project the straight-line fleet turn-by-turn
@@ -44,10 +47,10 @@ thread_local! {
 }
 
 pub const PLANET_SLOTS: usize = 44;
-pub const ACTIONS_DIM: usize = 6;
+pub const ACTIONS_DIM: usize = 7;
 pub const NUM_FRAMES: usize = 4;
 /// Per-planet token width. See [`fill_token`] for the layout.
-pub const TOKEN_DIM: usize = 9;
+pub const TOKEN_DIM: usize = 11;
 /// Board-level feature width. See [`compute_globals`] for the layout.
 pub const GLOBAL_DIM: usize = 16;
 
@@ -64,9 +67,13 @@ const AIM_HORIZON: usize = 64;
 const RESOLVE_CAP: usize = 96;
 
 const SEND_FRACTIONS: [f64; 4] = [0.25, 0.50, 0.75, 1.00];
+/// Per-source noop action. It is valid only at target slot 0, giving each
+/// source row one way to do nothing without duplicating noop across targets.
+const NOOP_ACTION: usize = 0;
 const CONST_SEND: i64 = 42;
+const CONST_SEND_ACTION: usize = 5;
 /// Index of the `target_resolved + 1` action.
-const RESOLVED_ACTION: usize = 5;
+const RESOLVED_ACTION: usize = 6;
 
 // ---- normalization -------------------------------------------------------
 /// `log1p(x) / log1p(full)`: 0 at x=0, ~1 at x=full. For non-negative inputs.
@@ -174,7 +181,11 @@ impl Trajectory {
         for (turn, planets) in snapshots.iter().enumerate() {
             for p in planets {
                 let slot = by_id.entry(p.id).or_insert_with(|| vec![None; len]);
-                slot[turn] = Some(Geom { x: p.x, y: p.y, r: p.radius });
+                slot[turn] = Some(Geom {
+                    x: p.x,
+                    y: p.y,
+                    r: p.radius,
+                });
             }
         }
 
@@ -189,7 +200,14 @@ impl Trajectory {
                     .and_then(|v| v[t + 1])
                     .map(|g| (g.x, g.y))
                     .unwrap_or((p.x, p.y));
-                segs.push(Seg { id: p.id, ox: p.x, oy: p.y, nx, ny, r: p.radius });
+                segs.push(Seg {
+                    id: p.id,
+                    ox: p.x,
+                    oy: p.y,
+                    nx,
+                    ny,
+                    r: p.radius,
+                });
             }
             segments.push(segs);
         }
@@ -201,7 +219,8 @@ impl Trajectory {
             id_bound = id_bound.max(id as usize + 1);
             let mut iter = tl.iter().flatten();
             if let Some(first) = iter.next() {
-                let moves = iter.any(|g| (g.x - first.x).abs() > 1e-12 || (g.y - first.y).abs() > 1e-12);
+                let moves =
+                    iter.any(|g| (g.x - first.x).abs() > 1e-12 || (g.y - first.y).abs() > 1e-12);
                 if !moves {
                     stationary.push((id, first.x, first.y, first.r));
                 }
@@ -235,7 +254,14 @@ impl Trajectory {
     /// it cleanly arrives at `dst_id` (`Some`), or `None` if it first hits any
     /// other planet / the sun / the board edge, or never reaches `dst_id` within
     /// the horizon. Mirrors the engine's collision order (planets, bounds, sun).
-    fn project(&self, frame_off: usize, launch: (f64, f64), speed: f64, theta: f64, dst_id: i64) -> Option<usize> {
+    fn project(
+        &self,
+        frame_off: usize,
+        launch: (f64, f64),
+        speed: f64,
+        theta: f64,
+        dst_id: i64,
+    ) -> Option<usize> {
         let (uhx, uhy) = (theta.cos(), theta.sin());
         let (vx, vy) = (uhx * speed, uhy * speed);
 
@@ -304,7 +330,10 @@ impl Trajectory {
             // `project` is the source of truth.
             if (speed * tau as f64 - d).abs() <= dst.r + speed + 1.0 {
                 let theta = (dst.y - src.y).atan2(dst.x - src.x);
-                let launch = (src.x + theta.cos() * (src.r + 0.1), src.y + theta.sin() * (src.r + 0.1));
+                let launch = (
+                    src.x + theta.cos() * (src.r + 0.1),
+                    src.y + theta.sin() * (src.r + 0.1),
+                );
                 if let Some(turn) = self.project(frame_off, launch, speed, theta, dst_id) {
                     return Some((turn, theta));
                 }
@@ -314,11 +343,12 @@ impl Trajectory {
     }
 }
 
-/// Ship count for action `a` from a source with `src_ships`, against a target
+/// Ship count for a launch action `a` from a source with `src_ships`, against a target
 /// whose post-resolution garrison is `resolved_ships` (owned by ally =
 /// `resolved_ally`, absent = `resolved_absent`). `None` if the action is
 /// structurally invalid (resolved+1 on an ally/absent target) or the count is
-/// not physically sendable (`< 1` or `> src_ships`).
+/// not physically sendable (`< 1` or `> src_ships`). The noop action is not a
+/// launch and is handled directly by `encode`.
 fn action_count(
     a: usize,
     src_ships: i64,
@@ -327,8 +357,9 @@ fn action_count(
     resolved_absent: bool,
 ) -> Option<i64> {
     let c = match a {
-        0..=3 => (src_ships as f64 * SEND_FRACTIONS[a]).floor() as i64,
-        4 => CONST_SEND,
+        NOOP_ACTION => return None,
+        1..=4 => (src_ships as f64 * SEND_FRACTIONS[a - 1]).floor() as i64,
+        CONST_SEND_ACTION => CONST_SEND,
         RESOLVED_ACTION => {
             if resolved_absent || resolved_ally {
                 return None;
@@ -350,12 +381,14 @@ pub struct Features {
     pub n: usize,
     /// Turn offsets of the 4 frames `[0, 1, 10, resolved]`.
     pub offsets: [usize; NUM_FRAMES],
-    pub tokens: Vec<f32>,    // (NUM_FRAMES, 44, TOKEN_DIM)
-    pub globals: Vec<f32>,   // (GLOBAL_DIM,)
-    pub presence: Vec<f32>,  // (NUM_FRAMES, 44)
-    pub turns: Vec<f32>,     // (44, 44, ACTIONS_DIM), frame t
-    pub angles: Vec<f32>,    // (44, 44, ACTIONS_DIM), frame t
-    pub mask: Vec<u8>,       // (44, 44, ACTIONS_DIM), frame t
+    pub tokens: Vec<f32>,        // (NUM_FRAMES, 44, TOKEN_DIM)
+    pub globals: Vec<f32>,       // (GLOBAL_DIM,)
+    pub presence: Vec<f32>,      // (NUM_FRAMES, 44)
+    pub turns: Vec<f32>,         // (44, 44, ACTIONS_DIM), frame t
+    pub angles: Vec<f32>,        // (44, 44, ACTIONS_DIM), frame t
+    pub mask: Vec<u8>,           // (44, 44, ACTIONS_DIM), frame t
+    pub ship_counts: Vec<i64>,   // (44, 44, ACTIONS_DIM), frame t
+    pub reachable_mask: Vec<u8>, // (44, 44, ACTIONS_DIM), frame t
     /// Raw per-frame planet state `[id, owner, x, y, ships]`, present planets
     /// only. Not a model input — exposed for validation/debugging against the
     /// reference engine.
@@ -386,12 +419,23 @@ impl Features {
         d.set_item("angles_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
         d.set_item("mask", self.mask.into_pyarray(py))?;
         d.set_item("mask_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
+        d.set_item("ship_counts", self.ship_counts.into_pyarray(py))?;
+        d.set_item(
+            "ship_counts_shape",
+            (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM),
+        )?;
+        d.set_item("reachable_mask", self.reachable_mask.into_pyarray(py))?;
+        d.set_item(
+            "reachable_mask_shape",
+            (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM),
+        )?;
         Ok(d.into_any().unbind())
     }
 }
 
 /// Per-planet token: `[is_mine, is_enemy, is_neutral, is_comet, is_orbiting,
-/// production, ships, dist_to_sun, angular_velocity]`. `angular_velocity` is the
+/// production, ships, x, y, dist_to_sun, angular_velocity]`. Positions and
+/// distance-to-sun are normalized by board size. `angular_velocity` is the
 /// board's orbital rate for orbiting planets and 0 for static planets / comets,
 /// scaled to ~[0, 1] (board rate is ~0.025–0.05).
 fn fill_token(
@@ -415,8 +459,14 @@ fn fill_token(
     tk[4] = is_orbiting as i32 as f32;
     tk[5] = norm_prod(p.production);
     tk[6] = norm_ships(p.ships);
-    tk[7] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
-    tk[8] = if is_orbiting { (angular_velocity / 0.05) as f32 } else { 0.0 };
+    tk[7] = norm_dist(p.x);
+    tk[8] = norm_dist(p.y);
+    tk[9] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
+    tk[10] = if is_orbiting {
+        (angular_velocity / 0.05) as f32
+    } else {
+        0.0
+    };
 }
 
 /// Board-level features from `player`'s view at the current turn. Layout:
@@ -460,7 +510,11 @@ fn compute_globals(state: &EngineState, player: i64) -> Vec<f32> {
     let remaining = ((episode - state.step as f64).max(0.0)) / episode;
 
     let share = |a: i64, b: i64| -> f32 {
-        if a + b > 0 { a as f32 / (a + b) as f32 } else { 0.5 }
+        if a + b > 0 {
+            a as f32 / (a + b) as f32
+        } else {
+            0.5
+        }
     };
 
     vec![
@@ -485,7 +539,7 @@ fn compute_globals(state: &EngineState, player: i64) -> Vec<f32> {
 
 /// Compute the `(44, ACTIONS_DIM)` turns row for one source slot `si` at frame
 /// `f` (offset `off`), writing into `t_row`. For frame t (`extra` = Some), also
-/// fills that source's angles row and legal-action mask row. Pure / read-only
+/// fills that source's angles, legal-action mask, ship-count, and reachability rows. Pure / read-only
 /// over the trajectory, so it's safe to run across sources in parallel.
 #[allow(clippy::too_many_arguments)]
 fn compute_source_row(
@@ -497,7 +551,7 @@ fn compute_source_row(
     resolved: &FxHashMap<i64, (i64, i64)>,
     player: i64,
     t_row: &mut [f32],
-    mut extra: Option<(&mut [f32], &mut [u8])>,
+    mut extra: Option<(&mut [f32], &mut [u8], &mut [i64], &mut [u8])>,
 ) {
     let id_i = slot_id[si];
     if id_i < 0 {
@@ -517,10 +571,14 @@ fn compute_source_row(
         let mut memo: [(i64, Option<(usize, f64)>); ACTIONS_DIM] = [(i64::MIN, None); ACTIONS_DIM];
         let mut memo_len = 0usize;
         for a in 0..ACTIONS_DIM {
-            let Some(count) = action_count(a, pi.ships, rj_ships, rj_owner == player, rj_owner == -2)
+            let Some(count) =
+                action_count(a, pi.ships, rj_ships, rj_owner == player, rj_owner == -2)
             else {
                 continue;
             };
+            if let Some((_, _, c_row, _)) = extra.as_mut() {
+                c_row[sj * ACTIONS_DIM + a] = count;
+            }
             let res = match memo[..memo_len].iter().find(|(c, _)| *c == count) {
                 Some(&(_, r)) => r,
                 None => {
@@ -533,8 +591,9 @@ fn compute_source_row(
             if let Some((turn, theta)) = res {
                 let k = sj * ACTIONS_DIM + a;
                 t_row[k] = norm_turns(turn);
-                if let Some((a_row, m_row)) = extra.as_mut() {
+                if let Some((a_row, m_row, _, r_row)) = extra.as_mut() {
                     a_row[k] = theta as f32;
+                    r_row[k] = 1;
                     if pi.owner == player {
                         m_row[k] = 1;
                     }
@@ -567,11 +626,16 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
 
     let mut tokens = vec![0f32; NUM_FRAMES * PLANET_SLOTS * TOKEN_DIM];
     let mut presence = vec![0f32; NUM_FRAMES * PLANET_SLOTS];
-    // turns/angles/mask are the decision frame (t) only; lookahead frames give
-    // temporal context through their tokens/presence.
+    // Decision-frame action tensors; lookahead frames give temporal context
+    // through their tokens/presence.
     let mut turns = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut angles = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    let mut ship_counts = vec![0i64; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    let mut reachable_mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    for si in 0..PLANET_SLOTS {
+        mask[(si * PLANET_SLOTS) * ACTIONS_DIM + NOOP_ACTION] = 1;
+    }
     let mut frame_planets: Vec<Vec<(i64, i64, f64, f64, i64)>> = Vec::with_capacity(NUM_FRAMES);
 
     for f in 0..NUM_FRAMES {
@@ -579,7 +643,11 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
         let fp = traj.frame_planets(f);
         let by: FxHashMap<i64, &Planet> = fp.iter().map(|p| (p.id, p)).collect();
         let comet = &traj.comet_ids[off];
-        frame_planets.push(fp.iter().map(|p| (p.id, p.owner, p.x, p.y, p.ships)).collect());
+        frame_planets.push(
+            fp.iter()
+                .map(|p| (p.id, p.owner, p.x, p.y, p.ships))
+                .collect(),
+        );
 
         // Tokens + presence (all frames — this is the temporal context).
         for si in 0..PLANET_SLOTS {
@@ -590,23 +658,56 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
             if let Some(p) = by.get(&id) {
                 presence[f * PLANET_SLOTS + si] = 1.0;
                 let base = (f * PLANET_SLOTS + si) * TOKEN_DIM;
-                fill_token(&mut tokens[base..base + TOKEN_DIM], p, player, comet, &traj.initial_xy, state.angular_velocity);
+                fill_token(
+                    &mut tokens[base..base + TOKEN_DIM],
+                    p,
+                    player,
+                    comet,
+                    &traj.initial_xy,
+                    state.angular_velocity,
+                );
             }
         }
 
-        // Turns + angles + mask: frame t only.
+        // Turns + action metadata: frame t only.
         if f != 0 {
             continue;
         }
         const ROW: usize = PLANET_SLOTS * ACTIONS_DIM;
         for si in 0..PLANET_SLOTS {
             let t_row = &mut turns[si * ROW..(si + 1) * ROW];
-            let (a_row, m_row) = (&mut angles[si * ROW..(si + 1) * ROW], &mut mask[si * ROW..(si + 1) * ROW]);
-            compute_source_row(&traj, off, si, &slot_id, &by, &resolved, player, t_row, Some((a_row, m_row)));
+            let a_row = &mut angles[si * ROW..(si + 1) * ROW];
+            let m_row = &mut mask[si * ROW..(si + 1) * ROW];
+            let c_row = &mut ship_counts[si * ROW..(si + 1) * ROW];
+            let r_row = &mut reachable_mask[si * ROW..(si + 1) * ROW];
+            compute_source_row(
+                &traj,
+                off,
+                si,
+                &slot_id,
+                &by,
+                &resolved,
+                player,
+                t_row,
+                Some((a_row, m_row, c_row, r_row)),
+            );
         }
     }
 
-    Features { slot_id, n, offsets: traj.offsets, tokens, globals, presence, turns, angles, mask, frame_planets }
+    Features {
+        slot_id,
+        n,
+        offsets: traj.offsets,
+        tokens,
+        globals,
+        presence,
+        turns,
+        angles,
+        mask,
+        ship_counts,
+        reachable_mask,
+        frame_planets,
+    }
 }
 
 #[cfg(test)]
@@ -615,24 +716,54 @@ mod tests {
     use crate::Configuration;
 
     fn planet(id: i64, owner: i64, x: f64, y: f64, ships: i64) -> Planet {
-        Planet { id, owner, x, y, radius: 1.5, ships, production: 0 }
+        Planet {
+            id,
+            owner,
+            x,
+            y,
+            radius: 1.5,
+            ships,
+            production: 0,
+        }
     }
 
     fn state(planets: Vec<Planet>, fleets: Vec<crate::Fleet>) -> EngineState {
         let initial = planets.clone();
-        EngineState::new(0, 0.02, planets, initial, fleets, 1000, Vec::new(), Vec::new(), 2, Configuration::default())
+        EngineState::new(
+            0,
+            0.02,
+            planets,
+            initial,
+            fleets,
+            1000,
+            Vec::new(),
+            Vec::new(),
+            2,
+            Configuration::default(),
+        )
     }
 
     struct Lcg(u64);
     impl Lcg {
-        fn new(s: u64) -> Self { Lcg(s) }
+        fn new(s: u64) -> Self {
+            Lcg(s)
+        }
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0
         }
-        fn unit(&mut self) -> f64 { (self.next() >> 11) as f64 / ((1u64 << 53) as f64) }
-        fn range(&mut self, lo: f64, hi: f64) -> f64 { lo + (hi - lo) * self.unit() }
-        fn below(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
+        fn unit(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / ((1u64 << 53) as f64)
+        }
+        fn range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (hi - lo) * self.unit()
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
     }
 
     /// A random board well clear of the sun, ships, mixed ownership.
@@ -675,7 +806,12 @@ mod tests {
     /// assumes. Production is zeroed so the only ship-count change comes from
     /// our fleet landing, which makes the hit planet unambiguous. (Assumes no
     /// pre-existing fleets, which holds for `random_state`.)
-    fn engine_arrival(st: &EngineState, src_id: i64, angle: f64, count: i64) -> (Option<i64>, usize) {
+    fn engine_arrival(
+        st: &EngineState,
+        src_id: i64,
+        angle: f64,
+        count: i64,
+    ) -> (Option<i64>, usize) {
         let mut s = st.clone();
         for p in &mut s.planets {
             p.production = 0;
@@ -700,8 +836,11 @@ mod tests {
         s.next_fleet_id += 1;
 
         for turn in 1..=AIM_HORIZON {
-            let before: FxHashMap<i64, (i64, i64)> =
-                s.planets.iter().map(|p| (p.id, (p.owner, p.ships))).collect();
+            let before: FxHashMap<i64, (i64, i64)> = s
+                .planets
+                .iter()
+                .map(|p| (p.id, (p.owner, p.ships)))
+                .collect();
             let _ = s.step_with_actions(&empty);
             if !s.fleets.iter().any(|fl| fl.id == fleet_id) {
                 for p in &s.planets {
@@ -739,15 +878,25 @@ mod tests {
                         }
                         if let Some((turn, theta)) = traj.aim(0, i, j, count) {
                             let (hit, eturn) = engine_arrival(&st, i, theta, count);
-                            assert_eq!(hit, Some(j), "aim said {i}->{j} count {count} clean; engine hit {hit:?}");
-                            assert_eq!(eturn, turn, "arrival turn mismatch for {i}->{j} count {count}");
+                            assert_eq!(
+                                hit,
+                                Some(j),
+                                "aim said {i}->{j} count {count} clean; engine hit {hit:?}"
+                            );
+                            assert_eq!(
+                                eturn, turn,
+                                "arrival turn mismatch for {i}->{j} count {count}"
+                            );
                             checked += 1;
                         }
                     }
                 }
             }
         }
-        assert!(checked > 200, "too few valid intercepts exercised: {checked}");
+        assert!(
+            checked > 200,
+            "too few valid intercepts exercised: {checked}"
+        );
     }
 
     /// Whatever the mask marks valid must (a) be ally-owned at t and (b) replay
@@ -766,6 +915,13 @@ mod tests {
                         if f.mask[mi] == 0 {
                             continue;
                         }
+                        if a == NOOP_ACTION {
+                            assert_eq!(
+                                sj, 0,
+                                "noop should only be valid at canonical target slot 0"
+                            );
+                            continue;
+                        }
                         let id_i = f.slot_id[si];
                         let id_j = f.slot_id[sj];
                         let pi = st.planets.iter().find(|p| p.id == id_i).unwrap();
@@ -778,10 +934,19 @@ mod tests {
                             .collect();
                         let (ro, rs) = resolved.get(&id_j).copied().unwrap_or((-2, 0));
                         let count = action_count(a, pi.ships, rs, ro == 0, ro == -2).unwrap();
+                        assert_eq!(
+                            f.ship_counts[mi], count,
+                            "ship_counts disagreed with action_count"
+                        );
+                        assert_eq!(
+                            f.reachable_mask[mi], 1,
+                            "valid launch missing reachable bit"
+                        );
                         let angle = f.angles[mi] as f64;
                         let (hit, turn) = engine_arrival(&st, id_i, angle, count);
                         assert_eq!(hit, Some(id_j), "masked-valid action didn't reach target");
-                        let expect = (f.turns[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a] * 20.0).round() as usize;
+                        let expect = (f.turns[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a] * 20.0)
+                            .round() as usize;
                         assert_eq!(turn, expect, "masked-valid action arrival turn mismatch");
                         checked += 1;
                     }
@@ -838,24 +1003,67 @@ mod tests {
             assert_eq!(f.turns.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(f.mask.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(f.angles.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
-            for v in f.tokens.iter().chain(f.turns.iter()).chain(f.angles.iter()).chain(f.globals.iter()) {
+            assert_eq!(
+                f.ship_counts.len(),
+                PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM
+            );
+            assert_eq!(
+                f.reachable_mask.len(),
+                PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM
+            );
+            for v in f
+                .tokens
+                .iter()
+                .chain(f.turns.iter())
+                .chain(f.angles.iter())
+                .chain(f.globals.iter())
+            {
                 assert!(v.is_finite(), "non-finite feature");
             }
             // Shares live in [0, 1]; remaining in [0, 1] at the game start.
             for &idx in &[0usize, 11, 12, 13] {
-                assert!((0.0..=1.0).contains(&f.globals[idx]), "global {idx} out of [0,1]: {}", f.globals[idx]);
+                assert!(
+                    (0.0..=1.0).contains(&f.globals[idx]),
+                    "global {idx} out of [0,1]: {}",
+                    f.globals[idx]
+                );
             }
             for &v in &f.turns {
                 assert!(v >= 0.0, "negative turns");
             }
-            // mask implies a positive turns entry at frame 0
+            for token in f.tokens.chunks_exact(TOKEN_DIM) {
+                if token[0..5].iter().any(|&x| x > 0.0) {
+                    assert!(
+                        (0.0..=1.0).contains(&token[7]),
+                        "x out of [0,1]: {}",
+                        token[7]
+                    );
+                    assert!(
+                        (0.0..=1.0).contains(&token[8]),
+                        "y out of [0,1]: {}",
+                        token[8]
+                    );
+                }
+            }
+            // Every source row has one canonical noop; launch masks imply a positive turns entry.
+            for si in 0..PLANET_SLOTS {
+                assert_eq!(f.mask[(si * PLANET_SLOTS) * ACTIONS_DIM + NOOP_ACTION], 1);
+            }
             for si in 0..PLANET_SLOTS {
                 for sj in 0..PLANET_SLOTS {
                     for a in 0..ACTIONS_DIM {
                         let mi = (si * PLANET_SLOTS + sj) * ACTIONS_DIM + a;
-                        if f.mask[mi] == 1 {
+                        if f.mask[mi] == 1 && a != NOOP_ACTION {
                             let di = ((si * PLANET_SLOTS) + sj) * ACTIONS_DIM + a;
-                            assert!(f.turns[di] > 0.0, "masked action with zero turns");
+                            assert!(f.turns[di] > 0.0, "masked launch action with zero turns");
+                            assert_eq!(
+                                f.reachable_mask[di], 1,
+                                "masked launch action not reachable"
+                            );
+                            assert!(
+                                f.ship_counts[di] > 0,
+                                "masked launch action with zero ship count"
+                            );
                         }
                     }
                 }

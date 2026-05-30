@@ -3,17 +3,19 @@ Let NUM_FRAMES = 4.
 I wanna have NUM_FRAMES: t, t+1, t+10, t_resolved,
 where t_resolved is the time in the future when all moving ships have resolved (landed).
 
-Let ACTIONS_DIM = 6 (subject to change).
-The actions are (25%, 50%, 75%, 100%, 42, target_planet_resolved + 1)
+Let ACTIONS_DIM = 7 (subject to change).
+For each source row, the actions are (noop, 25%, 50%, 75%, 100%, 42, target_planet_resolved + 1)
 where
+    noop / 0 sends no fleet and is always valid once per source row.
     25%, 50%, 75%, 100% are fractions of the planet's ship count currently.
     42 is a constant.
     target_planet_resolved 
         is the number of ships required to take the planet once all moving ships have resolved,
         if the target planet is already in ally control once ships have resolved, this action is invalid.
 
-Actions are invalid if there are insufficient ships at the source planet.
-Actions are invalid if the source planet is not under ally control.
+Launch actions are invalid if there are insufficient ships at the source planet.
+Launch actions are invalid if the source planet is not under ally control.
+The noop action remains valid so each source row can choose to do nothing.
 
 An action (i, j, count) is invalid if the trajectory caused from sending `count` ships from i to j, 
 is not "clean" - i.e. the ships don't arrive at the destination in the future - this could be
@@ -23,7 +25,7 @@ because they intersect with another planet or intersect the sun.
 The output action space is therefore (44, 44, ACTIONS_DIM).
 Create a valid action mask. I think this mask should also be of shape (44, 44, ACTIONS_DIM).
 
-A planet token (TOKEN_DIM = 9, see features.rs::fill_token):
+A planet token (TOKEN_DIM = 11, see features.rs::fill_token):
     * is_mine          (0/1)
     * is_enemy         (0/1)
     * is_neutral       (0/1)
@@ -31,6 +33,8 @@ A planet token (TOKEN_DIM = 9, see features.rs::fill_token):
     * is_orbiting      (0/1)
     * production       (log-normalized)
     * ships            (log-normalized)
+    * x                (/100)
+    * y                (/100)
     * dist_to_sun      (/100)
     * angular_velocity (board orbital rate /0.05 for orbiting planets, else 0;
                         comets get 0 — they ride comet paths, not orbits)
@@ -85,20 +89,24 @@ reshape each with its paired `*_shape`. The rest are plain Python objects.
     frame_planets  list[list[tuple]]   per-frame [(id, owner, x, y, ships), ...],
                                         present planets only. NOT a model input —
                                         raw state for validation/debugging.
-    tokens         float32, flat        reshape (4, 44, 9)  = (NUM_FRAMES, slot, TOKEN_DIM)
-    tokens_shape   tuple (4, 44, 9)
+    tokens         float32, flat        reshape (4, 44, 11)  = (NUM_FRAMES, slot, TOKEN_DIM)
+    tokens_shape   tuple (4, 44, 11)
     globals        float32, flat        reshape (16,)       board-level summary at frame t
     globals_shape  tuple (16,)
     presence       float32, flat        reshape (4, 44)     1.0 where a slot holds a planet
     presence_shape tuple (4, 44)
-    turns          float32, flat        reshape (44, 44, 6) = (src, tgt, action), frame t only;
+    turns          float32, flat        reshape (44, 44, 7) = (src, tgt, action), frame t only;
                                         turns-to-arrive /20, 0 if invalid
-    turns_shape    tuple (44, 44, 6)
-    angles         float32, flat        reshape (44, 44, 6) launch angle (radians) to issue
+    turns_shape    tuple (44, 44, 7)
+    angles         float32, flat        reshape (44, 44, 7) launch angle (radians) to issue
                                         the move; 0 if invalid
-    angles_shape   tuple (44, 44, 6)
-    mask           uint8, flat          reshape (44, 44, 6) 1 = legal action now, else 0
-    mask_shape     tuple (44, 44, 6)
+    angles_shape   tuple (44, 44, 7)
+    mask           uint8, flat          reshape (44, 44, 7) 1 = legal action now, else 0
+    mask_shape     tuple (44, 44, 7)
+    ship_counts    int64, flat          reshape (44, 44, 7) integer ships sent; 0 for noop/invalid
+    ship_counts_shape tuple (44, 44, 7)
+    reachable_mask uint8, flat          reshape (44, 44, 7) 1 = clean launch reaches target
+    reachable_mask_shape tuple (44, 44, 7)
 
 Reward shaping (env_engine, see RewardWeights + step_with_actions in lib.rs):
     * terminal       = ships_share = own_ships / all_players_ships  (in [0,1]).
@@ -144,7 +152,7 @@ a per-action reachability feature from `distances` internally:
     * edge_mask[i,j] = (distances > 0).any(dim=-1)  — "does j reach i via ANY
       action?". The .any is correct HERE: the gate only decides whether to pass
       a message at all; WHICH actions reach is preserved in the message content.
-    * reach bits = (distances > 0) per action, concatenated into phi's input so
+    * reach bits = reachable_mask per action, concatenated into phi's input so
       phi never has to disambiguate "0 = unreachable" from "0.05 = 1 turn"
       (distances=0 is an overloaded sentinel: obstructed OR action structurally
       invalid). phi input width is therefore 2*ACTIONS_DIM.
@@ -183,7 +191,7 @@ class GNNLayer(nn.Module):
         # d_ji[i, j, a] = distances[j, i, a] = "action a's travel time j → i".
         with torch.no_grad():
             d_ji = distances.transpose(0, 1)        # (44, 44, ACTIONS_DIM)
-            reach_ji = (d_ji > 0).float()           # (44, 44, ACTIONS_DIM) per-action live bit
+            reach_ji = reachable_mask.transpose(0, 1).float()           # (44, 44, ACTIONS_DIM) per-action live bit
             edge_mask = reach_ji.any(dim=-1)        # (44, 44) bool — j reaches i at all?
             # (optionally & with presence[0] to hard-drop empty slots.)
 
