@@ -11,6 +11,7 @@ Feature / action interface (the real one)
 ------------------------------------------
 `encode_obs(obs, player)` returns numpy arrays (zero-copy; `torch.from_numpy`-ready):
   - tokens   (NUM_FRAMES, 44, TOKEN_DIM)   per-planet features at t / t+1 / t+10 / t_resolved
+  - globals  (GLOBAL_DIM,)                 board-level summary (scores, shares, …) at t
   - presence (NUM_FRAMES, 44)              which slots are real planets
   - turns    (44, 44, 6)                   turns-to-arrive per (src, tgt, action) at t
   - angles   (44, 44, 6)                   launch angle to actually issue the move
@@ -65,8 +66,8 @@ BOTS_DIR = REPO_ROOT / "bots"
 # current ships; action 4 is a constant; action 5 is "resolved garrison + 1".
 SEND_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
 CONST_SEND = 42
-TOKEN_DIM = 8
-GLOBAL_FEATURES = TOKEN_DIM + 2  # pooled frame-t token + [planet_frac, step]
+TOKEN_DIM = 9
+GLOBAL_DIM = 16  # width of the encode_obs `globals` vector (board-level summary)
 
 
 # --------------------------------------------------------------------------- #
@@ -116,18 +117,13 @@ class BotOpponent:
 
 
 # --------------------------------------------------------------------------- #
-# Features -> fixed-size global vector for the (toy) policy input.
+# Features -> fixed-size vector for the (toy) policy input.
 # --------------------------------------------------------------------------- #
-def global_vector(feat: dict, step: int) -> np.ndarray:
-    """Pool the frame-t planet tokens (masked by presence) into a fixed vector,
-    so the MLP input size doesn't depend on planet count. A real model would
-    consume the full token set + action grid; this keeps the example tiny."""
-    tokens = feat["tokens"].reshape(feat["tokens_shape"])      # (NF, 44, TOKEN_DIM)
-    presence = feat["presence"].reshape(feat["presence_shape"])  # (NF, 44)
-    p0 = presence[0]
-    n = float(p0.sum())
-    tok_mean = (tokens[0] * p0[:, None]).sum(0) / n if n > 0 else np.zeros(TOKEN_DIM, np.float32)
-    return np.concatenate([tok_mean, [n / 44.0, step / 500.0]]).astype(np.float32)
+def global_vector(feat: dict) -> np.ndarray:
+    """The board-level `globals` vector encode_obs already emits (normalized,
+    fixed size). A real model would also consume the full token set + action
+    grid; this keeps the example's policy input tiny and planet-count-agnostic."""
+    return feat["globals"].astype(np.float32)
 
 
 def action_to_move(feat: dict, flat_idx: int):
@@ -158,7 +154,7 @@ def action_to_move(feat: dict, flat_idx: int):
 # Toy policy: global features -> logit per action over (44, 44, 6). REINFORCE.
 # --------------------------------------------------------------------------- #
 class TinyPolicy(nn.Module):
-    def __init__(self, in_dim: int = GLOBAL_FEATURES, hidden: int = 128, n_actions: int = 44 * 44 * 6):
+    def __init__(self, in_dim: int = GLOBAL_DIM, hidden: int = 128, n_actions: int = 44 * 44 * 6):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.Tanh(),
@@ -175,7 +171,7 @@ def act(policy: TinyPolicy, obs: dict):
 
     The mask gates the logits; if no action is legal we pass (empty moves)."""
     feat = encode_obs(obs, 0)
-    g = global_vector(feat, obs["step"])
+    g = global_vector(feat)
     logits = policy(torch.from_numpy(g))
     mask = torch.from_numpy(feat["mask"]).bool()  # (44*44*6,)
     if not bool(mask.any()):

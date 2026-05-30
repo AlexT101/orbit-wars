@@ -5,8 +5,6 @@
 //! 1. PyO3 class renamed to `OrbitWarsEngine`, module to `orbit_wars_engine`.
 //! 2. Reward weights are configurable at construction; `step` returns a
 //!    per-player shaped reward plus a breakdown of components for logging.
-//! 3. Tracks per-player production across steps so production_delta shaping
-//!    can be computed in Rust without a Python-side state diff.
 
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
@@ -256,24 +254,27 @@ impl Default for Configuration {
 /// Weights applied per step. Set any to 0.0 to disable that term.
 #[derive(Clone, Debug)]
 struct RewardWeights {
-    /// ±1.0 on the terminal turn for the winning / losing player.
+    /// Terminal ships-share: own_ships / all_players_ships, in [0, 1]. Rewards
+    /// ending with a large share of the board's ships rather than just winning.
     terminal: f64,
-    /// Extra terminal bonus scaled by remaining-turns-fraction. Encourages
-    /// fast wins / harshens fast losses.
+    /// Terminal time bonus: ±remaining_turns/episode_steps — `+` for the
+    /// winner, `−` for losers. Rewards fast wins / harshens fast losses; max
+    /// magnitude ~1.0 for finishing on the first turn.
     terminal_time: f64,
-    /// Per-step shaping: weight × (own_Δprod − sum_others_Δprod).
-    production_delta: f64,
-    /// Per-fleet-sent penalty.
-    launch_penalty: f64,
+    /// Per-step shaping: weight × production_share, where production_share =
+    /// own_production / Σ all players' production (0 if no player has any). A
+    /// small dense nudge toward owning more of the board's production; default
+    /// weight 0.001, so it's bounded by ~episode_steps/1000 over a game and
+    /// stays weaker than the per-turn fast-win pull of terminal_time (1/500).
+    production_share: f64,
 }
 
 impl Default for RewardWeights {
     fn default() -> Self {
         Self {
             terminal: 1.0,
-            terminal_time: 0.10,
-            production_delta: 0.05,
-            launch_penalty: 0.001,
+            terminal_time: 1.0,
+            production_share: 0.001,
         }
     }
 }
@@ -301,27 +302,21 @@ struct EngineState {
     configuration: Configuration,
     reward_weights: RewardWeights,
     planet_index_by_id: HashMap<i64, usize>,
-    /// Production per player at the START of the last `step_with_actions`
-    /// call, captured for the production_delta shaping term.
-    prev_production: Vec<i64>,
     /// Last step's per-player reward & component breakdown, exposed to
     /// Python after step.
     last_reward: Vec<f64>,
     last_components: RewardComponents,
-    /// Scratch buffer reused across steps to hold the post-step production
-    /// count per player (the new `prev_production` for the next step).
-    /// Pre-allocated to skip the per-step `Vec::with_capacity`.
+    /// Scratch buffer reused across steps to hold the current per-player
+    /// production count (used for the production_share term). Pre-allocated to
+    /// skip the per-step `Vec::with_capacity`.
     scratch_production: Vec<i64>,
-    /// Same idea for the per-step launch count.
-    scratch_num_launches: Vec<i64>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct RewardComponents {
     terminal: Vec<f64>,
     terminal_time: Vec<f64>,
-    production_delta: Vec<f64>,
-    launch_penalty: Vec<f64>,
+    production_share: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -366,7 +361,7 @@ impl EngineState {
             .map(|(idx, p)| (p.id, idx))
             .collect();
 
-        let mut s = Self {
+        let s = Self {
             step: 0,
             angular_velocity,
             planets,
@@ -381,18 +376,14 @@ impl EngineState {
             configuration,
             reward_weights,
             planet_index_by_id,
-            prev_production: vec![0; num_players],
             last_reward: vec![0.0; num_players],
             last_components: RewardComponents {
                 terminal: vec![0.0; num_players],
                 terminal_time: vec![0.0; num_players],
-                production_delta: vec![0.0; num_players],
-                launch_penalty: vec![0.0; num_players],
+                production_share: vec![0.0; num_players],
             },
             scratch_production: vec![0; num_players],
-            scratch_num_launches: vec![0; num_players],
         };
-        s.prev_production = s.production_per_player();
         s
     }
 
@@ -402,16 +393,6 @@ impl EngineState {
         for (idx, p) in self.planets.iter().enumerate() {
             self.planet_index_by_id.insert(p.id, idx);
         }
-    }
-
-    fn production_per_player(&self) -> Vec<i64> {
-        let mut out = vec![0i64; self.num_players];
-        for p in &self.planets {
-            if p.owner >= 0 && (p.owner as usize) < self.num_players {
-                out[p.owner as usize] += p.production;
-            }
-        }
-        out
     }
 
     fn step_with_actions(&mut self, actions: &[Vec<MoveAction>]) -> Result<bool, String> {
@@ -424,15 +405,6 @@ impl EngineState {
                 self.num_players,
                 actions.len()
             ));
-        }
-
-        // Number of fleets each player launched this step (used by the
-        // launch_penalty term). Counts intent — illegal moves still incur 0
-        // cost because process_moves silently drops them, so we read the
-        // input action lengths instead of the resulting fleet vec. Reuses
-        // a preallocated scratch buffer instead of allocating per step.
-        for (i, a) in actions.iter().enumerate() {
-            self.scratch_num_launches[i] = a.len() as i64;
         }
 
         let expired_prelaunch = self.expired_comet_ids();
@@ -653,80 +625,78 @@ impl EngineState {
             }
         }
 
-        // Total Δ across all players (needed for own_Δ − Σ others_Δ).
-        let mut total_delta: i64 = 0;
-        for i in 0..self.num_players {
-            total_delta += self.scratch_production[i] - self.prev_production[i];
-        }
+        // Total player production this step, for the production_share term.
+        let total_production: i64 = self.scratch_production[..self.num_players].iter().sum();
 
-        // Compute terminal outcomes (if any) before mutably borrowing
+        // Compute terminal shares / win flags (if any) before mutably borrowing
         // last_components.
-        let terminal_info: Option<(Vec<f64>, f64)> = if terminated {
-            let outcomes = self.terminal_outcomes();
-            let remaining = (self.configuration.episode_steps - 1 - turn_step).max(0) as f64;
+        let terminal_info: Option<(Vec<f64>, Vec<bool>, f64)> = if terminated {
+            let (shares, won) = self.terminal_shares();
+            // Turns left when the game ends; full at turn 0, ~0 at the cap.
+            let remaining = (self.configuration.episode_steps - turn_step).max(0) as f64;
             let remaining_frac =
-                (remaining / self.configuration.episode_steps as f64).clamp(0.0, 1.0);
-            Some((outcomes, remaining_frac))
+                (remaining / self.configuration.episode_steps.max(1) as f64).clamp(0.0, 1.0);
+            Some((shares, won, remaining_frac))
         } else {
             None
         };
 
         let n = self.num_players;
-        let prod_w = self.reward_weights.production_delta;
-        let launch_w = self.reward_weights.launch_penalty;
+        let share_w = self.reward_weights.production_share;
         let term_w = self.reward_weights.terminal;
         let term_t_w = self.reward_weights.terminal_time;
         let c = &mut self.last_components;
         for i in 0..n {
-            let own_delta = self.scratch_production[i] - self.prev_production[i];
-            let own_minus_others = 2 * own_delta - total_delta;
-            c.production_delta[i] = prod_w * own_minus_others as f64;
-            c.launch_penalty[i] = -launch_w * self.scratch_num_launches[i] as f64;
+            // production_share = own / Σ all players' production (0 if none).
+            let share = if total_production > 0 {
+                self.scratch_production[i] as f64 / total_production as f64
+            } else {
+                0.0
+            };
+            c.production_share[i] = share_w * share;
             c.terminal[i] = 0.0;
             c.terminal_time[i] = 0.0;
         }
-        if let Some((outcomes, remaining_frac)) = terminal_info {
+        if let Some((shares, won, remaining_frac)) = terminal_info {
             for i in 0..n {
-                c.terminal[i] = term_w * outcomes[i];
-                if outcomes[i] != 0.0 {
-                    let sign = if outcomes[i] > 0.0 { 1.0 } else { -1.0 };
-                    c.terminal_time[i] = term_t_w * sign * remaining_frac;
-                }
+                c.terminal[i] = term_w * shares[i];
+                let sign = if won[i] { 1.0 } else { -1.0 };
+                c.terminal_time[i] = term_t_w * sign * remaining_frac;
             }
         }
         for i in 0..n {
-            self.last_reward[i] = c.terminal[i]
-                + c.terminal_time[i]
-                + c.production_delta[i]
-                + c.launch_penalty[i];
+            self.last_reward[i] = c.terminal[i] + c.terminal_time[i] + c.production_share[i];
         }
-        // Swap so next step's `prev_production` is this step's `curr` without alloc.
-        std::mem::swap(&mut self.prev_production, &mut self.scratch_production);
 
         self.done = terminated;
         self.step += 1;
         Ok(self.done)
     }
 
-    /// Per-player win/loss outcome (±1.0). Kaggle-style: the player with the
-    /// maximum total ships (planets + in-flight) wins; ties → loss for all.
-    fn terminal_outcomes(&self) -> Vec<f64> {
+    /// Terminal reward inputs per player: `(ships_share, won)`.
+    /// `score` = total ships a player controls (planets + in-flight fleets).
+    /// `ships_share` = own_score / Σ all players' scores (0 if no player ships).
+    /// `won` = at the max score (>0) — used only for the time-bonus sign.
+    fn terminal_shares(&self) -> (Vec<f64>, Vec<bool>) {
         let mut scores = vec![0i64; self.num_players];
         for planet in &self.planets {
-            if planet.owner != -1 && (planet.owner as usize) < self.num_players {
+            if planet.owner >= 0 && (planet.owner as usize) < self.num_players {
                 scores[planet.owner as usize] += planet.ships;
             }
         }
         for fleet in &self.fleets {
-            if (fleet.owner as usize) < self.num_players {
+            if fleet.owner >= 0 && (fleet.owner as usize) < self.num_players {
                 scores[fleet.owner as usize] += fleet.ships;
             }
         }
+        let total: i64 = scores.iter().sum();
         let max_score = *scores.iter().max().unwrap_or(&0);
-        scores
-            .into_iter()
-            .map(|s| if s == max_score && max_score > 0 { 1.0 } else { -1.0 })
-            .collect()
+        let shares = scores
+            .iter()
+            .map(|&s| if total > 0 { s as f64 / total as f64 } else { 0.0 })
+            .collect();
+        let won = scores.iter().map(|&s| s == max_score && max_score > 0).collect();
+        (shares, won)
     }
 
     fn expired_comet_ids(&self) -> Vec<i64> {
@@ -1154,8 +1124,7 @@ fn parse_reward_weights(value: Option<&Bound<'_, PyAny>>) -> PyResult<RewardWeig
     let d = v.downcast::<PyDict>()?;
     if let Some(x) = d.get_item("terminal")? { w.terminal = x.extract()?; }
     if let Some(x) = d.get_item("terminal_time")? { w.terminal_time = x.extract()?; }
-    if let Some(x) = d.get_item("production_delta")? { w.production_delta = x.extract()?; }
-    if let Some(x) = d.get_item("launch_penalty")? { w.launch_penalty = x.extract()?; }
+    if let Some(x) = d.get_item("production_share")? { w.production_share = x.extract()?; }
     Ok(w)
 }
 
@@ -1231,8 +1200,7 @@ fn reward_components_to_py<'py>(py: Python<'py>, c: &RewardComponents) -> PyResu
     let d = PyDict::new(py);
     d.set_item("terminal", c.terminal.clone())?;
     d.set_item("terminal_time", c.terminal_time.clone())?;
-    d.set_item("production_delta", c.production_delta.clone())?;
-    d.set_item("launch_penalty", c.launch_penalty.clone())?;
+    d.set_item("production_share", c.production_share.clone())?;
     Ok(d.into_any().unbind())
 }
 
@@ -1297,8 +1265,7 @@ impl OrbitWarsEngine {
     ///     reward_components: {                 # for logging / debugging
     ///         terminal:           [f64; n],
     ///         terminal_time:      [f64; n],
-    ///         production_delta:   [f64; n],
-    ///         launch_penalty:     [f64; n],
+    ///         production_share:   [f64; n],
     ///     },
     ///   }
     fn step(&mut self, py: Python<'_>, actions: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {

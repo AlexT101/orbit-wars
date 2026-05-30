@@ -1,39 +1,29 @@
-//! Model input features for Orbit Wars.
+//! Model input features for Orbit Wars: turns an [`EngineState`] into the
+//! tensors a policy/value net consumes. The bot calls [`encode`] on its native
+//! state; training calls it through the `encode_obs` pyo3 wrapper — one
+//! implementation, no train/serve skew.
 //!
-//! Single source of truth for turning an [`EngineState`] into the tensors a
-//! policy/value network consumes. The bot calls [`encode`] natively on its
-//! `env_model` state; training calls it via the `encode_obs` pyo3 wrapper on
-//! `env_engine` observations. One implementation, two callers — no skew.
+//! Frames: `NUM_FRAMES` snapshots at `t`, `t+1`, `t+10`, `t_resolved` (first
+//! future turn with no fleets in flight). Each frame has `PLANET_SLOTS = 44`
+//! planet tokens. Action space is `(44, 44, ACTIONS_DIM)` = `(source, target,
+//! action)`: send `{25%, 50%, 75%, 100%}` of the source's ships, a constant
+//! `42`, or `target_resolved + 1` (min ships to take the target after in-flight
+//! fleets resolve; invalid if it's ally-held then).
 //!
-//! # Shape
+//! Outputs (dict keys / shapes in [`Features::into_py_dict`]):
+//!   - `tokens`   `(NUM_FRAMES, 44, TOKEN_DIM)`  per-planet features, all frames
+//!   - `globals`  `(GLOBAL_DIM,)`                board-level summary at frame t
+//!   - `presence` `(NUM_FRAMES, 44)`             1 where a slot holds a planet
+//!   - `turns` / `angles` / `mask` `(44, 44, ACTIONS_DIM)`  decision frame (t) only
 //!
-//! `NUM_FRAMES = 4` snapshots at turns `t`, `t+1`, `t+10`, `t_resolved` (the
-//! first future turn with no fleets in flight). Each frame carries
-//! `PLANET_SLOTS = 44` planet tokens. The action space is
-//! `(44, 44, ACTIONS_DIM)` = `(source, target, action)`, with
-//! `ACTIONS_DIM = 6` actions: send `{25%, 50%, 75%, 100%}` of the source's
-//! current ships, a constant `42`, or `target_resolved + 1` (min ships to take
-//! the target once all in-flight fleets resolve; invalid if the target is
-//! ally-held at resolution).
+//! `turns`/`angles`/`mask` are frame t only: the policy acts now and the aim
+//! solve is the whole cost, so it isn't run for lookahead frames.
 //!
-//! Outputs:
-//!   - `tokens`  `(NUM_FRAMES, 44, TOKEN_DIM)`     — per-planet features (all frames = temporal context)
-//!   - `presence``(NUM_FRAMES, 44)`                — 1 if that slot's planet exists at the frame
-//!   - `turns`   `(44, 44, 6)`                     — normalized turns-to-arrive at frame t (0 if invalid)
-//!   - `angles`  `(44, 44, 6)`                     — launch angle (radians) at frame t, to issue the move
-//!   - `mask`    `(44, 44, 6)`                      — 1 if the action is legal *now* (frame t)
-//!
-//! `turns`/`angles`/`mask` are the decision frame (t) only: the aim solve is the
-//! whole cost and the policy acts now, so it isn't run for the lookahead frames.
-//!
-//! # Aim solver
-//!
-//! `turns`/`mask`/`angles` come from one geometric solve per `(frame, i, j,
-//! count)`: lead the (moving) target to pick a launch angle, then *project* the
-//! straight-line fleet turn-by-turn against every planet's swept path, the sun,
-//! and the board, reusing env_model's own collision code so validity is
-//! bit-identical to what the engine accepts. Planet trajectories are
-//! precomputed once (forward-sim with empty actions) and shared across frames.
+//! Aim solver: one geometric solve per `(frame, i, j, count)` — lead the moving
+//! target for a launch angle, then project the straight-line fleet turn-by-turn
+//! against planets / sun / board using the engine's own collision code, so
+//! validity is bit-identical to what the engine accepts. Planet trajectories are
+//! forward-simulated once and shared across frames.
 
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
@@ -56,7 +46,10 @@ thread_local! {
 pub const PLANET_SLOTS: usize = 44;
 pub const ACTIONS_DIM: usize = 6;
 pub const NUM_FRAMES: usize = 4;
-pub const TOKEN_DIM: usize = 8;
+/// Per-planet token width. See [`fill_token`] for the layout.
+pub const TOKEN_DIM: usize = 9;
+/// Board-level feature width. See [`compute_globals`] for the layout.
+pub const GLOBAL_DIM: usize = 16;
 
 /// Future-frame offsets (turns from `t`). The 4th frame, `t_resolved`, is found
 /// dynamically (first turn with no fleets), so it isn't a fixed offset here.
@@ -76,6 +69,16 @@ const CONST_SEND: i64 = 42;
 const RESOLVED_ACTION: usize = 5;
 
 // ---- normalization -------------------------------------------------------
+/// `log1p(x) / log1p(full)`: 0 at x=0, ~1 at x=full. For non-negative inputs.
+#[inline]
+fn log_norm(x: f64, full: f64) -> f32 {
+    (x.max(0.0).ln_1p() / full.ln_1p()) as f32
+}
+/// Signed version of [`log_norm`] for quantities that can go either way.
+#[inline]
+fn signed_log_norm(x: f64, full: f64) -> f32 {
+    (x.signum() * (x.abs().ln_1p() / full.ln_1p())) as f32
+}
 #[inline]
 fn norm_dist(d: f64) -> f32 {
     (d / 100.0) as f32
@@ -86,12 +89,15 @@ fn norm_turns(t: usize) -> f32 {
 }
 #[inline]
 fn norm_ships(s: i64) -> f32 {
-    // log1p, scaled so 1000 ships -> ~1.0.
-    ((s.max(0) as f64).ln_1p() / 1000.0_f64.ln_1p()) as f32
+    log_norm(s as f64, 1000.0)
 }
 #[inline]
 fn norm_prod(p: i64) -> f32 {
-    ((p.max(0) as f64).ln_1p() / 10.0_f64.ln_1p()) as f32
+    log_norm(p as f64, 10.0)
+}
+#[inline]
+fn norm_count(c: usize) -> f32 {
+    c as f32 / PLANET_SLOTS as f32
 }
 
 /// Geometry of one planet at one turn.
@@ -115,29 +121,27 @@ struct Seg {
 }
 
 /// Planet positions over a horizon, forward-simulated once with empty actions
-/// and shared across all frames. Positions depend only on orbital motion /
-/// comet paths, so they're independent of which fleets exist or who owns what.
+/// and shared across frames (positions depend only on orbital / comet motion).
 struct Trajectory {
-    /// `snapshots[turn]` = planets (full state) after `turn` empty steps from `t`.
+    /// `snapshots[turn]` = planets after `turn` empty steps from `t`.
     snapshots: Vec<Vec<Planet>>,
-    /// `comet_ids[turn]` = set of comet planet ids at that turn.
+    /// `comet_ids[turn]` = comet planet ids at that turn.
     comet_ids: Vec<FxHashSet<i64>>,
     /// `by_id[id][turn]` = that planet's geometry, or None if absent.
     by_id: FxHashMap<i64, Vec<Option<Geom>>>,
-    /// `segments[turn]` = swept `old->new` segments of every planet present at
-    /// `turn`, for the projection hot loop (no per-step hashmap lookups).
+    /// `segments[turn]` = swept `old->new` segments of present planets, for the
+    /// projection hot loop (no per-step hashmap lookups).
     segments: Vec<Vec<Seg>>,
     /// Turn offsets of the 4 frames: `[0, 1, 10, resolved]`.
     offsets: [usize; NUM_FRAMES],
-    /// Initial (t=0 game start) planet positions, for the `is_orbiting` token.
+    /// Game-start planet positions, for the `is_orbiting` token.
     initial_xy: FxHashMap<i64, (f64, f64)>,
     ship_speed: f64,
-    /// Planets whose position never changes over the horizon, as
-    /// `(id, x, y, radius)`. These admit a cheap once-per-projection broad-phase
-    /// cull (a fleet ray that stays farther than `radius` from the planet can
-    /// never hit it), so far stationary planets are skipped in the hot loop.
+    /// Globally-stationary planets `(id, x, y, radius)` — a fleet line staying
+    /// farther than `radius` from one can never hit it, so it's culled from the
+    /// projection hot loop.
     stationary: Vec<(i64, f64, f64, f64)>,
-    /// `max(planet id) + 1` over the whole trajectory — sizes the cull scratch.
+    /// `max(planet id) + 1` — sizes the cull scratch.
     id_bound: usize,
 }
 
@@ -174,9 +178,8 @@ impl Trajectory {
             }
         }
 
-        // Precompute per-turn swept segments (old at `t`, new at `t+1`; a planet
-        // absent at `t+1` is treated as stationary, matching engine comet
-        // expiry). All hashmap lookups happen here, once — not in the hot loop.
+        // Per-turn swept segments (old at `t`, new at `t+1`; a planet absent at
+        // `t+1` is treated as stationary, matching engine comet expiry).
         let mut segments: Vec<Vec<Seg>> = Vec::with_capacity(len.saturating_sub(1));
         for t in 0..len.saturating_sub(1) {
             let mut segs = Vec::with_capacity(snapshots[t].len());
@@ -191,8 +194,7 @@ impl Trajectory {
             segments.push(segs);
         }
 
-        // Classify globally-stationary planets (constant position across the
-        // horizon) for the broad-phase cull, and find the id bound.
+        // Classify globally-stationary planets for the broad-phase cull.
         let mut stationary = Vec::new();
         let mut id_bound = 0usize;
         for (&id, tl) in &by_id {
@@ -229,22 +231,17 @@ impl Trajectory {
         &self.snapshots[self.offsets[f]]
     }
 
-    /// Project a straight-line fleet (fixed speed, fixed angle) launched at
-    /// `frame_off` and return the turn it first collides — but only as `Some` if
-    /// the first thing it hits is `dst_id` (a clean arrival). Returns `None` if
-    /// it hits any other planet / the sun / the board edge first, or never
-    /// reaches `dst_id` within the horizon. Mirrors env_model's per-step
-    /// collision order (planets, then bounds, then sun).
+    /// Project a straight-line fleet launched at `frame_off` and return the turn
+    /// it cleanly arrives at `dst_id` (`Some`), or `None` if it first hits any
+    /// other planet / the sun / the board edge, or never reaches `dst_id` within
+    /// the horizon. Mirrors the engine's collision order (planets, bounds, sun).
     fn project(&self, frame_off: usize, launch: (f64, f64), speed: f64, theta: f64, dst_id: i64) -> Option<usize> {
         let (uhx, uhy) = (theta.cos(), theta.sin());
         let (vx, vy) = (uhx * speed, uhy * speed);
 
-        // Broad-phase cull: a stationary planet whose center is farther than its
-        // radius from the (infinite) fleet line can never be hit by any segment
-        // on that line, so skip its per-turn swept test. Exact — culled planets
-        // provably never collide — so the vector-order first-hit is unchanged.
-        // Uses squared distances (no sqrt) and a reused scratch (no per-call
-        // alloc), so the cull setup is near-free.
+        // Broad-phase cull: a stationary planet farther than its radius from the
+        // (infinite) fleet line can never be hit, so skip its per-turn test.
+        // Squared distances + reused scratch, so the setup is near-free.
         CULL_KEEP.with(|cell| {
             let mut keep = cell.borrow_mut();
             keep.clear();
@@ -287,19 +284,15 @@ impl Trajectory {
         })
     }
 
-    /// Solve for a clean intercept of planet `dst_id` from planet `src_id` at
-    /// `frame_off`, sending `count` ships. Returns `(arrival_turn, launch_angle)`
-    /// or `None` if no clean trajectory exists. Leads the moving target to pick a
-    /// candidate angle, then verifies with `project`.
+    /// Solve for a clean intercept of `dst_id` from `src_id` at `frame_off`
+    /// sending `count` ships. Returns `(arrival_turn, launch_angle)` or `None`.
+    /// Leads the moving target for a candidate angle, then verifies with `project`.
     fn aim(&self, frame_off: usize, src_id: i64, dst_id: i64, count: i64) -> Option<(usize, f64)> {
         let speed = fleet_speed(count, self.ship_speed);
-        // Hoist the timeline lookups out of the per-tau loop.
         let dst_tl = self.by_id.get(&dst_id)?;
         let src = self.by_id.get(&src_id)?.get(frame_off).copied().flatten()?;
         for tau in 1..=AIM_HORIZON {
-            // Nothing on a 100x100 board is farther than the diagonal (~141);
-            // once the fleet would have flown well past that, no target can
-            // satisfy the consistency gate, so stop scanning.
+            // Past the board diagonal (~141) no target can satisfy the gate below.
             if speed * tau as f64 > 150.0 {
                 break;
             }
@@ -307,9 +300,8 @@ impl Trajectory {
                 continue;
             };
             let d = distance((src.x, src.y), (dst.x, dst.y));
-            // Consistency gate: the fleet travels `speed*tau` in `tau` turns, so
-            // only attempt arrivals where that roughly equals the (moving)
-            // target distance. `project` is the source of truth.
+            // Consistency gate: only attempt arrivals where flown ≈ target dist.
+            // `project` is the source of truth.
             if (speed * tau as f64 - d).abs() <= dst.r + speed + 1.0 {
                 let theta = (dst.y - src.y).atan2(dst.x - src.x);
                 let launch = (src.x + theta.cos() * (src.r + 0.1), src.y + theta.sin() * (src.r + 0.1));
@@ -359,6 +351,7 @@ pub struct Features {
     /// Turn offsets of the 4 frames `[0, 1, 10, resolved]`.
     pub offsets: [usize; NUM_FRAMES],
     pub tokens: Vec<f32>,    // (NUM_FRAMES, 44, TOKEN_DIM)
+    pub globals: Vec<f32>,   // (GLOBAL_DIM,)
     pub presence: Vec<f32>,  // (NUM_FRAMES, 44)
     pub turns: Vec<f32>,     // (44, 44, ACTIONS_DIM), frame t
     pub angles: Vec<f32>,    // (44, 44, ACTIONS_DIM), frame t
@@ -370,12 +363,9 @@ pub struct Features {
 }
 
 impl Features {
-    /// Serialize to a Python dict, consuming `self`. The big numeric buffers
-    /// (`tokens`/`presence`/`turns`/`angles`/`mask`) are returned as **1-D numpy
-    /// arrays via a zero-copy move** — numpy takes ownership of the Rust `Vec`'s
-    /// allocation, so there's no copy here and `torch.from_numpy` is a view on
-    /// the Python side. Reshape with the accompanying `*_shape` tuple (a numpy
-    /// reshape of a contiguous array is also a zero-copy view).
+    /// Serialize to a Python dict, consuming `self`. Numeric buffers are moved
+    /// into numpy zero-copy (`torch.from_numpy`-ready); reshape with the paired
+    /// `*_shape` tuple.
     pub fn into_py_dict(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let d = PyDict::new(py);
         // Small metadata stays as plain Python objects.
@@ -386,6 +376,8 @@ impl Features {
         // Numeric tensors: zero-copy move into numpy (1-D + shape).
         d.set_item("tokens", self.tokens.into_pyarray(py))?;
         d.set_item("tokens_shape", (NUM_FRAMES, PLANET_SLOTS, TOKEN_DIM))?;
+        d.set_item("globals", self.globals.into_pyarray(py))?;
+        d.set_item("globals_shape", (GLOBAL_DIM,))?;
         d.set_item("presence", self.presence.into_pyarray(py))?;
         d.set_item("presence_shape", (NUM_FRAMES, PLANET_SLOTS))?;
         d.set_item("turns", self.turns.into_pyarray(py))?;
@@ -398,26 +390,97 @@ impl Features {
     }
 }
 
-fn fill_token(tk: &mut [f32], p: &Planet, player: i64, comet: &FxHashSet<i64>, initial: &FxHashMap<i64, (f64, f64)>) {
+/// Per-planet token: `[is_mine, is_enemy, is_neutral, is_comet, is_orbiting,
+/// production, ships, dist_to_sun, angular_velocity]`. `angular_velocity` is the
+/// board's orbital rate for orbiting planets and 0 for static planets / comets,
+/// scaled to ~[0, 1] (board rate is ~0.025–0.05).
+fn fill_token(
+    tk: &mut [f32],
+    p: &Planet,
+    player: i64,
+    comet: &FxHashSet<i64>,
+    initial: &FxHashMap<i64, (f64, f64)>,
+    angular_velocity: f64,
+) {
     let is_comet = comet.contains(&p.id);
-    tk[0] = (p.owner == player) as i32 as f32; // is_mine
-    tk[1] = (p.owner >= 0 && p.owner != player) as i32 as f32; // is_enemy
-    tk[2] = (p.owner == -1) as i32 as f32; // is_neutral
-    tk[3] = is_comet as i32 as f32; // is_comet
-    tk[4] = if !is_comet {
-        match initial.get(&p.id) {
-            Some(&(ix, iy)) => {
-                let orbital_r = ((ix - CENTER).powi(2) + (iy - CENTER).powi(2)).sqrt();
-                (orbital_r + p.radius < ROTATION_RADIUS_LIMIT) as i32 as f32
-            }
-            None => 0.0,
-        }
-    } else {
-        0.0
-    }; // is_orbiting
+    let is_orbiting = !is_comet
+        && initial.get(&p.id).is_some_and(|&(ix, iy)| {
+            let orbital_r = ((ix - CENTER).powi(2) + (iy - CENTER).powi(2)).sqrt();
+            orbital_r + p.radius < ROTATION_RADIUS_LIMIT
+        });
+    tk[0] = (p.owner == player) as i32 as f32;
+    tk[1] = (p.owner >= 0 && p.owner != player) as i32 as f32;
+    tk[2] = (p.owner == -1) as i32 as f32;
+    tk[3] = is_comet as i32 as f32;
+    tk[4] = is_orbiting as i32 as f32;
     tk[5] = norm_prod(p.production);
     tk[6] = norm_ships(p.ships);
     tk[7] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
+    tk[8] = if is_orbiting { (angular_velocity / 0.05) as f32 } else { 0.0 };
+}
+
+/// Board-level features from `player`'s view at the current turn. Layout:
+/// `[remaining, own_score, enemy_score, neutral_ships, own_planets,
+/// enemy_planets, neutral_planets, own_production, enemy_production,
+/// own_fleet_ships, enemy_fleet_ships, score_share, production_share,
+/// planet_share, score_diff, production_diff]`. `score = planet_ships +
+/// fleet_ships`; enemy aggregates all non-self players; shares are own/(own+enemy)
+/// (0.5 when both are 0). Counts are /44; ships/production are log-normalized;
+/// diffs are signed-log.
+fn compute_globals(state: &EngineState, player: i64) -> Vec<f32> {
+    let np = state.num_players;
+    let (mut own_planet_ships, mut enemy_planet_ships, mut neutral_ships) = (0i64, 0i64, 0i64);
+    let (mut own_planets, mut enemy_planets, mut neutral_planets) = (0usize, 0usize, 0usize);
+    let (mut own_production, mut enemy_production) = (0i64, 0i64);
+    for p in &state.planets {
+        if p.owner == player {
+            own_planet_ships += p.ships;
+            own_planets += 1;
+            own_production += p.production;
+        } else if p.owner >= 0 && (p.owner as usize) < np {
+            enemy_planet_ships += p.ships;
+            enemy_planets += 1;
+            enemy_production += p.production;
+        } else {
+            neutral_ships += p.ships;
+            neutral_planets += 1;
+        }
+    }
+    let (mut own_fleet_ships, mut enemy_fleet_ships) = (0i64, 0i64);
+    for f in &state.fleets {
+        if f.owner == player {
+            own_fleet_ships += f.ships;
+        } else if f.owner >= 0 && (f.owner as usize) < np {
+            enemy_fleet_ships += f.ships;
+        }
+    }
+    let own_score = own_planet_ships + own_fleet_ships;
+    let enemy_score = enemy_planet_ships + enemy_fleet_ships;
+    let episode = state.configuration.episode_steps.max(1) as f64;
+    let remaining = ((episode - state.step as f64).max(0.0)) / episode;
+
+    let share = |a: i64, b: i64| -> f32 {
+        if a + b > 0 { a as f32 / (a + b) as f32 } else { 0.5 }
+    };
+
+    vec![
+        remaining as f32,
+        norm_ships(own_score),
+        norm_ships(enemy_score),
+        norm_ships(neutral_ships),
+        norm_count(own_planets),
+        norm_count(enemy_planets),
+        norm_count(neutral_planets),
+        log_norm(own_production as f64, 100.0),
+        log_norm(enemy_production as f64, 100.0),
+        norm_ships(own_fleet_ships),
+        norm_ships(enemy_fleet_ships),
+        share(own_score, enemy_score),
+        share(own_production, enemy_production),
+        share(own_planets as i64, enemy_planets as i64),
+        signed_log_norm((own_score - enemy_score) as f64, 1000.0),
+        signed_log_norm((own_production - enemy_production) as f64, 100.0),
+    ]
 }
 
 /// Compute the `(44, ACTIONS_DIM)` turns row for one source slot `si` at frame
@@ -500,12 +563,12 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
         .map(|p| (p.id, (p.owner, p.ships)))
         .collect();
 
+    let globals = compute_globals(state, player);
+
     let mut tokens = vec![0f32; NUM_FRAMES * PLANET_SLOTS * TOKEN_DIM];
     let mut presence = vec![0f32; NUM_FRAMES * PLANET_SLOTS];
-    // `turns`/`angles`/`mask` are for the *decision* frame (t) only — the policy
-    // acts now, and the aim solve is the whole cost, so computing it for the
-    // lookahead frames isn't worth ~4x the work. The lookahead frames still
-    // provide temporal context through their tokens/presence.
+    // turns/angles/mask are the decision frame (t) only; lookahead frames give
+    // temporal context through their tokens/presence.
     let mut turns = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut angles = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
@@ -527,7 +590,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
             if let Some(p) = by.get(&id) {
                 presence[f * PLANET_SLOTS + si] = 1.0;
                 let base = (f * PLANET_SLOTS + si) * TOKEN_DIM;
-                fill_token(&mut tokens[base..base + TOKEN_DIM], p, player, comet, &traj.initial_xy);
+                fill_token(&mut tokens[base..base + TOKEN_DIM], p, player, comet, &traj.initial_xy, state.angular_velocity);
             }
         }
 
@@ -543,7 +606,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
         }
     }
 
-    Features { slot_id, n, offsets: traj.offsets, tokens, presence, turns, angles, mask, frame_planets }
+    Features { slot_id, n, offsets: traj.offsets, tokens, globals, presence, turns, angles, mask, frame_planets }
 }
 
 #[cfg(test)]
@@ -771,11 +834,16 @@ mod tests {
             let st = random_state(&mut rng);
             let f = encode(&st, 0);
             assert_eq!(f.tokens.len(), NUM_FRAMES * PLANET_SLOTS * TOKEN_DIM);
+            assert_eq!(f.globals.len(), GLOBAL_DIM);
             assert_eq!(f.turns.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(f.mask.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(f.angles.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
-            for v in f.tokens.iter().chain(f.turns.iter()).chain(f.angles.iter()) {
+            for v in f.tokens.iter().chain(f.turns.iter()).chain(f.angles.iter()).chain(f.globals.iter()) {
                 assert!(v.is_finite(), "non-finite feature");
+            }
+            // Shares live in [0, 1]; remaining in [0, 1] at the game start.
+            for &idx in &[0usize, 11, 12, 13] {
+                assert!((0.0..=1.0).contains(&f.globals[idx]), "global {idx} out of [0,1]: {}", f.globals[idx]);
             }
             for &v in &f.turns {
                 assert!(v >= 0.0, "negative turns");
@@ -805,6 +873,7 @@ mod tests {
             assert_eq!(a.turns, b.turns);
             assert_eq!(a.mask, b.mask);
             assert_eq!(a.tokens, b.tokens);
+            assert_eq!(a.globals, b.globals);
         }
     }
 }

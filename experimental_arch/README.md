@@ -1,3 +1,5 @@
+# THIS README IS COMPLETE OUT OF DATE!!
+
 # experimental_arch
 
 Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
@@ -37,10 +39,12 @@ Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
   Right-inclusive bins, delta = arrival_turn − current_turn.
   Per-planet feature count grows from 19 → 29.
 - **Reward shaping rewritten from scratch.** No more reward modes. The
-  only reward terms now are:
-  - `terminal` (±1) on game end
-  - `terminal_time` — small ±0.10 bonus scaled by remaining turns
-  - `production_delta` — `0.05 × (Δown_production − Δenemy_production)` per step
+  only reward terms now are (see `arch_notes` + `env_engine/validate_reward.py`):
+  - `terminal` — ships-share at game end: `own_ships / all_players_ships`
+    (∈ [0,1]); rewards how much of the board's ships we end with, not who wins
+  - `terminal_time` — `± remaining_turns / episode_steps`; `+` for the winner,
+    `−` for losers, so a turn-1 finish is worth ~±1.0 (fast wins / fast losses)
+  - `production_delta` — `0.05 × (Δown_production − Δothers_production)` per step
   - `launch_penalty` — `-0.001 × num_fleets_sent_this_step`
 - **Wandb instead of HTML reports.** The HTML report generator (and
   `monitor.py`) is removed. Metrics go to wandb plus the existing JSONL

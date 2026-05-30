@@ -23,31 +23,49 @@ because they intersect with another planet or intersect the sun.
 The output action space is therefore (44, 44, ACTIONS_DIM).
 Create a valid action mask. I think this mask should also be of shape (44, 44, ACTIONS_DIM).
 
-A planet token consists of information about a planet, the specifics we'll work out later.
-Pretty much stuff like:
-    * is_mine
-    * is_enemy
-    * is_neutral
-    * is_comet
-    * is_orbiting
-    * production
-    * ships
-    * dist_to_sun
+A planet token (TOKEN_DIM = 9, see features.rs::fill_token):
+    * is_mine          (0/1)
+    * is_enemy         (0/1)
+    * is_neutral       (0/1)
+    * is_comet         (0/1)
+    * is_orbiting      (0/1)
+    * production       (log-normalized)
+    * ships            (log-normalized)
+    * dist_to_sun      (/100)
+    * angular_velocity (board orbital rate /0.05 for orbiting planets, else 0;
+                        comets get 0 — they ride comet paths, not orbits)
 
-Each frame consists of 44 planet tokens along with an 
-asymmetric distances matrix D of dims (44, 44, ACTIONS_DIM) 
+Global features (GLOBAL_DIM = 16, see features.rs::compute_globals). All floats,
+no one-hot. "enemy" aggregates every non-self player (works for 2p and 4p).
+score = planet_ships + fleet_ships. Shares are own/(own+enemy), 0.5 when both 0.
+Diffs are own − enemy (signed-log); counts are /44; ship/production totals are
+log-normalized.
+    remaining          (turns left / episode_steps)
+    own_score
+    enemy_score
+    neutral_ships
+    own_planets
+    enemy_planets
+    neutral_planets
+    own_production
+    enemy_production
+    own_fleet_ships
+    enemy_fleet_ships
+    score_share
+    production_share
+    planet_share
+    score_diff         (named "diff", not "margin")
+    production_diff
+(kept own_score over own_ships since kaggle decides the winner by total ships =
+"score"; own_ships would be just as clear.)
+
+Each frame consists of 44 planet tokens.
+ONLY THE FIRST FRAME contains an asymmetric distances matrix D of dims (44, 44, ACTIONS_DIM) 
 where D[i][j][action_idx] is the number of turns required to send the ships from i to j, 
 starting at this frame. Probably we keep this number as a float instead of one hot.
 
 For invalid actions probably just leave this at 0 and let valid action mask handle it.
 So this is looking like (NUM_FRAMES, 44, 44, ACTIONS_DIM).
-
-[UPDATE] The turns/distance tensor is now computed for the DECISION frame (t)
-ONLY -> shape (44, 44, ACTIONS_DIM), not (NUM_FRAMES, 44, 44, ACTIONS_DIM). The
-policy only acts at t, and the aim solve is ~all the cost, so running it for the
-t+1/t+10/t_resolved frames wasn't worth ~4x the work. The lookahead frames still
-give temporal context via their planet tokens + presence (those stay
-(NUM_FRAMES, 44, ...)). angles and mask are likewise frame-t only.
 
 I also think normalising stuff would be good.
     * distances: 1/100
@@ -55,7 +73,55 @@ I also think normalising stuff would be good.
     * ships: log or something else
     * production: log or something else
 
-Always validate / test to make ensure correctness. 
+Always validate / test to make ensure correctness.
+
+encode_obs(obs, player) output dict (see features.rs::Features::into_py_dict).
+Numeric tensors are flat 1-D numpy buffers (zero-copy, torch.from_numpy-ready);
+reshape each with its paired `*_shape`. The rest are plain Python objects.
+
+    planet_ids     list[int], len 44   slot -> planet id, -1 for empty slots
+    num_planets    int                 count of real planets at frame t
+    frame_offsets  list[int], len 4     turn offsets of the frames: [0, 1, 10, resolved]
+    frame_planets  list[list[tuple]]   per-frame [(id, owner, x, y, ships), ...],
+                                        present planets only. NOT a model input —
+                                        raw state for validation/debugging.
+    tokens         float32, flat        reshape (4, 44, 9)  = (NUM_FRAMES, slot, TOKEN_DIM)
+    tokens_shape   tuple (4, 44, 9)
+    globals        float32, flat        reshape (16,)       board-level summary at frame t
+    globals_shape  tuple (16,)
+    presence       float32, flat        reshape (4, 44)     1.0 where a slot holds a planet
+    presence_shape tuple (4, 44)
+    turns          float32, flat        reshape (44, 44, 6) = (src, tgt, action), frame t only;
+                                        turns-to-arrive /20, 0 if invalid
+    turns_shape    tuple (44, 44, 6)
+    angles         float32, flat        reshape (44, 44, 6) launch angle (radians) to issue
+                                        the move; 0 if invalid
+    angles_shape   tuple (44, 44, 6)
+    mask           uint8, flat          reshape (44, 44, 6) 1 = legal action now, else 0
+    mask_shape     tuple (44, 44, 6)
+
+Reward shaping (env_engine, see RewardWeights + step_with_actions in lib.rs):
+    * terminal       = ships_share = own_ships / all_players_ships  (in [0,1]).
+                       Replaces the old ±1 win/loss — we no longer care *who*
+                       wins, only how much of the board's ships we end with.
+                       Shares sum to 1 across players.
+    * terminal_time  = ± remaining_turns / episode_steps. + for the winner
+                       (max-ships, ties count), − for losers. Rewards fast wins
+                       and punishes fast losses: 1/episode_steps per remaining
+                       turn, so a turn-1 finish is worth ~±1.0.
+    * production_share = 0.001 × own_production / Σ all players' production,
+                       per step (neutral excluded; 0 if no player has any). A
+                       small dense nudge toward owning more of the board's
+                       production. Bounded by ~episode_steps/1000 ≈ 0.5 over a
+                       game, and weaker per-turn (1/1000) than terminal_time's
+                       fast-win pull (1/500), so it doesn't reintroduce stalling.
+(Replaces the old production_delta + launch_penalty terms, which were misleading
+and — by penalising launches / rewarding the telescoped prod swing — nudged
+toward stalling, counteracting the early-win bonus.)
+Validated by env_engine/validate_reward.py: terminal terms recomputed from the
+final state and the per-step production_share recomputed from each step's obs,
+both checked against the engine's reward_components (incl. early eliminations
+that exercise a large remaining fraction).
 
 
 * I'm concerned about action "fractions" taking a long time to compute at test/train time
@@ -64,41 +130,70 @@ Always validate / test to make ensure correctness.
 * Ok so Mr Claude Opus 4.8 said it's ok - "only" 25M rust ops... let's see. Supposedly not cooked.
 * Claude made the changes and now the env runs at 30 steps/s (down from 20k steps/s).
 * We can add some optimisation where we parallelise the action check.
+* Now it's 200 steps/s. Good.
 
-OPTIMISATION LOG (encode_obs, ~21-planet states, single-thread):
-* baseline (turns for all 4 frames):                       ~30 calls/s (33 ms)
-* removed hashmap from projection hot loop:                 ~36 calls/s (28 ms)
-* broad-phase cull of far stationary planets + FxHashMap:   ~40 calls/s (25 ms)
-  (modest: the swept tests were only ~3ms of the loop; profiling showed the cost
-   was spread across the 4-frame full action grid, not any single hot spot.)
-* turns/angles/mask at frame t only (above):               ~155 calls/s (6.5 ms)  <-- ~4x
-* zero-copy numpy returns (below):                          ~165 calls/s (~6 ms), current
-* parallelisation: tried, then REVERTED (kept single-threaded by choice; the
-  per-source loop is embarrassingly parallel if we ever want cores x later).
-
-OUTPUT FORMAT: tokens/presence/turns/angles/mask come back as 1-D numpy arrays
-(numpy takes ownership of the Rust Vec's buffer -> no copy), plus a `*_shape`
-tuple. On the Python side: `f["turns"].reshape(f["turns_shape"])` is a zero-copy
-view and `torch.from_numpy(...)` shares the same memory (verified). So encode ->
-torch tensors is ~5.9 ms with no copies. planet_ids/frame_offsets/frame_planets
-stay plain Python (small, metadata/debug only). The wall-clock win over the old
-Vec->PyList path is small (the ~5.5 ms aim compute is the floor) but it removes
-the downstream np.asarray reparse and is the correct from_numpy interface.
-NOTE: this is also why env_model now depends on the `numpy` rust crate; modules
-that only do forward-sim (e.g. the graph bot) link it but never trigger a numpy
-import since array ops are lazy.
-
-Validation (all green after each change): env_model/validate_features.py checks,
-against the official kaggle engine, that (a) the t+1/t+10/t_resolved frame caches
-match kaggle stepping, (b) every valid action lands on its target at the predicted
-turn, (c) masked-out-but-otherwise-legal actions are genuinely unreachable. Plus
-`cargo test` replays every aim solution through the real engine for an exact check.
-
-Further levers if needed: lower AIM_HORIZON (64) to drop very-slow long-range
-single-ship shots; return numpy buffers instead of Python lists to cut marshalling.
+One thing I would like is permutation invariance across planet indexes.
+So something like this GNN for message passing in the first frame (Claude's idea):
 
 
+Edges = geometric reachability, NOT the policy mask. `distances` (the `turns`
+tensor) is filled for EVERY source regardless of owner, so it carries incoming-
+threat info from enemy/neutral planets; the action `mask` is ally-source-only and
+belongs on the policy output head, not the GNN. We derive both the edge gate and
+a per-action reachability feature from `distances` internally:
+    * edge_mask[i,j] = (distances > 0).any(dim=-1)  — "does j reach i via ANY
+      action?". The .any is correct HERE: the gate only decides whether to pass
+      a message at all; WHICH actions reach is preserved in the message content.
+    * reach bits = (distances > 0) per action, concatenated into phi's input so
+      phi never has to disambiguate "0 = unreachable" from "0.05 = 1 turn"
+      (distances=0 is an overloaded sentinel: obstructed OR action structurally
+      invalid). phi input width is therefore 2*ACTIONS_DIM.
 
+class GNNLayer(nn.Module):
+    def __init__(self, d_model: int = D_MODEL):
+        super().__init__()
 
+        # phi: (44, 44, 2*ACTIONS_DIM) → (44, 44, d_model)
+        # input is [travel_times ‖ reach_bits]; learns what a pair's per-action
+        # reachability + timing "means" as a message
+        self.phi = nn.Sequential(
+            nn.Linear(2 * ACTIONS_DIM, 64),
+            nn.SiLU(),
+            nn.Linear(64, d_model),  # end with Linear FC - allow expressing negatives e.g.
+        )
 
+        # rho: (44, d_model) → (44, d_model)
+        # transforms the summed incoming messages into a planet update
+        self.rho = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        )
 
+    def forward(
+        self,
+        h:         torch.Tensor,    # (44, d_model)         FIRST-FRAME planet features
+        distances: torch.Tensor,    # (44, 44, ACTIONS_DIM) FIRST FRAME ONLY
+                                    # distances[i,j,a] = turns for action a, i → j;
+                                    # 0.0 = unreachable (obstructed or invalid action)
+    ) -> torch.Tensor:
+
+        # ── edge structure (pure data transforms, no grad) ────────────────────
+        # Messages flow sender → receiver, so index as [recv i, send j]:
+        # d_ji[i, j, a] = distances[j, i, a] = "action a's travel time j → i".
+        with torch.no_grad():
+            d_ji = distances.transpose(0, 1)        # (44, 44, ACTIONS_DIM)
+            reach_ji = (d_ji > 0).float()           # (44, 44, ACTIONS_DIM) per-action live bit
+            edge_mask = reach_ji.any(dim=-1)        # (44, 44) bool — j reaches i at all?
+            # (optionally & with presence[0] to hard-drop empty slots.)
+
+        # ── messages: travel times ‖ reach bits, gated by the edge mask ───────
+        phi_in = torch.cat([d_ji, reach_ji], dim=-1)  # (44, 44, 2*ACTIONS_DIM)
+        msgs = self.phi(phi_in)                       # (44, 44, d_model)
+        msgs = msgs * edge_mask.unsqueeze(-1)         # zero non-edges (kills the phi(0) bias)
+
+        # ── aggregate over senders (dim=1) — sum is permutation invariant ─────
+        agg = msgs.sum(dim=1)                          # (44, d_model)
+
+        # ── residual update (easy for early layers to no-op at init) ──────────
+        return h + self.rho(agg)                       # (44, d_model)
