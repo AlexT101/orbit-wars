@@ -36,7 +36,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import threading
 
 _PROC = None
@@ -123,7 +122,7 @@ def _ensure():
         [bin_path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=sys.stderr,
+        stderr=subprocess.DEVNULL,
         cwd=_ALPHAOW_DIR,
         env=env,
         bufsize=0,
