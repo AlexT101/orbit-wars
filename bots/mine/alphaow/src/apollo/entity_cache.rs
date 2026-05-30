@@ -4,11 +4,11 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::apollo::blockers::{self, BlockerTable};
+use crate::apollo::blockers;
 use crate::apollo::constants::{CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, ROTATION_LIMIT};
 use crate::apollo::engine::{CometGroup, Planet};
 
@@ -49,6 +49,11 @@ pub struct Entity {
     pub radius: f64,
     pub orbital_radius: f64,                // 0.0 for comets since they don't orbit sun
     pub positions: Vec<Option<[f64; 2]>>,   // Pre-computed positions, or None if not on board (comets)
+    /// First absolute turn at which the entity is off the board, precomputed at
+    /// build time so [`EntityCache::remaining_life`] is O(1). Comet paths are a
+    /// single contiguous on-board window, so this is `last_on_board + 1`
+    /// (clamped to `EPISODE_STEPS`). Planets never leave: `EPISODE_STEPS`.
+    off_board_turn: i64,
 }
 
 impl Entity {
@@ -83,13 +88,6 @@ pub struct EntityCache {
     ///   * Rollout forward-sim entries (stored at the rollout's notion of
     ///     `current_turn`) likewise share slots with the bot's real turns.
     aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
-    /// Lazily-built [`BlockerTable`]s keyed by
-    /// `(shooter_id, absolute_launch_turn, speed_bucket)`. Two different
-    /// `ships` counts that round to the same speed bucket share a table —
-    /// see [`blockers::speed_bucket`]. Cleared on comet spawn; orbiter
-    /// geometry is permanent but a fresh comet may have introduced entries
-    /// not in the cached table.
-    blocker_tables: Mutex<HashMap<(i64, i64, i64), Arc<BlockerTable>>>,
 }
 
 impl EntityCache {
@@ -124,13 +122,10 @@ impl EntityCache {
             angular_velocity,
             entities,
             aim_cache: Mutex::new(aim_cache),
-            blocker_tables: Mutex::new(HashMap::default()),
         }
     }
 
-    /// Drop expired comet entries and add newly-spawned ones. Also clears the
-    /// blocker-table cache: orbiter geometry is permanent but cached tables
-    /// may have been built without the freshly-spawned comets.
+    /// Drop expired comet entries and add newly-spawned ones.
     pub fn refresh_comets(
         &mut self,
         comets: &[CometGroup],
@@ -149,8 +144,6 @@ impl EntityCache {
                     .or_insert_with(|| build_comet_entity(pid, group, idx, current_step));
             }
         }
-
-        self.blocker_tables.get_mut().unwrap().clear();
     }
 
     #[inline]
@@ -161,35 +154,6 @@ impl EntityCache {
     #[inline]
     pub fn get(&self, id: i64) -> Option<&Entity> {
         self.entities.get(&id)
-    }
-
-    /// Cached blocker table for `(shooter_id, launch_turn_offset, ships)`.
-    /// Keyed internally by the *absolute* launch turn so the same entry is
-    /// reused across `set_current_turn` calls during rollout forward-sim,
-    /// and by the *speed bucket* so different `ships` counts that round to
-    /// the same fleet speed share one table.
-    pub fn blocker_table(
-        &self,
-        shooter_id: i64,
-        launch_turn_offset: i64,
-        ships: i64,
-    ) -> Arc<BlockerTable> {
-        let bucket = blockers::speed_bucket(ships);
-        let abs_launch = self.current_turn + launch_turn_offset;
-        let key = (shooter_id, abs_launch, bucket);
-        let mut guard = self.blocker_tables.lock().unwrap();
-        if let Some(t) = guard.get(&key) {
-            return t.clone();
-        }
-        let v = blockers::bucket_to_speed(bucket);
-        let table = Arc::new(blockers::build_blocker_table(
-            self,
-            shooter_id,
-            launch_turn_offset,
-            v,
-        ));
-        guard.insert(key, table.clone());
-        table
     }
 
     /// Look up a cached aim result for a shot launching at
@@ -296,7 +260,24 @@ impl EntityCache {
         entity.positions[abs as usize]
     }
 
-    /// Turns remaining until `id` leaves the board (for comets) or game end (for planets), relative to `current_turn`.
+    /// Position of `id` at an **absolute** game turn, indexed directly into the
+    /// precomputed table (unlike [`position`], which is relative to
+    /// `current_turn`). Used by [`crate::apollo::engine::Simulator`] during rollout,
+    /// where the simulator tracks its own absolute step and `current_turn` reflects
+    /// a different (per-bot-turn) notion. Returns `None` when the entity is
+    /// unknown, off-board (comets), or the turn is outside `[0, EPISODE_STEPS)`.
+    #[inline]
+    pub fn position_abs(&self, id: i64, abs_step: i64) -> Option<[f64; 2]> {
+        if abs_step < 0 || abs_step >= EPISODE_STEPS {
+            return None;
+        }
+        self.entities.get(&id)?.positions[abs_step as usize]
+    }
+
+    /// Turns remaining until `id` leaves the board (for comets) or game end (for
+    /// planets), relative to `current_turn`. O(1) via the precomputed
+    /// `off_board_turn`; returns 0 for a comet not currently on the board
+    /// (already gone, or not yet spawned).
     pub fn remaining_life(&self, id: i64) -> i64 {
         let Some(entity) = self.entities.get(&id) else {
             return 0;
@@ -304,14 +285,11 @@ impl EntityCache {
         if !entity.is_comet() {
             return (EPISODE_STEPS - self.current_turn).max(0);
         }
-        let start = self.current_turn.max(0) as usize;
-        let end = EPISODE_STEPS as usize;
-        for t in start..end {
-            if entity.positions[t].is_none() {
-                return t as i64 - self.current_turn;
-            }
+        let cur = self.current_turn;
+        if cur < 0 || cur >= EPISODE_STEPS || entity.positions[cur as usize].is_none() {
+            return 0;
         }
-        (EPISODE_STEPS - self.current_turn).max(0)
+        (entity.off_board_turn - cur).max(0)
     }
 }
 
@@ -363,6 +341,7 @@ fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {
         radius: planet.radius,
         orbital_radius,
         positions,
+        off_board_turn: EPISODE_STEPS, // planets stay on the board all game
     }
 }
 
@@ -375,6 +354,7 @@ fn build_comet_entity(
     let cap = EPISODE_STEPS as usize;
     let mut positions = vec![None; cap];
 
+    let mut last_on_board: i64 = -1;
     if let Some(path) = group.paths.get(idx) {
         let base = group.path_index - current_step;
         for t in 0..(EPISODE_STEPS as i64) {
@@ -382,9 +362,17 @@ fn build_comet_entity(
             if pi >= 0 && (pi as usize) < path.len() {
                 let p = path[pi as usize];
                 positions[t as usize] = Some([p[0], p[1]]);
+                last_on_board = t;
             }
         }
     }
+    // First off-board turn = one past the last on-board turn (clamped). 0 if the
+    // comet is never on board within range.
+    let off_board_turn = if last_on_board < 0 {
+        0
+    } else {
+        (last_on_board + 1).min(EPISODE_STEPS)
+    };
 
     Entity {
         id: pid,
@@ -392,5 +380,6 @@ fn build_comet_entity(
         radius: COMET_RADIUS,
         orbital_radius: 0.0,
         positions,
+        off_board_turn,
     }
 }

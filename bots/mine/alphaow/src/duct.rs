@@ -146,7 +146,29 @@ fn apollo_candidates_enabled() -> bool {
     })
 }
 
+fn focused_candidates_enabled() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        matches!(
+            std::env::var("OW_FOCUSED_CANDIDATES").ok().as_deref(),
+            Some("1") | Some("true") | Some("on")
+        )
+    })
+}
+
 fn enumerate_alternatives(state: &GameState, player: i32, k: usize, _is_root: bool) -> Vec<Vec<Action>> {
+    // Single-target focused candidate generator (apollo single-target eval
+    // + healing fleets). Opt-in via OW_FOCUSED_CANDIDATES=1.
+    if focused_candidates_enabled() {
+        let mut alts = crate::apollo_bridge::focused_candidates(state, player);
+        if !alts.is_empty() {
+            if alts.len() > k {
+                alts.truncate(k);
+            }
+            return alts;
+        }
+    }
     if apollo_candidates_enabled() {
         let mut alts = crate::apollo_bridge::apollo_candidates(state, player);
         if !alts.is_empty() {
@@ -610,6 +632,20 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
     }
 
     if std::env::var("OW_DEBUG").is_ok() {
+        // Walk the tree to measure unique node count + max depth.
+        fn count_nodes(n: &Node) -> usize {
+            1 + n.children.values().map(|c| count_nodes(c)).sum::<usize>()
+        }
+        fn max_depth(n: &Node) -> usize {
+            if n.children.is_empty() {
+                1
+            } else {
+                1 + n.children.values().map(|c| max_depth(c)).max().unwrap_or(0)
+            }
+        }
+        let nodes = count_nodes(&root);
+        let depth = max_depth(&root);
+
         let mut child_info: Vec<String> = Vec::new();
         for i in 0..root.my_candidates.len() {
             let st = &root.my_stats[i];
@@ -622,8 +658,8 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
             child_info.push(format!("v={}/avg={:.3} {}", st.visits, avg, target_summary.join(",")));
         }
         eprintln!(
-            "[duck] step={} iters={} root_visits={} my_K={} | {}",
-            state.step, iters, root.visits, root.my_candidates.len(),
+            "[duck] step={} iters={} root_visits={} my_K={} nodes={} max_depth={} | {}",
+            state.step, iters, root.visits, root.my_candidates.len(), nodes, depth,
             child_info.join(" || ")
         );
     }

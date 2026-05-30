@@ -197,3 +197,7 @@ rl_orbit_wars/runs/
 
 runs/
 wandb/
+
+# Training NPZ datasets — too big to track in git, rebuildable via
+# bots/mine/alphaow/train/build_from_zip.py + extras_v{3,4}_build.py.
+bots/mine/alphaow/train/data/*.npz

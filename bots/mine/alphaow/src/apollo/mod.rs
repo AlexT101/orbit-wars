@@ -6,7 +6,6 @@ pub mod constants;
 pub mod engine;
 pub mod world;
 pub mod entity_cache;
-pub mod sim_probe;
 pub mod helpers;
 pub mod blockers;
 pub mod hellburner;

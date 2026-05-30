@@ -10,7 +10,7 @@ use crate::apollo::constants::{EPISODE_STEPS, HORIZON};
 use crate::apollo::engine::{EngineState, Fleet, MoveAction, Planet};
 use crate::apollo::entity_cache::EntityCache;
 use crate::apollo::helpers::ArrivalLedger;
-use crate::apollo::sim_probe::SimProbe;
+use crate::apollo::engine::Simulator;
 use crate::apollo::world::WorldState;
 
 pub const REACTIVE_TURNS: i64 = 2;
@@ -31,6 +31,8 @@ pub fn pick_plan_by_rollout(
     reply_plan_fn: PlanFn,
     opponent_candidate_fn: CandidateFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
+    shared_ledger: Option<&ArrivalLedger>,
 ) -> Vec<PlannedMove> {
     if candidates.is_empty() {
         return Vec::new();
@@ -42,6 +44,8 @@ pub fn pick_plan_by_rollout(
         reply_plan_fn,
         opponent_candidate_fn,
         cache,
+        remaining_overage_time,
+        shared_ledger,
     );
 
     let mut best_idx = 0;
@@ -49,7 +53,10 @@ pub fn pick_plan_by_rollout(
     for (i, moves) in candidates.iter().enumerate() {
         let mut worst = f64::INFINITY;
         for opp in &opp_variants {
-            let score = rollout_score(initial_state, my_player, moves, opp, reply_plan_fn, cache);
+            let score = rollout_score(
+                initial_state, my_player, moves, opp, reply_plan_fn, cache,
+                remaining_overage_time,
+            );
             if score < worst {
                 worst = score;
             }
@@ -74,24 +81,28 @@ pub fn rollout_score(
     turn0_opponents: &[Vec<MoveAction>],
     reply_plan_fn: PlanFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
 ) -> f64 {
     let saved_turn = cache.current_turn;
     let num_players = initial_state.num_players;
-    let mut probe = SimProbe::from_engine(initial_state);
+    let mut sim = Simulator::new(initial_state);
+    // Scoring reads only planets/fleets; the per-turn ledger forks the sim
+    // (forks always record), so the scoring sim itself needn't log events.
+    sim.set_record_events(false);
 
     for t in 0..REACTIVE_TURNS {
-        if probe.step_count() >= EPISODE_STEPS {
+        if sim.step_count() >= EPISODE_STEPS {
             break;
         }
-        cache.set_current_turn(probe.step_count());
+        cache.set_current_turn(sim.step_count());
         let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
 
-        // Share one arrival ledger across all players (probe-walk is
+        // Share one arrival ledger across all players (sim-walk is
         // player-agnostic). Turn 0 uses pre-baked actions, so skip it.
         let ledger: Option<ArrivalLedger> = if t == 0 {
             None
         } else {
-            Some(ArrivalLedger::build(&probe, HORIZON, cache))
+            Some(ArrivalLedger::build(&sim, HORIZON, cache))
         };
 
         for p in 0..num_players {
@@ -106,23 +117,24 @@ pub fn rollout_score(
                 continue;
             }
             let ledger = ledger.as_ref().expect("ledger built for t >= 1");
-            let ws = WorldState::from_simprobe_with_ledger(pid, &probe, ledger, cache);
+            let mut ws = WorldState::from_simulator_with_ledger(pid, &sim, ledger, cache);
+            ws.remaining_overage_time = remaining_overage_time;
             actions[p] = to_move_actions(&reply_plan_fn(&ws));
         }
         let action_slices: Vec<&[MoveAction]> = actions.iter().map(|v| v.as_slice()).collect();
-        probe.step_with_actions(&action_slices);
+        sim.step_with_actions(&action_slices, Some(&*cache));
     }
 
     // Ballistic phase: no new launches. Fleets in flight still resolve.
     for _ in 0..BALLISTIC_TURNS {
-        if probe.step_count() >= EPISODE_STEPS {
+        if sim.step_count() >= EPISODE_STEPS {
             break;
         }
-        probe.step();
+        sim.step(Some(&*cache));
     }
 
     cache.set_current_turn(saved_turn);
-    score_probe(&probe, my_player)
+    score_simulation(&sim, my_player)
 }
 
 /// Precompute opponent turn-0 plans from the shared initial state. `my_player`'s
@@ -133,19 +145,31 @@ pub fn opponent_turn0_actions(
     my_player: i64,
     reply_plan_fn: PlanFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
+    shared_ledger: Option<&ArrivalLedger>,
 ) -> Vec<Vec<MoveAction>> {
     let saved_turn = cache.current_turn;
     cache.set_current_turn(initial_state.step);
     let num_players = initial_state.num_players;
-    let probe = SimProbe::from_engine(initial_state);
-    let ledger = ArrivalLedger::build(&probe, HORIZON, cache);
+    let sim = Simulator::new(initial_state);
+    // The turn-0 ledger is player-agnostic; reuse the caller's if supplied so we
+    // don't repeat the O(HORIZON * planets) forward walk.
+    let owned_ledger;
+    let ledger = match shared_ledger {
+        Some(l) => l,
+        None => {
+            owned_ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+            &owned_ledger
+        }
+    };
     let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
     for p in 0..num_players {
         let pid = p as i64;
         if pid == my_player {
             continue;
         }
-        let ws = WorldState::from_simprobe_with_ledger(pid, &probe, &ledger, cache);
+        let mut ws = WorldState::from_simulator_with_ledger(pid, &sim, ledger, cache);
+        ws.remaining_overage_time = remaining_overage_time;
         actions[p] = to_move_actions(&reply_plan_fn(&ws));
     }
     cache.set_current_turn(saved_turn);
@@ -162,6 +186,8 @@ pub fn opponent_turn0_variants(
     reply_plan_fn: PlanFn,
     opponent_candidate_fn: CandidateFn,
     cache: &mut EntityCache,
+    remaining_overage_time: f64,
+    shared_ledger: Option<&ArrivalLedger>,
 ) -> Vec<Vec<Vec<MoveAction>>> {
     let num_players = initial_state.num_players;
     if num_players != 2 {
@@ -170,6 +196,8 @@ pub fn opponent_turn0_variants(
             my_player,
             reply_plan_fn,
             cache,
+            remaining_overage_time,
+            shared_ledger,
         )];
     }
     let Some(opp_player) = (0..num_players as i64).find(|&p| p != my_player) else {
@@ -178,13 +206,26 @@ pub fn opponent_turn0_variants(
             my_player,
             reply_plan_fn,
             cache,
+            remaining_overage_time,
+            shared_ledger,
         )];
     };
 
     let saved_turn = cache.current_turn;
     cache.set_current_turn(initial_state.step);
 
-    let opp_ws = WorldState::from_engine(opp_player, initial_state, cache);
+    // Player-agnostic turn-0 ledger; reuse the caller's if supplied.
+    let sim = Simulator::new(initial_state);
+    let owned_ledger;
+    let ledger = match shared_ledger {
+        Some(l) => l,
+        None => {
+            owned_ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+            &owned_ledger
+        }
+    };
+    let mut opp_ws = WorldState::from_simulator_with_ledger(opp_player, &sim, ledger, cache);
+    opp_ws.remaining_overage_time = remaining_overage_time;
 
     if opp_ws.my_planets.is_empty() {
         cache.set_current_turn(saved_turn);
@@ -220,8 +261,8 @@ fn to_move_actions(moves: &[PlannedMove]) -> Vec<MoveAction> {
 /// Production-weighted board control delta from `my_player`'s perspective.
 /// Counts owned-planet production over the remaining game, current ship
 /// inventories on planets, and ships in flight.
-fn score_probe(probe: &SimProbe, my_player: i64) -> f64 {
-    score_snapshot(probe.planets(), probe.fleets(), probe.step_count(), my_player)
+fn score_simulation(sim: &Simulator, my_player: i64) -> f64 {
+    score_snapshot(sim.planets(), sim.fleets(), sim.step_count(), my_player)
 }
 
 fn score_snapshot(planets: &[Planet], fleets: &[Fleet], step: i64, my_player: i64) -> f64 {

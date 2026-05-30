@@ -35,6 +35,18 @@ path = "src/bin/summary_parity.rs"
 name = "extract_v2"
 path = "src/bin/extract_v2.rs"
 
+[[bin]]
+name = "xgb_parity"
+path = "src/bin/xgb_parity.rs"
+
+[[bin]]
+name = "extract_v3"
+path = "src/bin/extract_v3.rs"
+
+[[bin]]
+name = "extract_v4"
+path = "src/bin/extract_v4.rs"
+
 [features]
 # Mirrors the vendored apollo engine: cfg-gates its per-section timers.
 profile = []

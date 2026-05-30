@@ -181,6 +181,9 @@ enum InputKind {
     /// 46-d v2 summary (per-player + extrap + neutral block;
     /// see `summary_features_v2::extract`).
     SummaryV2,
+    /// 58-d v3: v2 + 12 extras (tick, 8 split distances, n_static, n_orbit, AV).
+    /// See `summary_features_v3::extract`.
+    SummaryV3,
 }
 
 /// One dense layer: `out_dim` rows of length `in_dim` (row-major) plus a
@@ -210,13 +213,16 @@ fn detect_kind(input_dim: usize) -> Option<InputKind> {
         Some(InputKind::Summary)
     } else if input_dim == summary_features_v2::DIM {
         Some(InputKind::SummaryV2)
+    } else if input_dim == summary_features_v3::DIM {
+        Some(InputKind::SummaryV3)
     } else {
         eprintln!(
-            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2)",
+            "[alphaow] unknown input_dim={} (expected {} full / {} summary / {} summary_v2 / {} summary_v3)",
             input_dim,
             INPUT_DIM,
             summary_features::DIM,
-            summary_features_v2::DIM
+            summary_features_v2::DIM,
+            summary_features_v3::DIM
         );
         None
     }
@@ -310,7 +316,17 @@ fn parse_v2(bytes: &[u8], input_dim: usize, kind: InputKind) -> Option<MlpWeight
     Some(MlpWeights { input_dim, kind, layers })
 }
 
-fn load_weights() -> Option<MlpWeights> {
+/// Loaded model: either the legacy MLP (AOWV binary) or an XGBoost gbtree
+/// dump (`bst.save_model('*.json')`). Auto-detected by leading byte.
+pub enum Model {
+    Mlp(MlpWeights),
+    Xgb {
+        model: crate::xgb::XgbModel,
+        kind: InputKind,
+    },
+}
+
+fn load_weights() -> Option<Model> {
     let path = match std::env::var("ALPHAOW_VALUE_NET_PATH") {
         Ok(p) => p,
         Err(_) => {
@@ -325,6 +341,22 @@ fn load_weights() -> Option<MlpWeights> {
             return None;
         }
     };
+    // Auto-detect: JSON XGB dump (leading '{') vs legacy AOWV binary.
+    if crate::xgb::looks_like_json(&bytes) {
+        let model = match crate::xgb::load(&bytes) {
+            Some(m) => m,
+            None => {
+                eprintln!("[alphaow] failed to parse XGB JSON at {}", path);
+                return None;
+            }
+        };
+        let kind = detect_kind(model.num_feature)?;
+        eprintln!(
+            "[alphaow] loaded XGB value net (kind={:?}, num_feature={}, base_score_logit={:.4}) from {}",
+            kind, model.num_feature, model.base_score_logit, path
+        );
+        return Some(Model::Xgb { model, kind });
+    }
     let w = parse_weights(&bytes);
     match &w {
         Some(mw) => {
@@ -341,12 +373,12 @@ fn load_weights() -> Option<MlpWeights> {
         }
         None => eprintln!("[alphaow] failed to parse value net weights at {}", path),
     }
-    w
+    w.map(Model::Mlp)
 }
 
-static WEIGHTS: OnceLock<Option<MlpWeights>> = OnceLock::new();
+static WEIGHTS: OnceLock<Option<Model>> = OnceLock::new();
 
-fn weights() -> Option<&'static MlpWeights> {
+fn weights() -> Option<&'static Model> {
     WEIGHTS.get_or_init(load_weights).as_ref()
 }
 
@@ -463,20 +495,49 @@ fn forward_full(w: &MlpWeights, features: &Features) -> f32 {
 /// if no weights are loaded (caller should fall back to the heuristic).
 /// Output is in `[-1, 1]` — MY perspective.
 pub fn predict(state: &GameState, me: i32) -> Option<f64> {
-    let w = weights()?;
-    let y = match w.kind {
-        InputKind::Full => {
-            let features = extract_features(state, me);
-            forward_full(w, &features)
-        }
-        InputKind::Summary => {
-            let feats = summary_features::extract(state, me);
-            forward_raw(w, &feats)
-        }
-        InputKind::SummaryV2 => {
-            let feats = summary_features_v2::extract(state, me);
-            forward_raw(w, &feats)
-        }
+    let m = weights()?;
+    let y = match m {
+        Model::Mlp(w) => match w.kind {
+            InputKind::Full => {
+                let features = extract_features(state, me);
+                forward_full(w, &features)
+            }
+            InputKind::Summary => {
+                let feats = summary_features::extract(state, me);
+                forward_raw(w, &feats)
+            }
+            InputKind::SummaryV2 => {
+                let feats = summary_features_v2::extract(state, me);
+                forward_raw(w, &feats)
+            }
+            InputKind::SummaryV3 => {
+                let feats = summary_features_v3::extract(state, me);
+                forward_raw(w, &feats)
+            }
+        },
+        Model::Xgb { model, kind } => match kind {
+            InputKind::Full => {
+                let features = extract_features(state, me);
+                // Concatenate to one flat slice for XGB.
+                let mut scratch = Vec::with_capacity(INPUT_DIM);
+                scratch.extend_from_slice(features.current.as_ref());
+                scratch.extend_from_slice(features.extrap.as_ref());
+                scratch.extend_from_slice(features.dist.as_ref());
+                model.predict_value(&scratch)
+            }
+            InputKind::Summary => {
+                let feats = summary_features::extract(state, me);
+                model.predict_value(&feats)
+            }
+            InputKind::SummaryV2 => {
+                let feats = summary_features_v2::extract(state, me);
+                model.predict_value(&feats)
+            }
+            InputKind::SummaryV3 => {
+                let feats = summary_features_v3::extract(state, me);
+                model.predict_value(&feats)
+            }
+        },
     };
     Some(y as f64)
 }
@@ -917,6 +978,106 @@ pub mod summary_features_v2 {
         out[20..29].copy_from_slice(&me_ext);
         out[29..38].copy_from_slice(&opp_ext);
         out[38..46].copy_from_slice(&neut);
+        out
+    }
+}
+
+/// 58-d: 46-d summary_v2 + 12-d extras (user-requested, leak-aware):
+///   [46]: same as summary_v2
+///   [46]: tick
+///   [47..51]: 4 split distances NOW
+///       my_static→their_static, my_static→their_orb,
+///       my_orb→their_static,    my_orb→their_orb
+///   [51..55]: same 4 distances after `extrapolate_fleets`
+///   [55]: n_total_static
+///   [56]: n_total_orbit
+///   [57]: angular_velocity
+///
+/// Matches the `bin/extract_v4` offline extractor byte-for-byte (same
+/// underlying `extrapolate_fleets` + same type buckets).
+pub mod summary_features_v3 {
+    use super::*;
+
+    pub const DIM: usize = 58;
+    const EXTRA_DIM: usize = 12;
+
+    #[derive(Copy, Clone)]
+    enum PType { Static, Orbit }
+
+    fn matches(p: &Planet, t: PType) -> bool {
+        if p.is_comet { return false; }
+        match t {
+            PType::Static => !p.is_orbiting,
+            PType::Orbit  =>  p.is_orbiting,
+        }
+    }
+
+    fn min_pair_dist<F1, F2>(planets: &[Planet], is_a: F1, is_b: F2) -> f32
+    where F1: Fn(&Planet) -> bool, F2: Fn(&Planet) -> bool {
+        let mut best = f32::INFINITY;
+        for a in planets.iter().filter(|p| is_a(p)) {
+            for b in planets.iter().filter(|p| is_b(p)) {
+                let dx = (a.x - b.x) as f32;
+                let dy = (a.y - b.y) as f32;
+                let d2 = dx * dx + dy * dy;
+                if d2 < best { best = d2; }
+            }
+        }
+        if best.is_finite() { best.sqrt() } else { 0.0 }
+    }
+
+    pub fn extract(state: &GameState, me: i32) -> [f32; DIM] {
+        let v2 = summary_features_v2::extract(state, me);
+        let mut out = [0f32; DIM];
+        out[..summary_features_v2::DIM].copy_from_slice(&v2);
+
+        let mut n_static = 0u32;
+        let mut n_orbit  = 0u32;
+        for p in &state.planets {
+            if p.is_comet { continue; }
+            if p.is_orbiting { n_orbit += 1; } else { n_static += 1; }
+        }
+
+        let is_mine  = |p: &Planet| p.owner == me;
+        let is_enemy = |p: &Planet| p.owner != me && p.owner != -1;
+        let now_ss = min_pair_dist(&state.planets,
+            |p| is_mine(p)  && matches(p, PType::Static),
+            |p| is_enemy(p) && matches(p, PType::Static));
+        let now_so = min_pair_dist(&state.planets,
+            |p| is_mine(p)  && matches(p, PType::Static),
+            |p| is_enemy(p) && matches(p, PType::Orbit));
+        let now_os = min_pair_dist(&state.planets,
+            |p| is_mine(p)  && matches(p, PType::Orbit),
+            |p| is_enemy(p) && matches(p, PType::Static));
+        let now_oo = min_pair_dist(&state.planets,
+            |p| is_mine(p)  && matches(p, PType::Orbit),
+            |p| is_enemy(p) && matches(p, PType::Orbit));
+
+        let ext_map = extrapolate_fleets(state);
+        let ext_owner = |p: &Planet| ext_map.get(&p.id).map(|x| x.0).unwrap_or(p.owner);
+        let ext_is_mine  = |p: &Planet| ext_owner(p) == me;
+        let ext_is_enemy = |p: &Planet| { let o = ext_owner(p); o != me && o != -1 };
+        let ext_ss = min_pair_dist(&state.planets,
+            |p| ext_is_mine(p)  && matches(p, PType::Static),
+            |p| ext_is_enemy(p) && matches(p, PType::Static));
+        let ext_so = min_pair_dist(&state.planets,
+            |p| ext_is_mine(p)  && matches(p, PType::Static),
+            |p| ext_is_enemy(p) && matches(p, PType::Orbit));
+        let ext_os = min_pair_dist(&state.planets,
+            |p| ext_is_mine(p)  && matches(p, PType::Orbit),
+            |p| ext_is_enemy(p) && matches(p, PType::Static));
+        let ext_oo = min_pair_dist(&state.planets,
+            |p| ext_is_mine(p)  && matches(p, PType::Orbit),
+            |p| ext_is_enemy(p) && matches(p, PType::Orbit));
+
+        let extras: [f32; EXTRA_DIM] = [
+            state.step as f32,
+            now_ss, now_so, now_os, now_oo,
+            ext_ss, ext_so, ext_os, ext_oo,
+            n_static as f32, n_orbit as f32,
+            state.angular_velocity as f32,
+        ];
+        out[summary_features_v2::DIM..].copy_from_slice(&extras);
         out
     }
 }

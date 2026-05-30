@@ -9,6 +9,7 @@ pub mod pathing;
 pub mod policy;
 pub mod sim;
 pub mod value_net;
+pub mod xgb;
 
 use serde_json::Value;
 use std::collections::HashMap;

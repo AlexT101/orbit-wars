@@ -5,7 +5,7 @@
 //! pipes observations each turn.
 
 use alphaow_bot::value_net::{self, INPUT_DIM, PER_BLOCK, DIST_BLOCK};
-use alphaow_bot::{duct, parse_state};
+use alphaow_bot::{duct, mcts, parse_state};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
@@ -71,7 +71,10 @@ fn main() -> io::Result<()> {
                 let _ = f.write_all(v2_bytes);
             }
         }
-        let actions = duct::best_move(&state, state.player, budget_ms);
+        let actions = match std::env::var("OW_PLANNER").ok().as_deref() {
+            Some("mcts") => mcts::best_move(&state, state.player, budget_ms),
+            _ => duct::best_move(&state, state.player, budget_ms),
+        };
         let mv: Vec<(i64, f64, i64)> = actions
             .into_iter()
             .filter(|a| a.3 == state.player)
