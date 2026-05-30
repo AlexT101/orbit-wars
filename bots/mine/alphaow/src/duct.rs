@@ -157,15 +157,18 @@ fn focused_candidates_enabled() -> bool {
     })
 }
 
-fn enumerate_alternatives(state: &GameState, player: i32, k: usize, _is_root: bool) -> Vec<Vec<Action>> {
+fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: bool) -> Vec<Vec<Action>> {
     // Single-target focused candidate generator (apollo single-target eval
     // + healing fleets). Opt-in via OW_FOCUSED_CANDIDATES=1.
+    //
+    // focused_candidates handles its own size policy:
+    //   * root: no truncation — return *all* viable target plans + no-op,
+    //     so MCTS sees the full branching factor.
+    //   * non-root: race-filter + sort by production/ships, keep top 3 + no-op.
+    // We pass is_root through and skip the outer `k` truncation entirely.
     if focused_candidates_enabled() {
-        let mut alts = crate::apollo_bridge::focused_candidates(state, player);
+        let alts = crate::focused_plan::focused_candidates(state, player, is_root);
         if !alts.is_empty() {
-            if alts.len() > k {
-                alts.truncate(k);
-            }
             return alts;
         }
     }
@@ -234,7 +237,73 @@ fn puct_c() -> f64 {
         .unwrap_or(EXPLORATION)
 }
 
-fn select_my(node: &Node) -> usize {
+/// Selection mode. Set `OW_SELECTION=exp3` (or `Exp3` / `EXP3`) to use
+/// the adversarial-bandit Exp3-IX rule instead of PUCT in both `select_my`
+/// and `select_opp`. Default = PUCT.
+fn use_exp3_selection() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        matches!(
+            std::env::var("OW_SELECTION").ok().as_deref().map(|s| s.to_ascii_lowercase()).as_deref(),
+            Some("exp3")
+        )
+    })
+}
+
+/// Exp3-IX sampler. `invert = true` for the opp side (we want to minimise
+/// MY value -> opp maximises -Q).  Eta ~ 0.5, gamma ~ 0.1 are AlphaZero-
+/// adjacent defaults; can be tuned via OW_EXP3_ETA / OW_EXP3_GAMMA.
+fn exp3_pick(stats: &[ActionStats], invert: bool, rng: &mut XorRng) -> usize {
+    let k = stats.len();
+    if k <= 1 {
+        return 0;
+    }
+    let eta: f64 = std::env::var("OW_EXP3_ETA")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.5);
+    let gamma: f64 = std::env::var("OW_EXP3_GAMMA")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.1);
+
+    // Mean Q per action (0 if unvisited).
+    let q: Vec<f64> = stats
+        .iter()
+        .map(|s| {
+            let v = if s.visits == 0 {
+                0.0
+            } else {
+                s.sum_value / s.visits as f64
+            };
+            if invert { -v } else { v }
+        })
+        .collect();
+
+    // Numerically-stable softmax: subtract max before exp.
+    let qmax = q.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let exp_q: Vec<f64> = q.iter().map(|x| (eta * (x - qmax)).exp()).collect();
+    let sum_exp: f64 = exp_q.iter().sum::<f64>().max(1e-12);
+
+    // Mix softmax with uniform γ/K, then sample.
+    let r: f64 = rng.next_f64();
+    let mut cum = 0.0_f64;
+    let inv_k = 1.0 / k as f64;
+    for (i, &x) in exp_q.iter().enumerate() {
+        let p = (1.0 - gamma) * x / sum_exp + gamma * inv_k;
+        cum += p;
+        if r < cum {
+            return i;
+        }
+    }
+    k - 1
+}
+
+fn select_my(node: &Node, rng: &mut XorRng) -> usize {
+    if use_exp3_selection() {
+        return exp3_pick(&node.my_stats, false, rng);
+    }
     let c = puct_c();
     let parent_n = node.visits.max(1) as f64;
     let mut best_i = 0usize;
@@ -256,7 +325,10 @@ fn select_my(node: &Node) -> usize {
     best_i
 }
 
-fn select_opp(node: &Node) -> usize {
+fn select_opp(node: &Node, rng: &mut XorRng) -> usize {
+    if use_exp3_selection() {
+        return exp3_pick(&node.opp_stats, true, rng);
+    }
     // Opp wants to minimize MY value → negate exploit.
     let c = puct_c();
     let parent_n = node.visits.max(1) as f64;
@@ -501,7 +573,11 @@ fn evaluate(state: &GameState, me: i32) -> f64 {
 
 fn evaluate_inner(state: &GameState, me: i32) -> f64 {
     if use_value_net() {
-        if let Some(v) = crate::value_net::predict(state, me) {
+        let __vn_t0 = std::time::Instant::now();
+        let __pred = crate::value_net::predict(state, me);
+        crate::profiling::add(&crate::profiling::VALUE_NET_NS, __vn_t0);
+        crate::profiling::inc(&crate::profiling::VALUE_NET_CALLS);
+        if let Some(v) = __pred {
             let v_scaled = (v * value_scale()).clamp(-1.0, 1.0);
             let blend = value_blend();
             // blend == 1.0 (default) ⇒ the heuristic contributes 0, so skip
@@ -524,15 +600,20 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng, is_root: bool) 
         return v;
     }
     ensure_candidates(node, me, is_root);
-    let my_idx = select_my(node);
-    let opp_idx = select_opp(node);
+    let my_idx = select_my(node, rng);
+    let opp_idx = select_opp(node, rng);
     let value: f64;
     if !node.children.contains_key(&(my_idx, opp_idx)) {
         // Expand: apply both actions, tick, create new node, rollout.
         let mut s = node.state.clone();
+        let __al_t0 = std::time::Instant::now();
         apply_launches(&mut s, &node.my_candidates[my_idx]);
         apply_launches(&mut s, &node.opp_candidates[opp_idx]);
+        crate::profiling::add(&crate::profiling::APPLY_LAUNCHES_NS, __al_t0);
+        let __tick_t0 = std::time::Instant::now();
         tick(&mut s, rng);
+        crate::profiling::add(&crate::profiling::TICK_NS, __tick_t0);
+        crate::profiling::inc(&crate::profiling::TICK_CALLS);
         let rollout_value = rollout(s.clone(), me, rng);
         let child = Node {
             state: s,

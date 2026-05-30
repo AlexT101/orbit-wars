@@ -5,7 +5,7 @@
 //! pipes observations each turn.
 
 use alphaow_bot::value_net::{self, INPUT_DIM, PER_BLOCK, DIST_BLOCK};
-use alphaow_bot::{duct, mcts, parse_state};
+use alphaow_bot::{duct, mcts, parse_state, profiling};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
@@ -71,10 +71,21 @@ fn main() -> io::Result<()> {
                 let _ = f.write_all(v2_bytes);
             }
         }
+        let prof_enabled = std::env::var("OW_PROFILE").is_ok();
+        if prof_enabled { profiling::reset(); }
+        alphaow_bot::focused_plan::reset_cache();
+        let __turn_t0 = std::time::Instant::now();
         let actions = match std::env::var("OW_PLANNER").ok().as_deref() {
             Some("mcts") => mcts::best_move(&state, state.player, budget_ms),
             _ => duct::best_move(&state, state.player, budget_ms),
         };
+        if prof_enabled {
+            profiling::TURN_TOTAL_NS.fetch_add(
+                __turn_t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            profiling::dump(state.step, state.player);
+        }
         let mv: Vec<(i64, f64, i64)> = actions
             .into_iter()
             .filter(|a| a.3 == state.player)

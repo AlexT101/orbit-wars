@@ -108,7 +108,7 @@ def _ensure():
         "OW_PLANNER", "OW_PUCT_C", "OW_K_ROOT", "OW_K_NON_ROOT",
         "OW_ROLLOUT", "OW_ROLLOUT_DEPTH", "OW_ROLLOUT_REACTIVE",
         "OW_ROLLOUT_NOISE", "OW_DUCT_ENUMERATE", "OW_NO_COOP", "OW_NO_REUSE",
-        "OW_FOCUSED_CANDIDATES",
+        "OW_FOCUSED_CANDIDATES", "OW_SELECTION", "OW_EXP3_ETA", "OW_EXP3_GAMMA",
     ):
         env.pop(k, None)
     # **No rollouts** — leaf-eval only. The XGB value net is strong enough

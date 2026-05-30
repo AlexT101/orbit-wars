@@ -3,10 +3,12 @@
 pub mod apollo;
 pub mod apollo_bridge;
 pub mod duct;
+pub mod focused_plan;
 pub mod mcts;
 pub mod ow2_plan;
 pub mod pathing;
 pub mod policy;
+pub mod profiling;
 pub mod sim;
 pub mod value_net;
 pub mod xgb;

@@ -694,12 +694,235 @@ pub fn plan_with_exclusion(
     no_coop: bool,
     excluded_target: Option<i64>,
 ) -> Vec<Action> {
-    plan_inner(state, player, no_coop, excluded_target)
+    plan_inner(state, player, no_coop, excluded_target, None)
 }
 
 /// Run ow2-style plan for `player` and return joint actions.
 pub fn plan(state: &GameState, player: i32, no_coop: bool) -> Vec<Action> {
-    plan_inner(state, player, no_coop, None)
+    plan_inner(state, player, no_coop, None, None)
+}
+
+/// Run ow2's plan, but restrict the greedy target loop to the SINGLE
+/// specified target. Returns the cooperating-source attack orders that
+/// ow2 would commit for capturing `only_target` this turn (one greedy
+/// iteration — after that the single target is in `used_target` and the
+/// outer loop exits).
+///
+/// This is the proper "ow policy for one target" used by the focused
+/// candidate generator (`src/focused_plan.rs`).
+pub fn plan_for_target(
+    state: &GameState,
+    player: i32,
+    no_coop: bool,
+    only_target: i64,
+) -> Vec<Action> {
+    plan_inner(state, player, no_coop, None, Some(only_target))
+}
+
+/// Precomputed state shared across many `plan_for_target` calls on the
+/// SAME `(state, player, no_coop)` triple. The setup (arrivals, safe[],
+/// enemy_safe[], race_ok[]) is the bulk of `plan_inner`'s cost — building
+/// it once and reusing it for each of N candidate targets cuts
+/// focused-candidate generation from O(N × setup) to O(setup + N × greedy).
+pub struct PlanContext<'a> {
+    pub state: &'a GameState,
+    pub me: i32,
+    pub no_coop: bool,
+    pub arrivals: HashMap<i64, Vec<(i64, i32, i64)>>,
+    pub safe: HashMap<i64, i64>,
+    #[allow(dead_code)]
+    pub enemy_safe: HashMap<i64, i64>,
+    pub my_planets: Vec<Planet>,
+    #[allow(dead_code)]
+    pub enemy_planets: Vec<Planet>,
+    pub race_ok: HashMap<i64, bool>,
+}
+
+impl<'a> PlanContext<'a> {
+    pub fn build(state: &'a GameState, player: i32, no_coop: bool) -> Self {
+        clear_dir_cache_if_step_changed(state.step);
+        let me = player;
+
+        let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
+        for fleet in &state.fleets {
+            if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {
+                arrivals.entry(pid).or_default().push((dt, fleet.owner, fleet.ships));
+            }
+        }
+        for v in arrivals.values_mut() {
+            v.sort_by_key(|x| x.0);
+        }
+
+        let mut safe: HashMap<i64, i64> = HashMap::new();
+        for p in &state.planets {
+            if p.owner != me { continue; }
+            let empty = Vec::new();
+            let arr = arrivals.get(&p.id).unwrap_or(&empty);
+            let mut lo = 0;
+            let mut hi = p.ships;
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2;
+                if simulates_safe(p, mid, arr, me, state) { lo = mid; } else { hi = mid - 1; }
+            }
+            safe.insert(p.id, lo);
+        }
+
+        let my_planets: Vec<Planet> = state.planets.iter().filter(|p| p.owner == me).cloned().collect();
+        let enemy_planets: Vec<Planet> = state.planets.iter()
+            .filter(|p| p.owner != me && p.owner != -1).cloned().collect();
+
+        let mut enemy_safe: HashMap<i64, i64> = HashMap::new();
+        for p in &state.planets {
+            if p.owner == me || p.owner == -1 { continue; }
+            let empty = Vec::new();
+            let arr = arrivals.get(&p.id).unwrap_or(&empty);
+            let mut lo = 0;
+            let mut hi = p.ships;
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2;
+                if simulates_safe(p, mid, arr, p.owner, state) { lo = mid; } else { hi = mid - 1; }
+            }
+            enemy_safe.insert(p.id, lo);
+        }
+
+        let mut race_ok: HashMap<i64, bool> = HashMap::new();
+        let mut scratch: Vec<(i64, usize)> = Vec::with_capacity(16);
+        for target in &state.planets {
+            if target.owner == me { continue; }
+            scratch.clear();
+            for (i, mp) in my_planets.iter().enumerate() {
+                if mp.ships <= 0 { continue; }
+                scratch.push((time_lower_bound(mp, target, mp.ships, state.max_speed), i));
+            }
+            scratch.sort_unstable_by_key(|&(lb, _)| lb);
+            let mut my_t = i64::MAX;
+            for &(lb, i) in &scratch {
+                if lb >= my_t { break; }
+                if let Some(tt) = cached_time_to_hit(&my_planets[i], target, my_planets[i].ships, state, 0) {
+                    if tt < my_t { my_t = tt; }
+                }
+            }
+            scratch.clear();
+            for (i, ep) in enemy_planets.iter().enumerate() {
+                if ep.ships <= 0 || ep.id == target.id { continue; }
+                scratch.push((time_lower_bound(ep, target, ep.ships, state.max_speed), i));
+            }
+            scratch.sort_unstable_by_key(|&(lb, _)| lb);
+            let mut their_t = i64::MAX;
+            for &(lb, i) in &scratch {
+                if lb >= their_t { break; }
+                if let Some(tt) = cached_time_to_hit(&enemy_planets[i], target, enemy_planets[i].ships, state, 0) {
+                    if tt < their_t { their_t = tt; }
+                }
+            }
+            race_ok.insert(target.id, my_t <= their_t);
+        }
+
+        PlanContext { state, me, no_coop, arrivals, safe, enemy_safe, my_planets, enemy_planets, race_ok }
+    }
+}
+
+/// Run the greedy multi-pass body of `plan_inner` for ONE specific target,
+/// using shared precomputed context. Equivalent to
+/// `plan_for_target(state, player, no_coop, target_id)` but skips the
+/// O(N × log × |fleets|) setup work.
+pub fn plan_target_with_ctx(ctx: &PlanContext, target_id: i64) -> Vec<Action> {
+    let me = ctx.me;
+    let state = ctx.state;
+    let no_coop = ctx.no_coop;
+    let mut arrivals = ctx.arrivals.clone();
+    let mut available: Vec<i64> = ctx.my_planets.iter().map(|p| ctx.safe.get(&p.id).copied().unwrap_or(0)).collect();
+    let mut used_target: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut moves: Vec<(i64, f64, i64, i64)> = Vec::new();
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if guard > 200 { break; }
+        let mut best: Option<(f64, i64, i64, Vec<PlanEntry>)> = None;
+        // Only one target body runs (filtered by only_target).
+        let target = match state.planets.iter().find(|p| p.id == target_id) { Some(t) => t, None => break };
+        if no_coop && used_target.contains(&target.id) { break; }
+        let empty = Vec::new();
+        let arr = arrivals.get(&target.id).unwrap_or(&empty);
+        if stays_mine_throughout(target, arr, me, state) { break; }
+        if target.owner != me && !*ctx.race_ok.get(&target.id).unwrap_or(&false) { break; }
+        let hi = pathing::MAX_TIME.min(60);
+        let mut found: Option<(i64, Vec<PlanEntry>, i64)> = None;
+        let mut t = 1i64;
+        while t <= hi {
+            if let Some((p, total)) =
+                plan_for_time(target, t, &ctx.my_planets, &available, state, &arrivals, me)
+            {
+                found = Some((t, p, total));
+                break;
+            }
+            t += 1;
+        }
+        if let Some((t_best, plan_best, total_best)) = found {
+            if target.is_comet && target.owner != me {
+                let remaining = state.comet_remaining(target);
+                let productions_after = (remaining - t_best).max(0);
+                let ships_lost = (total_best - 1).max(0);
+                if ships_lost >= productions_after * target.production { break; }
+            }
+            let prod = target.production.max(1) as f64;
+            let score = prod / (total_best.max(1) as f64);
+            let s = score - 1e-6 * t_best as f64;
+            best = Some((s, target.id, t_best, plan_best));
+        }
+        if let Some((_, target_id, t_best, dispatches)) = best {
+            if dispatches.is_empty() { break; }
+            used_target.insert(target_id);
+            let entry = arrivals.entry(target_id).or_default();
+            for d in &dispatches { entry.push((t_best, me, d.ships)); }
+            entry.sort_by_key(|x| x.0);
+            let mut to_emit: Vec<PlanEntry> = dispatches.clone();
+            if no_coop && to_emit.len() > 1 {
+                to_emit.sort_by(|a, b| b.ships.cmp(&a.ships));
+                to_emit.truncate(1);
+            }
+            for d in to_emit {
+                moves.push((d.from_id, d.angle, d.ships, target_id));
+                if d.from_idx < available.len() {
+                    available[d.from_idx] -= d.ships;
+                    if available[d.from_idx] < 0 { available[d.from_idx] = 0; }
+                }
+            }
+        } else { break; }
+    }
+    moves.into_iter().map(|(f, a, s, _t)| (f, a, s, me)).collect()
+}
+
+/// Build a single-action "approach" plan for an unaffordable target.
+/// Picks the source planet that can ARRIVE at the target soonest with its
+/// safe-drain ships, and emits one launch toward the target. The ships
+/// stay in flight as committed-but-unresolved — next-turn focused_candidates
+/// sees them in `arrivals[]` and can complete the capture from there.
+/// Returns None if no source can reach the target.
+pub fn approach_plan_for_target(ctx: &PlanContext, target_id: i64) -> Option<Vec<Action>> {
+    let state = ctx.state;
+    let target = state.planets.iter().find(|p| p.id == target_id)?;
+    if target.owner == ctx.me { return None; }
+    let me = ctx.me;
+
+    let mut best: Option<(i64, i64, f64, i64)> = None; // (time, source_id, angle, send)
+    for src in &ctx.my_planets {
+        let safe = ctx.safe.get(&src.id).copied().unwrap_or(0);
+        if safe <= 0 { continue; }
+        // Send the smaller of (safe-drain, target garrison) — sending more
+        // than target.ships at one source isn't useful since one source
+        // can't single-handedly capture a target it can't afford anyway.
+        let send = safe.min(target.ships.max(1));
+        if send <= 0 { continue; }
+        if let Some(r) = cached_dir_to_hit(src, target, send, state, 0) {
+            if best.as_ref().map(|b| r.time < b.0).unwrap_or(true) {
+                best = Some((r.time, src.id, r.angle, send));
+            }
+        }
+    }
+
+    let (_, src_id, angle, send) = best?;
+    Some(vec![(src_id, angle, send, me)])
 }
 
 fn plan_inner(
@@ -707,6 +930,7 @@ fn plan_inner(
     player: i32,
     no_coop: bool,
     excluded_target: Option<i64>,
+    only_target: Option<i64>,
 ) -> Vec<Action> {
     let _prof_start = if plan_profile_enabled() {
         PLAN_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -852,6 +1076,11 @@ fn plan_inner(
             }
             if Some(target.id) == excluded_target {
                 continue;
+            }
+            if let Some(only) = only_target {
+                if target.id != only {
+                    continue;
+                }
             }
             let empty = Vec::new();
             let arr = arrivals.get(&target.id).unwrap_or(&empty);
