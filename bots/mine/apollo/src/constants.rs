@@ -43,8 +43,7 @@ pub const A_S_LOOKAHEAD: i64 = 3;                                   // Max turns
 pub const SECOND_ENEMY_ARRIVAL_TOL: i64 = 1;                        // Skip third-party target steals if our fleet would arrive no later than this many turns after another non-owner enemy arrival.
 
 // Fleet rules
-pub const REINFORCEMENT_SIZE: i64 = 17;                             // Minimum post-plan surplus needed before a backline planet sends reinforcement.
-pub const GARRISON_SIZE: i64 = 11;                                  // Ships kept behind on a reinforcement source after sending surplus forward.
+pub const GARRISON_SIZE: i64 = 0;                                   // Ships kept behind on a reinforcement source after sending surplus forward.
 pub const TRIM_MIN_SHIPS: i64 = 10;                                 // Lower bound when halve-trimming the marginal capture fleet; avoids saving excess by shrinking it into a tiny slow fleet.
 pub const MAX_SUBSET_SOURCES: usize = 10;                           // Cap on inbound owned sources enumerated for full 2^N subset search; the nearest sources are kept after distance sorting.
 

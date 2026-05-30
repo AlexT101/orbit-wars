@@ -23,8 +23,8 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::{
     A_S_LOOKAHEAD, GARRISON_SIZE, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, MAX_SUBSET_SOURCES,
-    OFFSET_LOOKAHEAD, OPENING_TURNS, REINFORCEMENT_SIZE, ROTATION_LOOK_AHEAD_TURNS,
-    SECOND_ENEMY_ARRIVAL_TOL, TRIM_MIN_SHIPS,
+    OFFSET_LOOKAHEAD, OPENING_TURNS, ROTATION_LOOK_AHEAD_TURNS, SECOND_ENEMY_ARRIVAL_TOL,
+    TRIM_MIN_SHIPS,
 };
 use crate::engine::Planet;
 use crate::entity_cache::{AimCacheVerdict};
@@ -1120,7 +1120,7 @@ fn send_reinforcements(
             continue;
         };
         let available = plan.ships_available(p);
-        if available < REINFORCEMENT_SIZE + GARRISON_SIZE {
+        if available <= GARRISON_SIZE {
             continue;
         }
         let has_enemy_incoming = model
@@ -1133,11 +1133,33 @@ fn send_reinforcements(
             continue;
         }
         let ships = available - GARRISON_SIZE;
-        let Some((angle, _turns, _, _, _)) =
+        let Some((angle, turns_now, _, _, _)) =
             model.plan_shot(p.id, target_id, ships, 0)
         else {
+            // Blocked now — we can only emit launch-this-turn orders, so nothing
+            // to send regardless of how waiting would compare.
             continue;
         };
+        let arrival_now = turns_now.max(1);
+
+        // Hold if waiting delivers the fleet no later than launching now.
+        // Fleet speed is log-shaped in ship count, so `production·d` extra ships
+        // accumulated over `d` turns (and any shifted geometry / cleared blockers
+        // at the future launch turn) can speed the fleet enough to offset the
+        // launch delay. When that happens, sending now is strictly dominated:
+        // same-or-earlier arrival while delivering fewer ships. We re-plan every
+        // turn, so this is a per-turn send-vs-hold decision, not a commitment to
+        // a specific delay. Replaces the old fixed `REINFORCEMENT_SIZE` floor.
+        let wait_is_better = (1..=OFFSET_LOOKAHEAD).any(|d| {
+            let ships_d = ships + p.production * d;
+            match model.plan_shot(p.id, target_id, ships_d, d) {
+                Some((_, turns_d, _, _, _)) => (d + turns_d).max(1) <= arrival_now,
+                None => false,
+            }
+        });
+        if wait_is_better {
+            continue;
+        }
         out.push((p.id, angle, ships));
     }
     out
