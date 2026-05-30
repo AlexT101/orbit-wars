@@ -1,16 +1,17 @@
 use std::time::Instant;
 
+use super::reference_engine::{PyRandom, RefEngine};
 use crate::constants::CENTER;
-use crate::engine::{Configuration, EngineState, MoveAction, PyRandom};
+use crate::engine::{Configuration, MoveAction};
 #[cfg(feature = "profile")]
-use crate::engine::prof;
+use super::reference_engine::prof;
 
 #[test]
 #[ignore] // run with: cargo test --release pure_sim_throughput -- --ignored --nocapture
 fn pure_sim_throughput() {
     let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
     // Measure step_with_actions only (no PyO3); reset/regeneration excluded.
-    let mut state = EngineState::new(42, 2, Configuration::default());
+    let mut state = RefEngine::new(42, 2, Configuration::default());
     let mut steps: u64 = 0;
     let target: u64 = 2_000_000;
     let mut seed = 42u64;
@@ -22,7 +23,7 @@ fn pure_sim_throughput() {
         steps += 1;
         if done {
             seed += 1;
-            state = EngineState::new(seed, 2, Configuration::default());
+            state = RefEngine::new(seed, 2, Configuration::default());
         }
     }
     let dt = sim_time.as_secs_f64();
@@ -38,7 +39,7 @@ fn pure_sim_throughput() {
 fn pure_sim_with_fleets() {
     // Only the step itself is timed; action construction (fleet_actions)
     // is excluded so we measure step_with_actions, not the test harness.
-    let mut state = EngineState::new(42, 2, Configuration::default());
+    let mut state = RefEngine::new(42, 2, Configuration::default());
     let mut steps: u64 = 0;
     let target: u64 = 2_000_000;
     let mut seed = 42u64;
@@ -55,7 +56,7 @@ fn pure_sim_with_fleets() {
         steps += 1;
         if done {
             seed += 1;
-            state = EngineState::new(seed, 2, Configuration::default());
+            state = RefEngine::new(seed, 2, Configuration::default());
         }
     }
     let dt = sim_time.as_secs_f64();
@@ -69,7 +70,7 @@ fn pure_sim_with_fleets() {
 
 // Launch from every owned planet so fleets stay in flight, exercising the
 // collision loop. Shared by the fleet throughput and profiling benchmarks.
-fn fleet_actions(state: &EngineState) -> Vec<Vec<MoveAction>> {
+fn fleet_actions(state: &RefEngine) -> Vec<Vec<MoveAction>> {
     let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); state.num_players];
     for planet in &state.planets {
         let owner = planet.owner;
@@ -90,14 +91,14 @@ fn fleet_actions(state: &EngineState) -> Vec<Vec<MoveAction>> {
 // cargo test --release --features profile profile_sim_sections -- --ignored --nocapture
 #[ignore]
 fn profile_sim_sections() {
-    let mut state = EngineState::new(42, 2, Configuration::default());
+    let mut state = RefEngine::new(42, 2, Configuration::default());
     let mut seed = 42u64;
     // warmup
     for _ in 0..2000 {
         let acts = fleet_actions(&state);
         if state.step_with_actions(&acts).unwrap() {
             seed += 1;
-            state = EngineState::new(seed, 2, Configuration::default());
+            state = RefEngine::new(seed, 2, Configuration::default());
         }
     }
     prof::reset();
@@ -109,7 +110,7 @@ fn profile_sim_sections() {
         steps += 1;
         if done {
             seed += 1;
-            state = EngineState::new(seed, 2, Configuration::default());
+            state = RefEngine::new(seed, 2, Configuration::default());
         }
     }
     let buckets = prof::snapshot();
@@ -170,7 +171,7 @@ fn python_string_seed_matches() {
 
 #[test]
 fn reset_seed_42_matches_reference_snapshot_shape() {
-    let state = EngineState::new(42, 2, Configuration::default());
+    let state = RefEngine::new(42, 2, Configuration::default());
     assert_eq!(state.step, 0);
     assert_close(state.angular_velocity, 0.04098566996144709);
     assert_eq!(state.planets.len(), 20);

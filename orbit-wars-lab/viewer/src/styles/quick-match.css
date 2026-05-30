@@ -531,6 +531,13 @@
   color: var(--text-muted);
 }
 
+.qm-result-error {
+  color: var(--error, #ff8a8a);
+  font-family: var(--font-mono);
+  cursor: help;
+  border-bottom: 1px dotted currentColor;
+}
+
 #qm-replay-inner {
   flex: 1 1 0;
   min-height: 0;

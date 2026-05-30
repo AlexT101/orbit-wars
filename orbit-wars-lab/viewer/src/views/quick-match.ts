@@ -747,13 +747,19 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     let totalTurns = 0;
     let totalDuration = 0;
     let crashedStatus: string | null = null;
+    let firstError: string | null = null;
     for (const m of matches) {
       if (m.winner) {
         winCounts.set(m.winner, (winCounts.get(m.winner) ?? 0) + 1);
       }
       totalTurns += m.turns;
       totalDuration += m.duration_s;
-      if (m.status !== "ok") crashedStatus = m.status;
+      if (m.status !== "ok") {
+        crashedStatus = m.status;
+        if (!firstError && (m as any).error) {
+          firstError = String((m as any).error);
+        }
+      }
     }
     const sorted = Array.from(winCounts.entries()).sort((a, b) => b[1] - a[1]);
     const headline =
@@ -764,7 +770,28 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
           : `${sorted[0][0]} wins ${sorted[0][1]}–${sorted[1]?.[1] ?? 0}`;
     const avgTurns = Math.round(totalTurns / matches.length);
     const durStr = totalDuration.toFixed(1);
-    const crashNote = crashedStatus ? ` · ⚠ ${crashedStatus}` : "";
+    // Show the first line of the error inline (rest is hover-only via the
+    // title attribute) so the meta row stays one-line but the underlying
+    // failure is visible at a glance.
+    const esc = (s: string) =>
+      s.replace(
+        /[&<>"']/g,
+        (c) =>
+          (
+            { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<
+              string,
+              string
+            >
+          )[c],
+      );
+    let crashNote = "";
+    if (crashedStatus) {
+      crashNote = ` · ⚠ ${crashedStatus}`;
+      if (firstError) {
+        const firstLine = firstError.split("\n", 1)[0].slice(0, 160);
+        crashNote += ` — <span class="qm-result-error" title="${esc(firstError)}">${esc(firstLine)}</span>`;
+      }
+    }
     const meta = `${matches.length} game${matches.length > 1 ? "s" : ""} · ${avgTurns} turns avg · ${durStr} s${crashNote}`;
     return { headline, meta };
   }
@@ -787,6 +814,7 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
         turns: m.turns,
         duration_s: m.duration_s,
         status: m.status,
+        error: m.error ?? null,
       }));
       matchState = {
         kind: "done",

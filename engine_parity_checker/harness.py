@@ -14,10 +14,10 @@ import sys
 import time
 from dataclasses import dataclass
 
-from parity.agents import AGENTS, AgentFn
-from parity.diff import Diff, diff_snapshots, format_diff
-from parity.engine import Engine, Snapshot
-from parity.kaggle_engine import KaggleEngine
+from engine_parity_checker.agents import AGENTS, AgentFn
+from engine_parity_checker.diff import Diff, diff_snapshots, format_diff
+from engine_parity_checker.engine import Engine, Snapshot
+from engine_parity_checker.kaggle_engine import KaggleEngine
 
 
 @dataclass
@@ -166,7 +166,7 @@ def _cli() -> int:
     if args.candidate == "kaggle":
         engine_b: Engine = KaggleEngine()
     elif args.candidate == "rust":
-        from parity.candidates.rust import RustEngine
+        from engine_parity_checker.candidates.rust import RustEngine
 
         engine_b = RustEngine()
     else:

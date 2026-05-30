@@ -29,8 +29,7 @@ rollout-based candidate selection, but `main.py` currently uses the faster
 | `src/entity_cache.rs` | Cached planet/comet positions and aim-cache data shared across turns |
 | `src/blockers.rs` | Obstacle-aware aiming and collision/blocking logic |
 | `src/helpers.rs` | Timeline simulation, aiming helpers, and shared utilities |
-| `src/sim_probe.rs` | Lightweight forward-simulation interface for rollout work |
-| `src/engine.rs` | Vendored Rust engine used for local simulation and timeline construction |
+| `src/engine.rs` | Shared sim data types, math helpers, and the `Simulator` forward simulator used for rollout/timeline work |
 | `src/tests` | Correctness tests plus ignored throughput/profiling benchmarks |
 
 The cache is built on the first turn from `initial_planets` and refreshed for

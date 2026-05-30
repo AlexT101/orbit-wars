@@ -7,6 +7,7 @@
 import { api, AgentInfo, Rating, RunSummary } from "../api";
 import { installHeaderNav } from "../components/header-nav";
 import { navigate } from "../router";
+import { escapeHtml } from "../utils/escape";
 
 let pollInterval: number | null = null;
 
@@ -33,18 +34,18 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
               <ul id="create-agent-list" class="create-agent-list"></ul>
             </div>
             <div class="create-config">
-              <label>
+              <div class="cfg-row">
                 <span>Shape</span>
                 <div class="seg-group" id="cfg-shape">
                   <button class="config-pill on" data-v="round-robin">round-robin</button>
                   <button class="config-pill" data-v="gauntlet">gauntlet</button>
                 </div>
-              </label>
-              <label id="cfg-challenger-wrap" hidden>
+              </div>
+              <div class="cfg-row" id="cfg-challenger-wrap" hidden>
                 <span>Challenger</span>
                 <select id="cfg-challenger" style="min-width: 200px;"></select>
-              </label>
-              <label>
+              </div>
+              <div class="cfg-row">
                 <span>Games per pair</span>
                 <div class="seg-group" id="cfg-games">
                   <button class="config-pill" data-v="1">1</button>
@@ -52,24 +53,25 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
                   <button class="config-pill" data-v="5">5</button>
                   <button class="config-pill" data-v="10">10</button>
                   <button class="config-pill" data-v="20">20</button>
+                  <button class="config-pill" data-v="50">50</button>
                 </div>
-              </label>
-              <label>
+              </div>
+              <div class="cfg-row">
                 <span>Mode</span>
                 <div class="seg-group" id="cfg-mode">
                   <button class="config-pill" data-v="ultrafast" title="Native Rust engine, no replays (tournament throughput)">ultrafast</button>
                   <button class="config-pill on" data-v="fast" title="In-process kaggle-environments">fast</button>
                   <button class="config-pill" data-v="faithful" title="Subprocess + HTTP (Kaggle protocol)">faithful</button>
                 </div>
-              </label>
-              <label>
+              </div>
+              <div class="cfg-row">
                 <span>Format</span>
                 <div class="seg-group" id="cfg-format">
                   <button class="config-pill on" data-v="2p">2p</button>
                   <button class="config-pill" data-v="4p">4p</button>
                 </div>
-              </label>
-              <label>
+              </div>
+              <div class="cfg-row">
                 <span>Seed</span>
                 <div class="create-seed-controls">
                   <div class="seg-group" id="cfg-seed-mode">
@@ -78,18 +80,18 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
                   </div>
                   <input id="cfg-seed" class="seed-input" type="number" value="42" inputmode="numeric" disabled>
                 </div>
-              </label>
-              <label title="ProcessPoolExecutor workers (fast/ultrafast modes). 1 = sequential. Higher = faster but uses more RAM.">
+              </div>
+              <div class="cfg-row" title="ProcessPoolExecutor workers (fast/ultrafast modes). 1 = sequential. Higher = faster but uses more RAM.">
                 <span>Parallel workers</span>
-                <select id="cfg-parallel">
-                  <option value="1">1 (sequential)</option>
-                  <option value="2">2</option>
-                  <option value="4">4</option>
-                  <option value="6">6</option>
-                  <option value="8" selected>8</option>
-                </select>
-              </label>
-              <label class="create-config-checkbox" title="Skip writing per-match replay JSON files (5-10MB each). Ratings are still computed.">
+                <div class="seg-group" id="cfg-parallel">
+                  <button class="config-pill" data-v="1">1</button>
+                  <button class="config-pill" data-v="2">2</button>
+                  <button class="config-pill" data-v="4">4</button>
+                  <button class="config-pill" data-v="6">6</button>
+                  <button class="config-pill on" data-v="8">8</button>
+                </div>
+              </div>
+              <label class="cfg-row create-config-checkbox" title="Skip writing per-match replay JSON files (5-10MB each). Ratings are still computed.">
                 <input id="cfg-save-replays" type="checkbox" checked>
                 <span>Save replays</span>
               </label>
@@ -193,6 +195,13 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     document.getElementById("create-count-num")!.textContent = String(selected.size);
     refreshChallengerDropdown();
     updateTotalMatches();
+    refreshStartButton();
+  }
+
+  function refreshStartButton() {
+    const btn = document.getElementById("create-start") as HTMLButtonElement | null;
+    if (!btn) return;
+    btn.disabled = selected.size < 2;
   }
 
   document.getElementById("create-search")!.addEventListener("input", (e) => {
@@ -224,10 +233,24 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
       group.querySelector<HTMLButtonElement>(".config-pill.on")?.dataset.v ?? "";
   }
   const getMode = wireSegGroup("cfg-mode");
+  function refreshSaveReplays() {
+    const saveReplaysEl = document.getElementById("cfg-save-replays") as HTMLInputElement;
+    const wrap = saveReplaysEl.closest(".create-config-checkbox") as HTMLElement | null;
+    const isUltrafast = getMode() === "ultrafast";
+    saveReplaysEl.disabled = isUltrafast;
+    if (isUltrafast) {
+      saveReplaysEl.checked = false;
+    }
+    if (wrap) wrap.style.opacity = isUltrafast ? "0.55" : "";
+  }
+  document.getElementById("cfg-mode")!
+    .querySelectorAll<HTMLButtonElement>(".config-pill")
+    .forEach((btn) => btn.addEventListener("click", () => setTimeout(refreshSaveReplays, 0)));
   const getFormat = wireSegGroup("cfg-format");
   const getShape = wireSegGroup("cfg-shape");
   const getGamesValue = wireSegGroup("cfg-games");
   const getSeedMode = wireSegGroup("cfg-seed-mode");
+  const getParallel = wireSegGroup("cfg-parallel");
 
   const challengerWrap = document.getElementById("cfg-challenger-wrap")!;
   const challengerSel = document.getElementById("cfg-challenger") as HTMLSelectElement;
@@ -349,10 +372,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     const format = getFormat();
     const useRandomSeed = getSeedMode() === "random";
     const seed = parseInt(seedInput.value, 10);
-    const parallel = parseInt(
-      (document.getElementById("cfg-parallel") as HTMLSelectElement).value,
-      10,
-    );
+    const parallel = parseInt(getParallel(), 10);
     const saveReplays = (document.getElementById("cfg-save-replays") as HTMLInputElement).checked;
     statusEl.hidden = false;
     statusEl.textContent = "Starting…";
@@ -390,6 +410,25 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   // =========================================================
   const listEl = document.getElementById("runs-list")!;
 
+  function formatRunId(id: string): string {
+    const m = id.match(/^\d{4}-(\d{2}-\d{2})-(.+)$/);
+    return m ? `${m[1]} (${m[2]})` : id;
+  }
+
+  function trimmedAgentName(agentId: string | null | undefined): string {
+    if (!agentId) return "";
+    const parts = agentId.split("/").filter(Boolean);
+    return parts[parts.length - 1] || agentId;
+  }
+
+  function tournamentName(r: RunSummary): string {
+    if (r.shape === "gauntlet") {
+      const challenger = trimmedAgentName(r.challenger_id);
+      return challenger ? `gauntlet - ${challenger}` : "gauntlet";
+    }
+    return "round robin";
+  }
+
   async function loadRuns() {
     const runs = await api.listRuns({ excludeQuickMatch: true });
     if (runs.length === 0) {
@@ -401,11 +440,12 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
         ${runs
           .map(
             (r: RunSummary) => `
-          <li data-run-id="${r.id}">
-            <span class="run-id">${r.id}</span>
-            <span class="run-meta">${r.mode} · ${r.format} · ${r.matches_done}/${r.total_matches}</span>
-            <span class="run-status status-${r.status}">${r.status}</span>
-            <button class="replay-delete" data-run-id="${r.id}" title="Delete tournament">×</button>
+          <li data-run-id="${escapeHtml(r.id)}">
+            <span class="run-name">${escapeHtml(tournamentName(r))}</span>
+            <span class="run-meta">${escapeHtml(r.mode)} &middot; ${escapeHtml(r.format)} &middot; ${r.matches_done}/${r.total_matches}</span>
+            <span class="run-id">${escapeHtml(formatRunId(r.id))}</span>
+            <span class="run-status status-${r.status}">${escapeHtml(r.status)}</span>
+            <button class="replay-delete" data-run-id="${escapeHtml(r.id)}" title="Delete tournament">&times;</button>
           </li>
         `,
           )
@@ -435,10 +475,13 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     });
   }
 
-  await loadAgents();
-  await loadRuns();
   onShapeChange(); // initial: hide challenger + compute totals
   refreshSeedInput();
+  refreshSaveReplays();
+  refreshStartButton();
+
+  await loadAgents();
+  await loadRuns();
 
   if (pollInterval !== null) window.clearInterval(pollInterval);
   pollInterval = window.setInterval(() => {

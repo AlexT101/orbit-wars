@@ -1,7 +1,29 @@
-import { api, Rating } from "../api";
+import { api, AgentInfo, AgentRuntime, Rating } from "../api";
 import { navigate } from "../router";
 
+function renderAgentCell(agentId: string, agentsById: Map<string, AgentInfo>): string {
+  const agent = agentsById.get(agentId);
+  if (!agent) return `<span class="agent-name">${agentId}</span>`;
+  return `<span class="agent-name">${agent.name}</span> <span class="agent-bucket">(${agent.bucket})</span>`;
+}
+
+async function getAgentsById(): Promise<Map<string, AgentInfo>> {
+  const agents = await api.listAgents().catch(() => [] as AgentInfo[]);
+  return new Map(agents.map((a) => [a.id, a]));
+}
+
 export type RatingsFormat = "2p" | "4p" | "all";
+
+function fmtMs(avgMs: number | undefined): string {
+  return avgMs !== undefined && Number.isFinite(avgMs) && avgMs > 0
+    ? avgMs.toFixed(1)
+    : "&mdash;";
+}
+
+async function getRuntimeByAgent(): Promise<Map<string, AgentRuntime>> {
+  const runtimes = await api.listRuntimes().catch(() => [] as AgentRuntime[]);
+  return new Map(runtimes.map((r) => [r.agent_id, r]));
+}
 
 export async function mountRatingsTable(
   el: HTMLElement,
@@ -21,13 +43,17 @@ async function renderSingle(
   format: "2p" | "4p",
   requestId: string,
 ): Promise<void> {
-  const ratings = await api.getRatings(format);
+  const [ratings, runtimes, agentsById] = await Promise.all([
+    api.getRatings(format),
+    getRuntimeByAgent(),
+    getAgentsById(),
+  ]);
   if (el.dataset.requestId !== requestId) return;
   el.innerHTML = `
     <table class="ratings">
       <thead>
         <tr>
-          <th>#</th><th>Agent</th><th>μ</th><th>σ</th><th>N</th>
+          <th>#</th><th>Agent</th><th>Elo</th><th>&sigma;</th><th>N</th><th>ms/step</th>
         </tr>
       </thead>
       <tbody>
@@ -36,10 +62,11 @@ async function renderSingle(
             (r: Rating) => `
           <tr data-agent-id="${r.agent_id}">
             <td>${r.rank}</td>
-            <td class="agent-id">${r.agent_id}</td>
-            <td>${r.mu.toFixed(0)}</td>
+            <td class="agent-id">${renderAgentCell(r.agent_id, agentsById)}</td>
+            <td class="rating-elo">${r.mu.toFixed(0)}</td>
             <td>${r.sigma.toFixed(0)}</td>
             <td>${r.games_played}</td>
+            <td>${fmtMs(runtimes.get(r.agent_id)?.avg_ms)}</td>
           </tr>
         `,
           )
@@ -51,9 +78,11 @@ async function renderSingle(
 }
 
 async function renderCombined(el: HTMLElement, requestId: string): Promise<void> {
-  const [r2p, r4p] = await Promise.all([
+  const [r2p, r4p, runtimes, agentsById] = await Promise.all([
     api.getRatings("2p"),
     api.getRatings("4p"),
+    getRuntimeByAgent(),
+    getAgentsById(),
   ]);
   if (el.dataset.requestId !== requestId) return;
 
@@ -65,6 +94,7 @@ async function renderCombined(el: HTMLElement, requestId: string): Promise<void>
     mu4p?: number;
     n4p?: number;
     rank4p?: number;
+    avgMs?: number;
     avgRank: number;
   }
 
@@ -96,13 +126,14 @@ async function renderCombined(el: HTMLElement, requestId: string): Promise<void>
       (x): x is number => x !== undefined,
     );
     r.avgRank = ranks.length > 0 ? ranks.reduce((s, v) => s + v, 0) / ranks.length : Infinity;
+    r.avgMs = runtimes.get(r.agentId)?.avg_ms;
     return r;
   });
   rows.sort((a, b) => a.avgRank - b.avgRank);
 
-  const fmt = (v: number | undefined) => (v === undefined ? "—" : v.toFixed(0));
+  const fmt = (v: number | undefined) => (v === undefined ? "&mdash;" : v.toFixed(0));
   const fmtAvg = (v: number) =>
-    Number.isFinite(v) ? (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1)) : "—";
+    Number.isFinite(v) ? (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1)) : "&mdash;";
 
   el.innerHTML = `
     <table class="ratings ratings-combined">
@@ -112,12 +143,13 @@ async function renderCombined(el: HTMLElement, requestId: string): Promise<void>
           <th rowspan="2">Agent</th>
           <th colspan="2" class="group-2p">2p</th>
           <th colspan="2" class="group-4p">4p</th>
-          <th rowspan="2" title="Średnia pozycji z obu formatów (niższa = lepiej)">avg rank</th>
+          <th rowspan="2">ms</th>
+          <th rowspan="2" title="Average rank across both formats (lower is better)">avg rank</th>
         </tr>
         <tr>
-          <th class="group-2p">μ</th>
+          <th class="group-2p">Elo</th>
           <th class="group-2p">N</th>
-          <th class="group-4p">μ</th>
+          <th class="group-4p">Elo</th>
           <th class="group-4p">N</th>
         </tr>
       </thead>
@@ -127,11 +159,12 @@ async function renderCombined(el: HTMLElement, requestId: string): Promise<void>
             (r, i) => `
           <tr data-agent-id="${r.agentId}">
             <td>${i + 1}</td>
-            <td class="agent-id">${r.agentId}</td>
-            <td>${fmt(r.mu2p)}</td>
-            <td>${r.n2p ?? "—"}</td>
-            <td>${fmt(r.mu4p)}</td>
-            <td>${r.n4p ?? "—"}</td>
+            <td class="agent-id">${renderAgentCell(r.agentId, agentsById)}</td>
+            <td class="rating-elo">${fmt(r.mu2p)}</td>
+            <td>${r.n2p ?? "&mdash;"}</td>
+            <td class="rating-elo">${fmt(r.mu4p)}</td>
+            <td>${r.n4p ?? "&mdash;"}</td>
+            <td>${fmtMs(r.avgMs)}</td>
             <td>${fmtAvg(r.avgRank)}</td>
           </tr>
         `,

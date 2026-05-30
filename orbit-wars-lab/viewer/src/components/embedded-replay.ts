@@ -48,6 +48,25 @@ type ReplayListEntry = ReplayListEntryLocal | ReplayListEntryKaggle;
 
 const IDLE_LIST_LIMIT = 100;
 
+function shortAgentName(raw: string): string {
+  if (!raw) return raw;
+  const parts = raw.split("/").filter(Boolean);
+  return parts[parts.length - 1] || raw;
+}
+
+function renderAgentList(agentIds: string[], winnerRaw: string | null | undefined): string {
+  return agentIds
+    .map((id) => {
+      const short = escapeHtml(shortAgentName(id));
+      let cls = "replay-name";
+      if (winnerRaw) {
+        cls += id === winnerRaw ? " replay-name-winner" : " replay-name-loser";
+      }
+      return `<span class="${cls}">${short}</span>`;
+    })
+    .join(`<span class="replay-vs">vs</span>`);
+}
+
 export function mountEmbeddedReplay(root: HTMLElement): EmbeddedReplayHandle {
   let currentMatches: EmbeddedReplayMatch[] = [];
   let currentGameIdx = 0;
@@ -85,8 +104,8 @@ export function mountEmbeddedReplay(root: HTMLElement): EmbeddedReplayHandle {
       .slice(0, IDLE_LIST_LIMIT)
       .map((r, idx) => {
         if (r.source === "local") {
-          const agents = r.agent_ids.map(escapeHtml).join(" vs ");
-          const winner = r.winner ? escapeHtml(r.winner) : "draw";
+          const agents = renderAgentList(r.agent_ids, r.winner);
+          const winner = r.winner ? escapeHtml(shortAgentName(r.winner)) : "draw";
           return `
             <div class="replay-idle-item" data-idx="${idx}" data-kind="local"
                  data-run-id="${escapeHtml(r.run_id)}" data-match-id="${escapeHtml(r.match_id)}">
@@ -101,13 +120,13 @@ export function mountEmbeddedReplay(root: HTMLElement): EmbeddedReplayHandle {
             (r.team_names && r.team_names.length > 0
               ? r.team_names
               : (r.agents || []).map((a) => a.name).filter(Boolean) as string[]);
-          const agents = names.length > 0 ? names.map(escapeHtml).join(" vs ") : "?";
+          const agents = names.length > 0 ? renderAgentList(names, r.winner) : "?";
           return `
             <div class="replay-idle-item" data-idx="${idx}" data-kind="kaggle"
                  data-submission-id="${r.submission_id}" data-episode-id="${r.episode_id}">
               <span class="replay-source kaggle">kaggle</span>
               <span class="replay-idle-title">${agents}</span>
-              <span class="replay-idle-winner">${r.winner ? escapeHtml(r.winner) : ""}</span>
+              <span class="replay-idle-winner">${r.winner ? escapeHtml(shortAgentName(r.winner)) : ""}</span>
               <span class="replay-idle-meta">ep ${r.episode_id}</span>
             </div>
           `;

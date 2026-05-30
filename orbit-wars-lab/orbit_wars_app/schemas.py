@@ -77,6 +77,11 @@ class MatchResult(BaseModel):
     status: MatchStatus = "ok"
     seed: int = 0
     replay_path: str = ""
+    # Populated when a match ends in a non-ok status (crashed / timeout /
+    # invalid_action / agent_failed_to_start). Sourced from
+    # `MatchOutcome.replay["error"]` in fast/faithful/ultrafast modes, or
+    # synthesized from the worker exception if the worker itself crashed.
+    error: Optional[str] = None
 
 
 class RunSummary(BaseModel):
@@ -89,6 +94,8 @@ class RunSummary(BaseModel):
     total_matches: int = 0
     matches_done: int = 0
     is_quick_match: bool = False  # Propagated from TournamentConfig, serialized into run.json
+    shape: TournamentShape = "round-robin"
+    challenger_id: Optional[str] = None
 
 
 class TournamentConfig(BaseModel):

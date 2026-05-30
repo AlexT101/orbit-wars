@@ -8,7 +8,6 @@ mod entity_cache;
 mod helpers;
 mod hellburner;
 mod rollout;
-mod sim_probe;
 mod world;
 
 #[cfg(test)]
@@ -18,9 +17,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
-use crate::constants::COMET_SPAWN_STEPS;
-use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
+use crate::constants::{COMET_SPAWN_STEPS, HORIZON, TOTAL_OVERAGE_TIME};
+use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 use crate::entity_cache::EntityCache;
+use crate::helpers::ArrivalLedger;
 use crate::rollout::pick_plan_by_rollout;
 use crate::world::WorldState;
 
@@ -33,6 +33,7 @@ struct Observation {
     comets: Vec<CometGroup>,
     comet_planet_ids: Vec<i64>,
     angular_velocity: f64,
+    remaining_overage_time: f64,
 }
 
 fn get_item<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -125,6 +126,10 @@ impl Observation {
         let comet_planet_ids: Vec<i64> =
             get_item(obs, "comet_planet_ids")?.extract()?;
         let angular_velocity: f64 = get_item(obs, "angular_velocity")?.extract()?;
+        let remaining_overage_time: f64 = match obs.get_item("remainingOverageTime")? {
+            Some(v) => v.extract().unwrap_or(TOTAL_OVERAGE_TIME),
+            None => TOTAL_OVERAGE_TIME,
+        };
         Ok(Self {
             player,
             planets,
@@ -133,6 +138,7 @@ impl Observation {
             comets,
             comet_planet_ids,
             angular_velocity,
+            remaining_overage_time,
         })
     }
 }
@@ -166,7 +172,7 @@ impl Bot {
         self.refresh_cache(&obs);
         let cache = self.cache.as_ref().expect("entity cache populated above");
 
-        let world = WorldState::build(
+        let mut world = WorldState::build(
             obs.player,
             self.current_turn,
             obs.planets,
@@ -177,6 +183,7 @@ impl Bot {
             obs.angular_velocity,
             cache,
         );
+        world.remaining_overage_time = obs.remaining_overage_time;
 
         let moves = crate::hellburner::plan(&world);
         self.current_turn += 1;
@@ -192,13 +199,10 @@ impl Bot {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
 
-        // Construct the engine state once and reuse it for both the candidate
-        // WorldState and the rollout seed — avoids parsing/cloning the
-        // observation vecs a second time.
-        // NOTE: this recycles IDs of destroyed fleets — Kaggle's engine issues
-        // monotonically increasing IDs across the whole game, but we only see
-        // currently-visible fleets. Safe today because no consumer keys on
-        // fleet ID across turns; revisit if any cache/hash ever does.
+        // Build engine state once; reused for candidate WorldState and rollout seed.
+        // NOTE: next_fleet_id may recycle destroyed fleets' IDs since we only
+        // see currently-visible fleets. Safe while no consumer keys on fleet
+        // ID across turns; revisit if any cache/hash ever does.
         let next_fleet_id = obs.fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
         let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
         let player = obs.player;
@@ -212,15 +216,21 @@ impl Bot {
             obs.comet_planet_ids,
             obs.comets,
             num_players,
-            Configuration::default(),
         );
 
-        // Plan candidates inside a block so the WorldState's immutable borrow
-        // on the cache ends before the rollout reborrows it mutably.
-        let candidates = {
+        // The turn-0 arrival ledger is player-agnostic, so build it once here and
+        // reuse it both for candidate generation and for the opponent turn-0
+        // modelling inside the rollout — saving a redundant HORIZON-turn walk.
+        // Built in a block so the WorldState's immutable borrow on the cache
+        // ends before the rollout reborrows it mutably.
+        let (candidates, initial_ledger) = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
-            let world = WorldState::from_engine(player, &initial_state, cache_ref);
-            crate::hellburner::search_candidates(&world)
+            let initial_sim = Simulator::new(&initial_state);
+            let ledger = ArrivalLedger::build(&initial_sim, HORIZON, cache_ref);
+            let mut world =
+                WorldState::from_simulator_with_ledger(player, &initial_sim, &ledger, cache_ref);
+            world.remaining_overage_time = obs.remaining_overage_time;
+            (crate::hellburner::search_candidates(&world), ledger)
         };
 
         let cache_mut = self.cache.as_mut().expect("entity cache populated above");
@@ -231,6 +241,8 @@ impl Bot {
             crate::hellburner::plan,
             crate::hellburner::search_candidates,
             cache_mut,
+            obs.remaining_overage_time,
+            Some(&initial_ledger),
         );
         self.current_turn += 1;
         Ok(moves)
@@ -256,9 +268,8 @@ impl Bot {
         }
         if let Some(cache) = &mut self.cache {
             cache.set_current_turn(self.current_turn);
-            // Drop the prior bot turn's aim entries. Slots from rollout
-            // forward-sim of earlier turns are released the same way as they
-            // age past `current_turn`.
+            // Drop the prior turn's aim entries; rollout forward-sim slots
+            // age out the same way past `current_turn`.
             cache.clear_aim_cache_slot(self.current_turn - 1);
         }
     }

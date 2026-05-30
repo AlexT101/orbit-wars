@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from kaggle_environments.envs.orbit_wars.orbit_wars import interpreter
 
-from parity.engine import JointAction, PlayerObs, Snapshot
+from engine_parity_checker.engine import JointAction, PlayerObs, Snapshot
 
 
 DEFAULT_CONFIG = {

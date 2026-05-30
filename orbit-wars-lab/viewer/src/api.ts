@@ -35,6 +35,8 @@ export interface RunSummary {
   total_matches: number;
   matches_done: number;
   is_quick_match?: boolean;
+  shape?: "round-robin" | "gauntlet";
+  challenger_id?: string | null;
 }
 
 export interface KaggleSubmission {
@@ -83,6 +85,9 @@ export interface MatchResult {
   status: string;
   seed: number;
   replay_path: string;
+  // Populated when status != "ok"; surfaced as a tooltip + short hint in the
+  // result card so a failed match is debuggable from the UI.
+  error?: string | null;
 }
 
 async function j<T>(path: string, opts?: RequestInit): Promise<T> {

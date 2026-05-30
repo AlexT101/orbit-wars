@@ -139,7 +139,8 @@
   padding: 14px;
 }
 
-.create-config > label {
+.create-config > label,
+.create-config > .cfg-row {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -207,17 +208,21 @@
 
 /* `hidden` attribute must beat the .create-config > label {display: flex}
    rule — otherwise challenger dropdown shows even in round-robin mode. */
-.create-config > label[hidden] {
+.create-config > label[hidden],
+.create-config > .cfg-row[hidden] {
   display: none;
 }
 
-.create-config > label.create-config-checkbox {
+.create-config > label.create-config-checkbox,
+.create-config > .cfg-row.create-config-checkbox {
   flex-direction: row;
   align-items: center;
   gap: 8px;
+  margin-top: 4px;
 }
 
-.create-config > label.create-config-checkbox input {
+.create-config > label.create-config-checkbox input,
+.create-config > .cfg-row.create-config-checkbox input {
   width: auto;
   padding: 0;
   margin: 0;

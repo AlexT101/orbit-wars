@@ -229,6 +229,11 @@ code {
   flex: 1 1 0;
   width: 100%;
   min-height: 0;
+  /* Side-by-side layout with the debug panel needs this so the canvas
+     can shrink below its intrinsic width when the panel claims its
+     fixed width on the right. Without it, flex-row would let the canvas
+     keep its full width and push the panel off-screen. */
+  min-width: 0;
 }
 
 .renderer-container canvas {
@@ -1137,4 +1142,121 @@ code {
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text-primary);
+}
+
+/* ============================================================
+   Agent debug panel — floats over the top-right of the canvas wrapper.
+   Position:absolute so it doesn't disturb canvas sizing.
+   ============================================================ */
+/* Side-by-side layout for canvas + debug panel. Flex-row sibling of the
+   header/settings so the playback bar (sibling of `.main-layout`)
+   continues to sit on its own row below. */
+.main-layout {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 0;
+  width: 100%;
+  min-height: 0;
+  gap: 8px;
+  align-items: stretch;
+  box-sizing: border-box;
+}
+
+.debug-panel-container {
+  /* Fixed-width sibling of the canvas-wrapper inside `.main-layout`.
+     Width is wide enough for apollo2's per-move rows without wrapping
+     yet narrow enough that the canvas keeps a comfortable square. */
+  flex: 0 0 320px;
+  max-width: 50%;
+  min-height: 0;
+  background-color: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+@media (max-width: 720px) {
+  /* Narrow viewports (sidebar embed, mobile) — stack the panel below
+     the canvas so the play area isn't squeezed into a sliver. */
+  .main-layout {
+    flex-direction: column;
+  }
+  .debug-panel-container {
+    flex: 0 0 auto;
+    max-width: 100%;
+    max-height: 40%;
+  }
+}
+
+.debug-panel-header {
+  background-color: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.debug-panel {
+  padding: 6px 10px;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.debug-panel > div {
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-left: 2px solid var(--border-strong);
+  padding-left: 6px;
+  margin-bottom: 2px;
+}
+
+.debug-panel-empty {
+  color: var(--text-dim) !important;
+  font-style: italic;
+  border-left: none !important;
+  padding-left: 0 !important;
+  text-align: center;
+}
+
+/* Inline color swatch inside per-player debug pills. */
+.player-pill-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+/* Per-player toggle pills live inside the debug panel header so they
+   stay visible in both embedded (Quick Match iframe) and standalone
+   replay views — i.e. always reachable when the replay has debug data. */
+.debug-panel-pills {
+  /* `flex: 0 0 auto` so the pill row never steals scroll height from
+     `.debug-panel` even when wrapping over multiple lines. */
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px 6px;
+  background-color: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.debug-panel-pills .settings-pill {
+  font-size: 10px;
+  padding: 2px 8px;
 }

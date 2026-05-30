@@ -3,12 +3,13 @@
 //! independently re-simulate the fleet trajectory and the per-turn swept-pair
 //! collision against every obstacle, and require the two to agree.
 
+use super::reference_engine::RefEngine;
 use crate::blockers::{aim_with_prediction, bucket_to_speed, lead_target, speed_bucket};
 use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
-use crate::engine::{fleet_speed, swept_pair_hit, Configuration, EngineState, MoveAction};
+use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
 use crate::entity_cache::{EntityCache, EntityKind};
 
-fn cache_for(state: &EngineState) -> EntityCache {
+fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(
         &state.initial_planets,
         &state.comets,
@@ -157,6 +158,78 @@ fn reaches_target_with_engine_speed(
     false
 }
 
+/// Diagnostic: dump geometry for the specific failing case.
+#[test]
+#[ignore]
+fn dump_failing_case_geometry() {
+    use crate::blockers::{bucket_to_speed, build_blocker_table, speed_bucket};
+    let state = RefEngine::new(100, 2, Configuration::default());
+    let cache = cache_for(&state);
+    let shooter = 8i64;
+    let blocker = 12i64;
+    let ships = 500i64;
+    let v_quant = bucket_to_speed(speed_bucket(ships));
+    println!("v_quant = {v_quant}");
+    let [lx, ly] = cache.position(shooter, 0).unwrap();
+    let shooter_r = cache.get(shooter).map(|e| e.radius).unwrap_or(0.0);
+    let launch_offset = shooter_r + crate::constants::LAUNCH_CLEARANCE;
+    println!("shooter pos = ({lx:.4}, {ly:.4}), launch_offset = {launch_offset:.4}");
+    let blocker_r = cache.get(blocker).map(|e| e.radius).unwrap_or(0.0);
+    println!("blocker radius = {blocker_r}");
+
+    let t = 5i64;
+    let [q0x, q0y] = cache.position(blocker, t - 1).unwrap();
+    let [q1x, q1y] = cache.position(blocker, t).unwrap();
+    println!("blocker turn {t}: Q(s=0)=({q0x:.4},{q0y:.4}) Q(s=1)=({q1x:.4},{q1y:.4})");
+    let dqx = q1x - q0x;
+    let dqy = q1y - q0y;
+    let dq_speed = (dqx * dqx + dqy * dqy).sqrt();
+    println!("blocker chord speed = {dq_speed:.6}");
+    let d0 = launch_offset + (t as f64 - 1.0) * v_quant;
+    println!("d0 (fleet ring at s=0 of turn {t}) = {d0:.4}");
+    let mut min_diff = f64::INFINITY;
+    let mut min_s = 0.0f64;
+    for i in 0..=100 {
+        let s = i as f64 / 100.0;
+        let qx = q0x + s * dqx;
+        let qy = q0y + s * dqy;
+        let k = ((qx - lx).powi(2) + (qy - ly).powi(2)).sqrt();
+        let d = d0 + s * v_quant;
+        let diff = d - k;
+        if diff < min_diff {
+            min_diff = diff;
+            min_s = s;
+        }
+    }
+    println!("min D-K = {min_diff:.6} at s = {min_s:.2} (blocker_r = {blocker_r})");
+    for i in 0..=20 {
+        let s = i as f64 / 20.0;
+        let qx = q0x + s * dqx;
+        let qy = q0y + s * dqy;
+        let k = ((qx - lx).powi(2) + (qy - ly).powi(2)).sqrt();
+        let d = d0 + s * v_quant;
+        let diff = d - k;
+        println!(
+            "  s={s:.2}: K={k:.4} D={d:.4} D-K={diff:.6} {}",
+            if diff.abs() <= blocker_r { "COLLISION" } else { "" }
+        );
+    }
+
+    let table = build_blocker_table(&cache, shooter, 0, v_quant);
+    let angle = -1.585114f64;
+    println!("\nTable entries for blocker {blocker} (turn 5 range s in [4,5]):");
+    for e in &table.entries {
+        if e.blocker_id == blocker && e.flight_t >= 3.9 && e.flight_t <= 5.1 {
+            let aim_w = e.bearing + (angle - e.bearing).rem_euclid(2.0 * std::f64::consts::PI);
+            let covers = aim_w >= e.aim_min && aim_w <= e.aim_max;
+            println!(
+                "  flight_t={:.3} bearing={:.4} half_arc={:.4} [{:.4},{:.4}] covers_angle={}",
+                e.flight_t, e.bearing, e.half_arc, e.aim_min, e.aim_max, covers
+            );
+        }
+    }
+}
+
 /// For every (shooter, target, ships) case where the aimer says "path clear",
 /// re-simulate the fleet and require that no non-target obstacle's swept
 /// per-turn pair test fires before the fleet reaches the target.
@@ -171,7 +244,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
 
     let mut clear_cases = 0usize;
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -237,7 +310,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
     let mut missing = Vec::new();
 
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -293,7 +366,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
 /// happens to miss the sun-blocking geometry on these seeds.
 #[test]
 fn sun_blocks_chords_passing_through_center() {
-    let state = EngineState::new(42, 2, Configuration::default());
+    let state = RefEngine::new(42, 2, Configuration::default());
     let cache = cache_for(&state);
 
     let statics: Vec<(i64, f64, f64, f64)> = cache
@@ -358,7 +431,7 @@ fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
 
     let mut mismatches = Vec::new();
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -436,7 +509,7 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
 
     let mut misses = Vec::new();
     for seed in seeds {
-        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut state = RefEngine::new(seed, 2, Configuration::default());
         let mut cache = cache_for(&state);
 
         for &step in &future_steps {
@@ -522,7 +595,7 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
 
     let mut misses = Vec::new();
     for seed in seeds {
-        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut state = RefEngine::new(seed, 2, Configuration::default());
         let mut cache = cache_for(&state);
 
         for &step in &future_steps {
