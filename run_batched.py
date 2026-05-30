@@ -82,7 +82,7 @@ def run_one_match(bot_paths, seed, match_idx):
     from engine_parity_checker.candidates.rust import RustEngine
 
     agents = [
-        load_agent(path, f"bot_{i}_match_{match_idx}_main")
+        load_agent(path, f"bot_{i}_main")
         for i, path in enumerate(bot_paths)
     ]
     engine = RustEngine()
@@ -143,7 +143,11 @@ def main():
     sum_steps = 0
     sum_avg_ms = [0.0, 0.0]
 
-    print(f"Running {n} matches: {bot_names[0]} vs {bot_names[1]} (seeds {args.start_seed}..{args.start_seed + n - 1})")
+    print(
+        f"Running {n} matches: {bot_names[0]} vs {bot_names[1]} "
+        f"(seeds {args.start_seed}..{args.start_seed + n - 1})",
+        flush=True,
+    )
     for k in range(n):
         seed = args.start_seed + k
         rewards, steps, avg_ms = run_one_match(bot_paths, seed, k)
@@ -164,7 +168,8 @@ def main():
         sum_avg_ms[1] += avg_ms[1]
         print(
             f"  seed={seed:>6} steps={steps:>3} r=({r0},{r1}) -> {winner}  "
-            f"ms=({avg_ms[0]:.2f},{avg_ms[1]:.2f})"
+            f"ms=({avg_ms[0]:.2f},{avg_ms[1]:.2f})",
+            flush=True,
         )
 
     decided = wins[0] + wins[1]

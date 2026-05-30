@@ -81,6 +81,16 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
                   <input id="cfg-seed" class="seed-input" type="number" value="42" inputmode="numeric" disabled>
                 </div>
               </div>
+              <div class="cfg-row" title="ProcessPoolExecutor workers (fast/ultrafast modes). 1 = sequential. Higher = faster but uses more RAM.">
+                <span>Parallel workers</span>
+                <div class="seg-group" id="cfg-parallel">
+                  <button class="config-pill" data-v="1">1</button>
+                  <button class="config-pill" data-v="2">2</button>
+                  <button class="config-pill" data-v="4">4</button>
+                  <button class="config-pill" data-v="6">6</button>
+                  <button class="config-pill on" data-v="8">8</button>
+                </div>
+              </div>
               <label class="cfg-row create-config-checkbox" title="Skip writing per-match replay JSON files (5-10MB each). Ratings are still computed.">
                 <input id="cfg-save-replays" type="checkbox" checked>
                 <span>Save replays</span>
@@ -247,6 +257,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   const getShape = wireSegGroup("cfg-shape");
   const getGamesValue = wireSegGroup("cfg-games");
   const getSeedMode = wireSegGroup("cfg-seed-mode");
+  const getParallel = wireSegGroup("cfg-parallel");
 
   const challengerWrap = document.getElementById("cfg-challenger-wrap")!;
   const challengerSel = document.getElementById("cfg-challenger") as HTMLSelectElement;
@@ -369,6 +380,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     const format = getFormat();
     const useRandomSeed = getSeedMode() === "random";
     const seed = parseInt(seedInput.value, 10);
+    const parallel = parseInt(getParallel(), 10);
     const saveReplays = (document.getElementById("cfg-save-replays") as HTMLInputElement).checked;
     const startBtn = document.getElementById("create-start") as HTMLButtonElement;
     // Feedback via the button label (no layout shift). Interactions unchanged.
@@ -473,103 +485,13 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     });
   }
 
-  // =========================================================
-  // Scheduler: live "Active now" panel (queue + running matches)
-  // =========================================================
-  const schedPanel = document.getElementById("scheduler-panel")!;
-  const concEl = document.getElementById("sched-concurrency")!;
-  // Tournaments the user clicked Stop on — kept visible as "stopping" until the
-  // backend finishes tearing them down (worker-kill latency), so the row never
-  // appears to linger as "running". Survives re-renders (closure-scoped).
-  const stoppingIds = new Set<string>();
-
-  async function loadScheduler() {
-    let s: SchedulerStatus;
-    try {
-      s = await api.getScheduler();
-    } catch {
-      return; // transient — keep last render
-    }
-    concEl.textContent = `${s.concurrency} worker${s.concurrency === 1 ? "" : "s"} · ${s.running_count} running · ${s.queued_total} queued`;
-    // Drop stopping-markers for tournaments the backend has fully torn down
-    // (no longer reported by the scheduler) — they now show in Recent.
-    for (const id of [...stoppingIds]) {
-      if (!s.tournaments.some((t) => t.id === id)) stoppingIds.delete(id);
-    }
-    const active = s.tournaments.filter(
-      (t) => t.status === "running" || t.status === "queued" || stoppingIds.has(t.id),
-    );
-    if (active.length === 0) {
-      schedPanel.innerHTML = `<div class="loading">Idle — no tournaments queued or running.</div>`;
-      return;
-    }
-    schedPanel.innerHTML = `
-      <ul class="runs">
-        ${active
-          .map((t) => {
-            const running = s.running.filter((m) => m.run_id === t.id);
-            const runningStr = running
-              .map(
-                (m) =>
-                  `<span class="sched-match" title="${escapeHtml(m.agent_ids.join(" vs "))}">${escapeHtml(m.match_id)} (${m.elapsed_s.toFixed(0)}s)</span>`,
-              )
-              .join(" ");
-            let name = "round robin";
-            if (t.shape === "gauntlet") {
-              const c = trimmedAgentName(t.challenger_id);
-              name = c ? `gauntlet - ${c}` : "gauntlet";
-            }
-            const stopping = stoppingIds.has(t.id);
-            const status = stopping ? "stopping" : t.status;
-            return `
-          <li data-run-id="${escapeHtml(t.id)}">
-            <span class="run-name">${escapeHtml(name)}</span>
-            <span class="run-meta">${escapeHtml(t.mode)} &middot; ${escapeHtml(t.format)} &middot; ${t.matches_done}/${t.total_matches} · ${t.queued} queued ${runningStr}</span>
-            <span class="run-id">${escapeHtml(formatRunId(t.id))}</span>
-            <span class="run-status status-${status}">${escapeHtml(status)}</span>
-            <button class="replay-delete" ${stopping ? "disabled" : ""} data-run-id="${escapeHtml(t.id)}" title="Stop tournament">&times;</button>
-          </li>`;
-          })
-          .join("")}
-      </ul>`;
-    schedPanel.querySelectorAll<HTMLLIElement>("li").forEach((li) => {
-      li.addEventListener("click", (ev) => {
-        if ((ev.target as HTMLElement).closest(".replay-delete")) return;
-        const runId = li.getAttribute("data-run-id");
-        if (runId) navigate({ view: "tournament-detail", runId });
-      });
-    });
-    schedPanel.querySelectorAll<HTMLButtonElement>(".replay-delete").forEach((btn) => {
-      btn.addEventListener("click", async (ev) => {
-        ev.stopPropagation();
-        const runId = btn.dataset.runId!;
-        // Optimistically mark stopping so the row flips immediately and stays
-        // put (as "stopping") until the backend tears it down.
-        stoppingIds.add(runId);
-        btn.disabled = true;
-        const statusCell = btn.closest("li")?.querySelector(".run-status");
-        if (statusCell) {
-          statusCell.textContent = "stopping";
-          statusCell.className = "run-status status-stopping";
-        }
-        try {
-          await api.stopTournament(runId);
-        } catch (e) {
-          stoppingIds.delete(runId);
-          alert(`Stop failed: ${(e as Error).message}`);
-        }
-        await Promise.all([loadScheduler(), loadRuns()]);
-      });
-    });
-  }
-
   onShapeChange(); // initial: hide challenger + compute totals
   refreshSeedInput();
   refreshSaveReplays();
   refreshStartButton();
 
   await loadAgents();
-  await Promise.all([loadRuns(), loadScheduler()]);
+  await loadRuns();
 
   if (pollInterval !== null) window.clearInterval(pollInterval);
   pollInterval = window.setInterval(() => {

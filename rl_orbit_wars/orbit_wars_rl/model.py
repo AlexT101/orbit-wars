@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import torch
 from torch import nn
 
@@ -89,7 +91,13 @@ class EntityTransformerPolicy(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=layers)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"enable_nested_tensor is True, but self\.use_nested_tensor is False.*",
+                category=UserWarning,
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=layers)
         self.final_norm = nn.LayerNorm(hidden)
         pair_features = hidden * 4 + 4 + GLOBAL_FEATURES
         self.pair_head = nn.Sequential(

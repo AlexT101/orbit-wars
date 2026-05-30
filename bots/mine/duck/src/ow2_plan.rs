@@ -668,18 +668,11 @@ fn plan_for_time(
             Some(p) => p,
             None => continue,
         };
-        // If pathing succeeds at `send` ships, use that angle (it leads the
-        // target for the faster fleet). If it fails, the `angle_at_min`
-        // angle is stale — it was the lead angle for `min_s` at a different
-        // (slower) speed, so reusing it with `send` ships shoots at where
-        // the target was predicted to be at `arr_at_min`, not where the
-        // faster fleet will actually meet it. Fall back to launching
-        // `min_s` ships with their verified angle instead.
-        let (angle, ships_to_send) = match cached_dir_to_hit(mp, target, send, state, 0) {
-            Some(r) => (r.angle, send),
-            None => (f.angle_at_min, f.min_s),
+        let angle = match cached_dir_to_hit(mp, target, send, state, 0) {
+            Some(r) => r.angle,
+            None => f.angle_at_min,
         };
-        dispatches.push(PlanEntry { from_id: f.from_id, from_idx: f.from_idx, ships: ships_to_send, angle });
+        dispatches.push(PlanEntry { from_id: f.from_id, from_idx: f.from_idx, ships: send, angle });
     }
     Some((dispatches, total))
 }

@@ -156,6 +156,35 @@ impl EntityCache {
         self.entities.get(&id)
     }
 
+    /// Cached blocker table for `(shooter_id, launch_turn_offset, ships)`.
+    /// Keyed internally by the *absolute* launch turn so the same entry is
+    /// reused across `set_current_turn` calls during rollout forward-sim,
+    /// and by the *speed bucket* so different `ships` counts that round to
+    /// the same fleet speed share one table.
+    pub fn blocker_table(
+        &self,
+        shooter_id: i64,
+        launch_turn_offset: i64,
+        ships: i64,
+    ) -> Arc<BlockerTable> {
+        let bucket = blockers::speed_bucket(ships);
+        let abs_launch = self.current_turn + launch_turn_offset;
+        let key = (shooter_id, abs_launch, bucket);
+        let mut guard = self.blocker_tables.lock().unwrap();
+        if let Some(t) = guard.get(&key) {
+            return t.clone();
+        }
+        let v = blockers::bucket_to_speed(bucket);
+        let table = Arc::new(blockers::build_blocker_table(
+            self,
+            shooter_id,
+            launch_turn_offset,
+            v,
+        ));
+        guard.insert(key, table.clone());
+        table
+    }
+
     /// Look up a cached aim result for a shot launching at
     /// `current_turn + launch_turn_offset`.
     ///
