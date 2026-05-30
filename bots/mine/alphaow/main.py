@@ -9,7 +9,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import threading
 
 _PROC = None
@@ -22,16 +21,27 @@ _DEFAULT_VALUE_NET = "train/weights/v2_replays.bin"
 
 
 def _here():
+    env = os.environ.get("ALPHAOW_BOT_DIR")
+    if env:
+        return env
     try:
-        return os.path.dirname(os.path.abspath(__file__))
+        candidates = [os.path.dirname(os.path.abspath(__file__))]
     except NameError:
-        env = os.environ.get("ALPHAOW_BOT_DIR")
-        if env:
-            return env
-        for cand in (os.getcwd(), os.path.join(os.getcwd(), "alphaow")):
-            if os.path.isfile(os.path.join(cand, "Cargo.toml")):
-                return cand
-        return os.getcwd()
+        candidates = []
+    candidates.extend(
+        [
+            os.getcwd(),
+            os.path.join(os.getcwd(), "alphaow"),
+            "/kaggle_simulations/agent",
+            "/kaggle/working",
+        ]
+    )
+    for cand in candidates:
+        if os.path.isfile(os.path.join(cand, "target/release/alphaow-bot")):
+            return cand
+        if os.path.isfile(os.path.join(cand, "Cargo.toml")):
+            return cand
+    return candidates[0] if candidates else os.getcwd()
 
 
 def _binary_path():
@@ -78,7 +88,7 @@ def _ensure():
         [bin_path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=sys.stderr,
+        stderr=subprocess.DEVNULL,
         cwd=_here(),
         env=env,
         bufsize=0,
