@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="20">
+<title>transformer_manifest_hybrid_exact_summary</title>
+<style>
+body{margin:0;background:#f7f7f4;color:#252525;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}
+main{padding:18px;display:grid;grid-template-columns:repeat(3,minmax(320px,1fr));gap:18px}
+header{grid-column:1/-1;display:flex;align-items:end;justify-content:space-between}
+h1{font-size:24px;margin:0} h2{font-size:18px;margin:0 0 10px}
+.muted{color:#777;font-size:13px} .summary{grid-column:1/-1;display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+.summary div,.card{background:white;border:1px solid #ddd9d0;border-radius:8px;padding:16px;box-shadow:0 1px 2px #0000000a}
+.summary b{display:block;color:#666;font-size:12px;font-weight:600} .summary strong{font-size:22px}
+.card svg{width:100%;display:block;background:#fbfbf9;border-radius:6px} .wide{grid-column:1/-1}
+.axis{stroke:#c9c2b8;stroke-width:1} .grid{stroke:#ece7df;stroke-width:1} .tick{fill:#777;font-size:11px}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;color:#555;font-size:13px} .legend i{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+.table-wrap{max-height:300px;overflow:auto} table{width:100%;border-collapse:collapse;font-size:13px} th,td{padding:8px;border-bottom:1px solid #eee;text-align:right} th:first-child,td:first-child{text-align:left}
+@media(max-width:1100px){main{grid-template-columns:1fr}.summary{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body><main>
+<header><h1>transformer_manifest_hybrid_exact_summary</h1><div class="muted">Updated 2026-05-29 14:20:29</div></header>
+<section class="summary"><div><b>Epoch</b><strong>8.000</strong></div><div><b>Train Loss</b><strong>0.1335</strong></div><div><b>Val Loss</b><strong>0.1749</strong></div><div><b>Sign</b><strong>0.8469</strong></div><div><b>Best Val</b><strong>0.1516</strong></div><div><b>Samples/s</b><strong>2613</strong></div></section>
+<section class="card">
+<h2>Loss</h2>
+<svg viewBox="0 0 760 280" style="height:280px">
+<line class="axis" x1="58" y1="246" x2="742" y2="246"></line>
+<line class="axis" x1="58" y1="22" x2="58" y2="246"></line>
+<line class="grid" x1="58" y1="246.0" x2="742" y2="246.0"></line>
+<text class="tick" x="50" y="250.0" text-anchor="end">0.1287</text>
+<line class="grid" x1="58" y1="190.0" x2="742" y2="190.0"></line>
+<text class="tick" x="50" y="194.0" text-anchor="end">0.1464</text>
+<line class="grid" x1="58" y1="134.0" x2="742" y2="134.0"></line>
+<text class="tick" x="50" y="138.0" text-anchor="end">0.1641</text>
+<line class="grid" x1="58" y1="78.0" x2="742" y2="78.0"></line>
+<text class="tick" x="50" y="82.0" text-anchor="end">0.1818</text>
+<line class="grid" x1="58" y1="22.0" x2="742" y2="22.0"></line>
+<text class="tick" x="50" y="26.0" text-anchor="end">0.1995</text>
+<polyline points="105.2,65.0 189.4,189.1 273.6,206.2 357.9,215.2 442.1,204.3 526.4,217.5 610.6,225.2 694.8,230.6" fill="none" stroke="#3b82f6" opacity="1.00" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="105.2,37.4 189.4,121.6 273.6,100.9 357.9,95.8 442.1,94.5 526.4,134.9 610.6,173.6 694.8,99.8" fill="none" stroke="#16a34a" opacity="1.00" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#3b82f6;opacity:1.00"></i>train_loss: 0.1335</span><span><i style="background:#16a34a;opacity:1.00"></i>val_loss: 0.1749</span></div>
+</section>
+<section class="card">
+<h2>Sign Accuracy vs Baselines</h2>
+<svg viewBox="0 0 760 280" style="height:280px">
+<line class="axis" x1="58" y1="246" x2="742" y2="246"></line>
+<line class="axis" x1="58" y1="22" x2="58" y2="246"></line>
+<line class="grid" x1="58" y1="246.0" x2="742" y2="246.0"></line>
+<text class="tick" x="50" y="250.0" text-anchor="end">0.5000</text>
+<line class="grid" x1="58" y1="190.0" x2="742" y2="190.0"></line>
+<text class="tick" x="50" y="194.0" text-anchor="end">0.6250</text>
+<line class="grid" x1="58" y1="134.0" x2="742" y2="134.0"></line>
+<text class="tick" x="50" y="138.0" text-anchor="end">0.7500</text>
+<line class="grid" x1="58" y1="78.0" x2="742" y2="78.0"></line>
+<text class="tick" x="50" y="82.0" text-anchor="end">0.8750</text>
+<line class="grid" x1="58" y1="22.0" x2="742" y2="22.0"></line>
+<text class="tick" x="50" y="26.0" text-anchor="end">1.000</text>
+<polyline points="105.2,102.0 189.4,91.7 273.6,94.1 357.9,95.0 442.1,90.5 526.4,89.1 610.6,84.7 694.8,90.6" fill="none" stroke="#2563eb" opacity="1.00" stroke-width="3.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="105.2,122.6 189.4,122.6 273.6,122.6 357.9,122.6 442.1,125.5 526.4,125.5 610.6,125.5 694.8,125.5" fill="none" stroke="#94a3b8" opacity="0.58" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="105.2,113.6 189.4,113.6 273.6,113.6 357.9,113.6 442.1,99.6 526.4,99.6 610.6,99.6 694.8,99.6" fill="none" stroke="#a8a29e" opacity="0.58" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="105.2,102.1 189.4,102.1 273.6,102.1 357.9,102.1 442.1,96.6 526.4,96.6 610.6,96.6 694.8,96.6" fill="none" stroke="#c4b5a5" opacity="0.58" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="442.1,101.1 526.4,101.1 610.6,101.1 694.8,101.1" fill="none" stroke="#a1a1aa" opacity="0.58" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="442.1,86.6 526.4,86.6 610.6,86.6 694.8,86.6" fill="none" stroke="#b8b3aa" opacity="0.58" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2563eb;opacity:1.00"></i>sign: 0.8469</span><span><i style="background:#94a3b8;opacity:0.58"></i>base_ship: 0.7689</span><span><i style="background:#a8a29e;opacity:0.58"></i>base_ext: 0.8269</span><span><i style="background:#c4b5a5;opacity:0.58"></i>base_prod: 0.8334</span><span><i style="background:#a1a1aa;opacity:0.58"></i>baseline_v2_h64_preliminary: 0.8235</span><span><i style="background:#b8b3aa;opacity:0.58"></i>baseline_v2_replays: 0.8557</span></div>
+</section>
+<section class="card">
+<h2>Opener Sign Accuracy</h2>
+<svg viewBox="0 0 760 280" style="height:280px">
+<line class="axis" x1="58" y1="246" x2="742" y2="246"></line>
+<line class="axis" x1="58" y1="22" x2="58" y2="246"></line>
+<line class="grid" x1="58" y1="246.0" x2="742" y2="246.0"></line>
+<text class="tick" x="50" y="250.0" text-anchor="end">0.5000</text>
+<line class="grid" x1="58" y1="190.0" x2="742" y2="190.0"></line>
+<text class="tick" x="50" y="194.0" text-anchor="end">0.6250</text>
+<line class="grid" x1="58" y1="134.0" x2="742" y2="134.0"></line>
+<text class="tick" x="50" y="138.0" text-anchor="end">0.7500</text>
+<line class="grid" x1="58" y1="78.0" x2="742" y2="78.0"></line>
+<text class="tick" x="50" y="82.0" text-anchor="end">0.8750</text>
+<line class="grid" x1="58" y1="22.0" x2="742" y2="22.0"></line>
+<text class="tick" x="50" y="26.0" text-anchor="end">1.000</text>
+<polyline points="105.2,121.4 189.4,111.6 273.6,113.6 357.9,114.0 442.1,109.8 526.4,107.6 610.6,102.9 694.8,109.4" fill="none" stroke="#2563eb" opacity="1.00" stroke-width="3.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2563eb;opacity:1.00"></i>bucket_opener_sign: 0.8050</span></div>
+</section>
+<section class="card">
+<h2>Midgame Sign Accuracy</h2>
+<svg viewBox="0 0 760 280" style="height:280px">
+<line class="axis" x1="58" y1="246" x2="742" y2="246"></line>
+<line class="axis" x1="58" y1="22" x2="58" y2="246"></line>
+<line class="grid" x1="58" y1="246.0" x2="742" y2="246.0"></line>
+<text class="tick" x="50" y="250.0" text-anchor="end">0.5000</text>
+<line class="grid" x1="58" y1="190.0" x2="742" y2="190.0"></line>
+<text class="tick" x="50" y="194.0" text-anchor="end">0.6250</text>
+<line class="grid" x1="58" y1="134.0" x2="742" y2="134.0"></line>
+<text class="tick" x="50" y="138.0" text-anchor="end">0.7500</text>
+<line class="grid" x1="58" y1="78.0" x2="742" y2="78.0"></line>
+<text class="tick" x="50" y="82.0" text-anchor="end">0.8750</text>
+<line class="grid" x1="58" y1="22.0" x2="742" y2="22.0"></line>
+<text class="tick" x="50" y="26.0" text-anchor="end">1.000</text>
+<polyline points="105.2,48.3 189.4,41.0 273.6,41.8 357.9,43.5 442.1,36.3 526.4,37.3 610.6,34.4 694.8,37.3" fill="none" stroke="#2563eb" opacity="1.00" stroke-width="3.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2563eb;opacity:1.00"></i>bucket_mid_sign: 0.9658</span></div>
+</section>
+<section class="card">
+<h2>Endgame Sign Accuracy</h2>
+<svg viewBox="0 0 760 280" style="height:280px">
+<line class="axis" x1="58" y1="246" x2="742" y2="246"></line>
+<line class="axis" x1="58" y1="22" x2="58" y2="246"></line>
+<line class="grid" x1="58" y1="246.0" x2="742" y2="246.0"></line>
+<text class="tick" x="50" y="250.0" text-anchor="end">0.5000</text>
+<line class="grid" x1="58" y1="190.0" x2="742" y2="190.0"></line>
+<text class="tick" x="50" y="194.0" text-anchor="end">0.6250</text>
+<line class="grid" x1="58" y1="134.0" x2="742" y2="134.0"></line>
+<text class="tick" x="50" y="138.0" text-anchor="end">0.7500</text>
+<line class="grid" x1="58" y1="78.0" x2="742" y2="78.0"></line>
+<text class="tick" x="50" y="82.0" text-anchor="end">0.8750</text>
+<line class="grid" x1="58" y1="22.0" x2="742" y2="22.0"></line>
+<text class="tick" x="50" y="26.0" text-anchor="end">1.000</text>
+<polyline points="105.2,68.5 189.4,42.2 273.6,55.1 357.9,58.9 442.1,37.4 526.4,38.4 610.6,31.2 694.8,39.6" fill="none" stroke="#2563eb" opacity="1.00" stroke-width="3.8" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2563eb;opacity:1.00"></i>bucket_end_sign: 0.9608</span></div>
+</section>
+<section class="card wide">
+<h2>Epoch History</h2>
+<div class="table-wrap"><table><thead><tr><th>Epoch</th><th>Train</th><th>Val</th><th>Sign</th><th>Open</th><th>Mid</th><th>End</th><th>Rate</th><th>Elapsed</th></tr></thead><tbody>
+<tr><td>8</td><td>0.1335</td><td>0.1749</td><td>0.8469</td><td>0.8050</td><td>0.9658</td><td>0.9608</td><td>2613</td><td>4836s</td></tr>
+<tr><td>7</td><td>0.1352</td><td>0.1516</td><td>0.8599</td><td>0.8193</td><td>0.9723</td><td>0.9795</td><td>2678</td><td>3617s</td></tr>
+<tr><td>6</td><td>0.1377</td><td>0.1638</td><td>0.8502</td><td>0.8090</td><td>0.9659</td><td>0.9634</td><td>2627</td><td>2427s</td></tr>
+<tr><td>5</td><td>0.1418</td><td>0.1766</td><td>0.8470</td><td>0.8041</td><td>0.9682</td><td>0.9657</td><td>2624</td><td>1214s</td></tr>
+<tr><td>4</td><td>0.1384</td><td>0.1762</td><td>0.8370</td><td>0.7947</td><td>0.9519</td><td>0.9176</td><td>3434</td><td>3959s</td></tr>
+<tr><td>3</td><td>0.1413</td><td>0.1746</td><td>0.8390</td><td>0.7956</td><td>0.9557</td><td>0.9261</td><td>3064</td><td>3062s</td></tr>
+<tr><td>2</td><td>0.1467</td><td>0.1680</td><td>0.8445</td><td>0.7999</td><td>0.9576</td><td>0.9549</td><td>3151</td><td>2056s</td></tr>
+<tr><td>1</td><td>0.1859</td><td>0.1946</td><td>0.8215</td><td>0.7782</td><td>0.9412</td><td>0.8961</td><td>2857</td><td>1078s</td></tr>
+</tbody></table></div></section>
+</main></body></html>

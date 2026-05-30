@@ -1,1 +1,0 @@
-{"bc_epochs": 16, "bc_final_accuracy": 0.35740194515306123, "bc_final_loss": 2.5299211253925247, "bc_samples": 50000, "checkpoint": "rl_orbit_wars/checkpoints/bc_hellburner_transformer.pt", "kind": "pretrain_end", "label": "pretrain ended", "step": 0, "teacher": "hellburner"}

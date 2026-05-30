@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-27T16:55:38.936279+00:00",
+  "last_updated": "2026-05-28T22:05:51.702251+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
-        "mu": 368.08057564821536,
-        "sigma": 29.84871317571691,
-        "games_played": 71
+        "mu": 364.2245324397465,
+        "sigma": 29.59259133313762,
+        "games_played": 72
       }
     },
     "baselines/random": {
@@ -39,9 +39,9 @@
     },
     "baselines/starter": {
       "2p": {
-        "mu": 378.9885504331499,
-        "sigma": 31.88571245796865,
-        "games_played": 75
+        "mu": 366.69071930870393,
+        "sigma": 31.17339424046805,
+        "games_played": 77
       }
     },
     "external/owproto": {
@@ -70,6 +70,11 @@
         "mu": 757.2229270910091,
         "sigma": 28.541677481355052,
         "games_played": 54
+      },
+      "4p": {
+        "mu": 544.6075146197494,
+        "sigma": 139.36771272059846,
+        "games_played": 1
       }
     },
     "external/structured-v4": {
@@ -81,9 +86,14 @@
     },
     "mine/apollo": {
       "2p": {
-        "mu": 806.0790927650582,
-        "sigma": 20.09329976942071,
-        "games_played": 226
+        "mu": 804.6887933829945,
+        "sigma": 20.12436082039702,
+        "games_played": 227
+      },
+      "4p": {
+        "mu": 409.4572272865651,
+        "sigma": 153.08165648925635,
+        "games_played": 1
       }
     },
     "mine/bruteforcer": {
@@ -95,16 +105,21 @@
     },
     "external/heuristic": {
       "2p": {
-        "mu": 680.7932961127188,
-        "sigma": 24.372151954272404,
-        "games_played": 94
+        "mu": 681.4204115342379,
+        "sigma": 24.446130420880653,
+        "games_played": 96
       }
     },
     "external/sigmaborov-reinforce": {
       "2p": {
-        "mu": 560.0659450251785,
-        "sigma": 31.66236412481178,
-        "games_played": 69
+        "mu": 561.9477114270286,
+        "sigma": 31.487050876647498,
+        "games_played": 70
+      },
+      "4p": {
+        "mu": 790.5427728202675,
+        "sigma": 153.08165648628645,
+        "games_played": 1
       }
     },
     "external/tamrazov-starwars": {
@@ -119,6 +134,11 @@
         "mu": 642.6475262069196,
         "sigma": 26.100462846261888,
         "games_played": 67
+      },
+      "4p": {
+        "mu": 655.3924849843454,
+        "sigma": 139.36771269900206,
+        "games_played": 1
       }
     },
     "external/smart-baseline": {
@@ -144,22 +164,29 @@
     },
     "mine/osteo": {
       "2p": {
-        "mu": 575.3516852240609,
-        "sigma": 50.01139237625064,
-        "games_played": 23
+        "mu": 546.2700543614577,
+        "sigma": 48.09716467459652,
+        "games_played": 24
       }
     },
     "mine/rl_ppo": {
       "2p": {
-        "mu": 287.7980719381945,
-        "sigma": 81.18494734491956,
-        "games_played": 6
+        "mu": 421.55375334295854,
+        "sigma": 57.51303199408085,
+        "games_played": 13
       }
     },
     "baselines/hellburner": {
       "2p": {
         "mu": 636.4554005719724,
         "sigma": 179.4170168847225,
+        "games_played": 1
+      }
+    },
+    "mine/alphaow": {
+      "2p": {
+        "mu": 736.4041830433149,
+        "sigma": 116.29815769077264,
         "games_played": 1
       }
     }

@@ -15,9 +15,10 @@ PATH_MAX_TIME = 100
 MAX_STEPS = 500
 MAX_PLANETS = 64
 SEND_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
-PLANET_FEATURES = 19
-GLOBAL_FEATURES = 9
+PLANET_FEATURES = 26
+GLOBAL_FEATURES = 18
 ACTION_DIM = 1 + MAX_PLANETS * MAX_PLANETS * len(SEND_FRACTIONS)
+ACTION_TARGET_LIMIT_PER_SOURCE = 16
 
 
 @dataclass(frozen=True)
@@ -340,6 +341,40 @@ def dir_to_hit(
     return None
 
 
+def _predict_fleet_target(obs, fleet: list[float], planets: list[list[float]]) -> int | None:
+    speed = fleet_speed(float(fleet[6]))
+    angle = float(fleet[4])
+    dx = speed * math.cos(angle)
+    dy = speed * math.sin(angle)
+    pos = (float(fleet[2]), float(fleet[3]))
+    for dt in range(1, PATH_MAX_TIME + 1):
+        new_pos = (pos[0] + dx, pos[1] + dy)
+        for planet in planets:
+            p_old = _planet_pos_at(obs, planet, dt - 1)
+            p_new = _planet_pos_at(obs, planet, dt)
+            if p_old is None or p_new is None:
+                continue
+            if _swept_pair_hit(pos, new_pos, p_old, p_new, float(planet[4])):
+                return int(planet[0])
+        if not _on_board(new_pos):
+            return None
+        if _segment_distance(CENTER, CENTER, pos[0], pos[1], new_pos[0], new_pos[1]) < SUN_RADIUS:
+            return None
+        pos = new_pos
+    return None
+
+
+def _nearest_distance(
+    x: float,
+    y: float,
+    positions: list[tuple[float, float]],
+    fallback: float = BOARD_SIZE,
+) -> float:
+    if not positions:
+        return fallback
+    return min(math.hypot(x - px, y - py) for px, py in positions)
+
+
 def action_index(source_slot: int, target_slot: int, send_bin: int) -> int:
     per_source = MAX_PLANETS * len(SEND_FRACTIONS)
     return 1 + source_slot * per_source + target_slot * len(SEND_FRACTIONS) + send_bin
@@ -354,6 +389,45 @@ def decode_action_index(index: int) -> tuple[int, int, int] | None:
     target_slot = raw % MAX_PLANETS
     source_slot = raw // MAX_PLANETS
     return source_slot, target_slot, send_bin
+
+
+def _candidate_target_slots(
+    raw_planets: list[list[float]],
+    source_slot: int,
+    player: int,
+    incoming: dict[int, list[float]] | None = None,
+    limit: int = ACTION_TARGET_LIMIT_PER_SOURCE,
+) -> list[int]:
+    n = min(len(raw_planets), MAX_PLANETS)
+    if n <= 1:
+        return []
+    if n - 1 <= limit:
+        return [i for i in range(n) if i != source_slot]
+
+    src = raw_planets[source_slot]
+    sx = float(src[2])
+    sy = float(src[3])
+    scored: list[tuple[float, int]] = []
+    for i, tgt in enumerate(raw_planets[:n]):
+        if i == source_slot:
+            continue
+        owner = int(tgt[1])
+        tx = float(tgt[2])
+        ty = float(tgt[3])
+        ships = float(tgt[5])
+        production = float(tgt[6])
+        distance = math.hypot(tx - sx, ty - sy)
+        if owner == player:
+            inbound_my, inbound_enemy = (incoming or {}).get(int(tgt[0]), [0.0, 0.0])
+            owner_bias = 0.6 if inbound_enemy > inbound_my else 2.0
+        elif owner == -1:
+            owner_bias = 0.0
+        else:
+            owner_bias = -0.2
+        score = owner_bias + distance / 100.0 + ships / 900.0 - production * 0.04
+        scored.append((score, i))
+    scored.sort(key=lambda item: item[0])
+    return [i for _score, i in scored[:limit]]
 
 
 def encode_obs(obs) -> EncodedObs:
@@ -377,6 +451,40 @@ def encode_obs(obs) -> EncodedObs:
     enemy_production = 0.0
 
     n = min(len(raw_planets), MAX_PLANETS)
+    my_positions: list[tuple[float, float]] = []
+    enemy_positions: list[tuple[float, float]] = []
+    neutral_positions: list[tuple[float, float]] = []
+    orbiting_count = 0
+    comet_count = 0
+    incoming: dict[int, list[float]] = {}
+    for p in raw_planets[:MAX_PLANETS]:
+        pid, owner, x, y, radius, _ships, _production = p
+        owner = int(owner)
+        x = float(x)
+        y = float(y)
+        radius = float(radius)
+        orbital_radius = math.hypot(x - CENTER, y - CENTER)
+        if int(pid) in comet_ids:
+            comet_count += 1
+        if orbital_radius + radius < ROTATION_RADIUS_LIMIT:
+            orbiting_count += 1
+        if owner == player:
+            my_positions.append((x, y))
+        elif owner == -1:
+            neutral_positions.append((x, y))
+        else:
+            enemy_positions.append((x, y))
+        incoming[int(pid)] = [0.0, 0.0]
+
+    for fleet in raw_fleets[:128]:
+        target_id = _predict_fleet_target(obs, fleet, raw_planets[:MAX_PLANETS])
+        if target_id is None or target_id not in incoming:
+            continue
+        if int(fleet[1]) == player:
+            incoming[target_id][0] += float(fleet[6])
+        else:
+            incoming[target_id][1] += float(fleet[6])
+
     for i, p in enumerate(raw_planets[:MAX_PLANETS]):
         pid, owner, x, y, radius, ships, production = p
         owner = int(owner)
@@ -393,6 +501,8 @@ def encode_obs(obs) -> EncodedObs:
         is_enemy = 1.0 if owner not in (-1, player) else 0.0
         is_comet = 1.0 if int(pid) in comet_ids else 0.0
         is_orbiting = 1.0 if orbital_radius + radius < ROTATION_RADIUS_LIMIT else 0.0
+        future_x, future_y = _planet_pos_at(obs, p, 10) or (x, y)
+        inbound_my, inbound_enemy = incoming.get(int(pid), [0.0, 0.0])
 
         if is_mine:
             my_ship_total += ships
@@ -408,25 +518,32 @@ def encode_obs(obs) -> EncodedObs:
 
         planets[i] = np.array(
             [
-                x / BOARD_SIZE,
-                y / BOARD_SIZE,
-                dx / BOARD_SIZE,
-                dy / BOARD_SIZE,
+                dx / CENTER,
+                dy / CENTER,
                 orbital_radius / 70.7107,
                 math.sin(math.atan2(dy, dx)),
                 math.cos(math.atan2(dy, dx)),
                 radius / 4.0,
                 math.log1p(ships) / math.log1p(1000.0),
+                min(1.0, ships / 500.0),
                 production / 5.0,
                 is_mine,
                 is_enemy,
                 is_neutral,
                 is_comet,
                 is_orbiting,
-                1.0 if x < CENTER else 0.0,
-                1.0 if y < CENTER else 0.0,
-                float(pid) / 100.0,
-                1.0,
+                (future_x - CENTER) / CENTER,
+                (future_y - CENTER) / CENTER,
+                max(-1.0, min(1.0, (future_x - x) / 20.0)),
+                max(-1.0, min(1.0, (future_y - y) / 20.0)),
+                math.log1p(inbound_my) / math.log1p(1000.0),
+                math.log1p(inbound_enemy) / math.log1p(1000.0),
+                max(-1.0, min(1.0, (inbound_my - inbound_enemy) / 500.0)),
+                max(-1.0, min(1.0, (ships + inbound_my - inbound_enemy) / 500.0)),
+                _nearest_distance(x, y, my_positions) / 100.0,
+                _nearest_distance(x, y, enemy_positions) / 100.0,
+                _nearest_distance(x, y, neutral_positions) / 100.0,
+                1.0 if is_mine and ships > 1 else 0.0,
             ],
             dtype=np.float32,
         )
@@ -442,7 +559,11 @@ def encode_obs(obs) -> EncodedObs:
         else:
             fleet_enemy += ships
 
-    total_known = max(1.0, my_ship_total + enemy_ship_total + neutral_ship_total + fleet_my + fleet_enemy)
+    own_total = my_ship_total + fleet_my
+    enemy_total = enemy_ship_total + fleet_enemy
+    total_known = max(1.0, own_total + enemy_total + neutral_ship_total)
+    production_total = max(1.0, my_production + enemy_production)
+    non_neutral_planets = max(1, my_planets + enemy_planets)
     globals_ = np.array(
         [
             step / MAX_STEPS,
@@ -450,10 +571,19 @@ def encode_obs(obs) -> EncodedObs:
             my_planets / MAX_PLANETS,
             enemy_planets / MAX_PLANETS,
             neutral_planets / MAX_PLANETS,
-            (my_ship_total + fleet_my) / total_known,
-            (enemy_ship_total + fleet_enemy) / total_known,
+            own_total / total_known,
+            enemy_total / total_known,
+            neutral_ship_total / total_known,
             my_production / 50.0,
             enemy_production / 50.0,
+            my_production / production_total,
+            enemy_production / production_total,
+            (my_planets - enemy_planets) / non_neutral_planets,
+            (own_total - enemy_total) / total_known,
+            fleet_my / total_known,
+            fleet_enemy / total_known,
+            comet_count / MAX_PLANETS,
+            orbiting_count / MAX_PLANETS,
         ],
         dtype=np.float32,
     )
@@ -464,15 +594,12 @@ def encode_obs(obs) -> EncodedObs:
         src = raw_planets[si]
         if int(src[1]) != player or int(src[5]) <= 1:
             continue
-        for ti in range(n):
-            if ti == si:
-                continue
+        for ti in _candidate_target_slots(raw_planets, si, player, incoming):
             tgt = raw_planets[ti]
             for bi, frac in enumerate(SEND_FRACTIONS):
                 ships = max(1, int(float(src[5]) * frac))
-                if ships < int(src[5]):
-                    action_mask[action_index(si, ti, bi)] = True
-                elif int(src[5]) >= 2:
+                ships = min(ships, int(src[5]))
+                if ships > 0 and dir_to_hit(obs, src, tgt, ships) is not None:
                     action_mask[action_index(si, ti, bi)] = True
 
     return EncodedObs(planets=planets, planet_mask=planet_mask, globals=globals_, action_mask=action_mask)
@@ -499,9 +626,9 @@ def decode_move(obs, index: int) -> list[list[float]]:
     if ships <= 0:
         return []
     path = dir_to_hit(obs, src, tgt, ships)
-    if path is None and path_hits_sun(src, tgt):
+    if path is None:
         return []
-    angle = path[0] if path is not None else math.atan2(float(tgt[3]) - float(src[3]), float(tgt[2]) - float(src[2]))
+    angle = path[0]
     return [[int(src[0]), angle, int(ships)]]
 
 

@@ -17,6 +17,21 @@ from .model import OrbitPolicy, build_policy
 from .visualization import append_jsonl, write_training_report
 
 
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+CYAN = "\033[36m"
+MAGENTA = "\033[35m"
+
+
+def _c(text: str, code: str) -> str:
+    return f"{code}{text}{RESET}"
+
+
 @dataclass
 class PPOConfig:
     total_steps: int = 20_000
@@ -39,7 +54,7 @@ class PPOConfig:
     reward_mode: str = "terminal"
     eval_every_updates: int = 25
     eval_games: int = 4
-    eval_opponents: str = "noop,random,nearest"
+    eval_opponents: str = "random,nearest,baselines/starter"
     report_every_updates: int = 1
     init_checkpoint: str | None = None
     resume_checkpoint: str | None = None
@@ -153,6 +168,56 @@ def _metric_name(name: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in name)
 
 
+def _format_train_metrics(metrics: dict, opponent_names: list[str]) -> str:
+    ret = float(metrics.get("mean_return_25", 0.0) or 0.0)
+    clip = float(metrics.get("clip_frac", 0.0) or 0.0)
+    ev = float(metrics.get("explained_var", 0.0) or 0.0)
+    reward = float(metrics.get("reward_mean", 0.0) or 0.0)
+    launch = float(metrics.get("launch_rate", 0.0) or 0.0)
+    entropy_launch = float(metrics.get("entropy_launch", 0.0) or 0.0)
+    wr_parts = []
+    for name in opponent_names:
+        key = f"train_win_rate_{_metric_name(name)}"
+        if key in metrics:
+            wr = float(metrics[key])
+            wr_parts.append(f"{_c(name, BLUE)}={_c(f'{wr:.0%}', GREEN if wr >= 0.5 else RED)}")
+    wr_text = " ".join(wr_parts) if wr_parts else _c("no completed games yet", DIM)
+    clip_color = GREEN if clip < 0.15 else (YELLOW if clip < 0.30 else RED)
+    ev_color = GREEN if ev >= 0.5 else (YELLOW if ev >= 0.1 else RED)
+    return (
+        f"{_c('ppo', BOLD + CYAN)} "
+        f"upd={int(metrics.get('update', 0)):>4} "
+        f"step={int(metrics.get('step', 0)):>7} "
+        f"opp={_c(str(metrics.get('current_opponent', '?')), MAGENTA)} "
+        f"ret25={_c(f'{ret:7.2f}', GREEN if ret >= 0 else RED)} "
+        f"r={reward:+.4f} "
+        f"wr[{wr_text}] "
+        f"sps={float(metrics.get('sps', 0.0) or 0.0):.1f} "
+        f"launch={launch:.0%} "
+        f"Hlaunch={entropy_launch:.3f} "
+        f"clip={_c(f'{clip:.3f}', clip_color)} "
+        f"ev={_c(f'{ev:.3f}', ev_color)} "
+        f"lr={float(metrics.get('lr', 0.0) or 0.0):.2g}"
+    )
+
+
+def _format_eval_metrics(eval_metrics: dict) -> str:
+    parts = []
+    for key in sorted(eval_metrics):
+        if key.startswith("win_rate_"):
+            name = key.replace("win_rate_", "")
+            wr = float(eval_metrics.get(key, 0.0) or 0.0)
+            parts.append(f"{_c(name, BLUE)}={_c(f'{wr:.0%}', GREEN if wr >= 0.5 else RED)}")
+    score = float(eval_metrics.get("eval_score", 0.0) or 0.0)
+    return (
+        f"{_c('eval', BOLD + MAGENTA)} "
+        f"upd={int(eval_metrics.get('update', 0)):>4} "
+        f"step={int(eval_metrics.get('step', 0)):>7} "
+        f"score={_c(f'{score:.1%}', GREEN if score >= 0.5 else RED)} "
+        + " ".join(parts)
+    )
+
+
 def _policy_opponent(model: OrbitPolicy, device, sample: bool = False):
     def opponent(obs):
         encoded = encode_obs(obs)
@@ -205,6 +270,7 @@ def evaluate_policy(
     games: int,
     seed: int,
     step: int,
+    progress_label: str | None = None,
 ) -> dict:
     wins = losses = draws = 0
     margins = []
@@ -236,10 +302,22 @@ def evaluate_policy(
         raw = result.info["raw_rewards"]
         if raw[0] > raw[1]:
             wins += 1
+            outcome = _c("W", GREEN)
         elif raw[1] > raw[0]:
             losses += 1
+            outcome = _c("L", RED)
         else:
             draws += 1
+            outcome = _c("D", YELLOW)
+        if progress_label:
+            wr = (wins + 0.5 * draws) / (i + 1)
+            print(
+                f"{_c(progress_label, BOLD + MAGENTA)} "
+                f"{_c(opponent, BLUE)} {i + 1:>3}/{games} {outcome} "
+                f"wr={_c(f'{wr:.1%}', GREEN if wr >= 0.5 else RED)} "
+                f"margin={margin:+.0f}",
+                flush=True,
+            )
     return {
         "step": step,
         "games": games,
@@ -593,10 +671,7 @@ def train(config: PPOConfig) -> Path:
             **reward_components,
             **train_opponent_metrics,
         }
-        print(
-            json.dumps(metrics),
-            flush=True,
-        )
+        print(_format_train_metrics(metrics, opponent_names), flush=True)
         append_jsonl(metrics_path, metrics)
 
         improved_best = mean_return > best_mean_return and recent_returns
@@ -635,6 +710,7 @@ def train(config: PPOConfig) -> Path:
                     config.eval_games,
                     config.seed + 100_000 + update_idx * 100 + eval_idx * 10_000,
                     global_step,
+                    progress_label="eval",
                 )
                 eval_metrics[f"win_rate_{opponent}"] = result["win_rate"]
                 eval_metrics[f"avg_margin_{opponent}"] = result["avg_margin"]
@@ -647,7 +723,7 @@ def train(config: PPOConfig) -> Path:
                 eval_metrics["eval_score"] = float(np.mean(eval_win_rates))
                 eval_metrics["eval_avg_margin"] = float(np.mean(eval_margins))
             append_jsonl(eval_path, eval_metrics)
-            print(json.dumps({"eval": eval_metrics}), flush=True)
+            print(_format_eval_metrics(eval_metrics), flush=True)
 
         if config.report_every_updates > 0 and update_idx % config.report_every_updates == 0:
             write_training_report(checkpoint_dir)
