@@ -11,7 +11,7 @@
 //!     [`WorldState::projected_timeline`] — hellburner's `simulate_planet_timeline`.
 //!
 //! Hellburner-specific data we build here:
-//!   * Proximity graph (`MAX_DISTANCE=38`, `ROTATION_LOOK_AHEAD=10`).
+//!   * Proximity graph (`MAX_DISTANCE=38`, `ROTATION_LOOK_AHEAD_TURNS=10`).
 //!   * `reinforcement_target` per owned planet (frontline BFS).
 //!   * Per-turn `PlanState` (spent ships + planned commitments).
 
@@ -21,7 +21,11 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::constants::HORIZON;
+use crate::constants::{
+    A_S_LOOKAHEAD, GARRISON_SIZE, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, MAX_SUBSET_SOURCES,
+    OFFSET_LOOKAHEAD, OPENING_TURNS, REINFORCEMENT_SIZE, ROTATION_LOOK_AHEAD_TURNS,
+    SECOND_ENEMY_ARRIVAL_TOL, TRIM_MIN_SHIPS,
+};
 use crate::engine::Planet;
 use crate::entity_cache::{AimCacheVerdict};
 use crate::helpers::{
@@ -29,33 +33,6 @@ use crate::helpers::{
     ArrivalEvent, PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
-
-// ── Constants ────────────────────────────────────────────────────────────
-const EARLY_ROUNDS: i64 = 3;
-const MAX_DISTANCE: f64 = 38.0;
-const ROTATION_LOOK_AHEAD: i64 = 10;
-const REINFORCEMENT_SIZE: i64 = 17;
-const GARRISON_SIZE: i64 = 11;
-const SECOND_ENEMY_ARRIVAL_TOL: i64 = 1;
-const TRIM_MIN_SHIPS: i64 = 10;
-/// How many turns of delayed-launch we sweep per target when computing the
-/// urgency of acting **this** turn. The δ=0 entry decides what we actually
-/// commit; δ>0 entries only feed the priority calculation.
-const OFFSET_LOOKAHEAD: i64 = 5;
-/// Cap on inbound owned sources we enumerate for full 2^N subset search.
-/// Beyond this the nearest `MAX_SUBSET_SOURCES` are kept (sources are
-/// already distance-ordered by `inbound_edges`) — in practice maps in this
-/// game rarely have more than a handful of inbound owned neighbors.
-const MAX_SUBSET_SOURCES: usize = 10;
-/// Max extra launch delay (beyond the subset's base offset) a single source
-/// will accept when coordinating arrivals to land on the same turn as the
-/// subset's latest-arriving source. Per-source scan, cache-friendly.
-const MAX_COORD_DELAY: i64 = 5;
-/// How many turns past the natural max-arrival the coordinated schedule will
-/// push the cluster. Lets slow-growing sources accumulate `production·d`
-/// extra ships at the cost of arriving later — a richer brute-force sweep
-/// that complements the `MAX_COORD_DELAY` per-source delay budget.
-const A_S_LOOKAHEAD: i64 = 3;
 
 type FleetOrder = (i64, f64, i64); // (src_id, angle, ships)
 
@@ -96,7 +73,7 @@ impl<'a> HellburnerModel<'a> {
             }
             let pos = state
                 .entity_cache
-                .position(p.id, 1 + ROTATION_LOOK_AHEAD)
+                .position(p.id, 1 + ROTATION_LOOK_AHEAD_TURNS)
                 .unwrap_or([p.x, p.y]);
             future_pos.insert(p.id, pos);
         }
@@ -1753,7 +1730,7 @@ pub fn plan(world: &WorldState) -> Vec<FleetOrder> {
     }
     let model = HellburnerModel::build(world);
 
-    if world.step < EARLY_ROUNDS {
+    if world.step < OPENING_TURNS {
         return run_early_game(world, &model);
     }
 
@@ -1781,7 +1758,7 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<FleetOrder>> {
     }
     let model = HellburnerModel::build(world);
 
-    if world.step < EARLY_ROUNDS {
+    if world.step < OPENING_TURNS {
         return vec![run_early_game(world, &model)];
     }
 

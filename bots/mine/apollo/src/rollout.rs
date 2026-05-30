@@ -6,15 +6,12 @@
 
 #![allow(dead_code)]
 
-use crate::constants::{EPISODE_STEPS, HORIZON};
+use crate::constants::{EPISODE_STEPS, HORIZON, REACTIVE_TURNS};
 use crate::engine::{EngineState, Fleet, MoveAction, Planet};
 use crate::entity_cache::EntityCache;
 use crate::helpers::ArrivalLedger;
 use crate::engine::Simulator;
 use crate::world::WorldState;
-
-pub const REACTIVE_TURNS: i64 = 2;
-pub const BALLISTIC_TURNS: i64 = 20;
 
 pub type PlannedMove = (i64, f64, i64);
 pub type PlanFn = for<'a> fn(&WorldState<'a>) -> Vec<PlannedMove>;
@@ -126,7 +123,7 @@ pub fn rollout_score(
     }
 
     // Ballistic phase: no new launches. Fleets in flight still resolve.
-    for _ in 0..BALLISTIC_TURNS {
+    for _ in 0..HORIZON {
         if sim.step_count() >= EPISODE_STEPS {
             break;
         }

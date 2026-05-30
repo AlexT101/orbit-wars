@@ -14,7 +14,7 @@
 use std::f64::consts::FRAC_PI_2;
 
 use crate::constants::{
-    CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS,
+    CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS, NUDGE_SCAN
 };
 use crate::engine::fleet_speed;
 use crate::entity_cache::EntityCache;
@@ -428,24 +428,6 @@ fn cone_clear_impossible(
     }
     covered >= phi_max - 1e-9
 }
-
-/// Half-cone of aim angles that still land within the target's radius is
-/// scanned this many times per side when nudging past a blocked direct shot.
-const NUDGE_SCAN: i64 = 16;
-
-// Measured over 30 seeds × 5 ship counts × all shooter/target pairs. Of 58,684 blocked-direct shots, only 7,444 (~13%) are nudge-recoverable at all (a clear angle exists in the cone); the other ~87% return None at any N. Recovery of those 7,444 vs a thorough n=256 reference:
-
-// NUDGE_SCAN	recovered	cost rel.
-// 1	0%	—
-// 2	55%	0.08×
-// 3	75%	0.13×
-// 4	83%	0.17×
-// 6	90%	0.25×
-// 8	94%	0.33×
-// 16	96%	0.67×
-// 24 (current)	96.6%	1×
-// 48	98.7%	2×
-
 
 /// Aim from `shooter_id` to `target_id` with `ships`, for a fleet launching
 /// at `launch_turn_offset` turns after the cache's current turn (pass `0`
