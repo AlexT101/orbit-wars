@@ -197,3 +197,7 @@ rl_orbit_wars/runs/
 
 runs/
 wandb/
+
+# Large data and model files
+*.npz
+*.pt
