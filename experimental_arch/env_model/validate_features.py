@@ -135,11 +135,11 @@ def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
     obs0 = obs_of(env, 0)
     feat = encode_obs(obs0, 0)
     ids = feat["planet_ids"]
-    turns = feat["turns"]      # flat (44,44,7)
+    turns = feat["turns"]      # flat (4,44,44,7), first frame is decision frame
     angles = feat["angles"]    # flat (44,44,7)
     mask = feat["mask"]        # flat (44,44,7)
     ship_counts = feat["ship_counts"]  # flat (44,44,7), integral ships sent
-    reachable = feat["reachable_mask"]  # flat (44,44,7)
+    reachable = feat["reachable_mask"]  # flat (4,44,44,7), first frame starts at index 0
 
     valid = [
         (si, sj, a)

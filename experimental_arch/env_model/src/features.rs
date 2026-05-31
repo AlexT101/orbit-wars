@@ -14,13 +14,14 @@
 //!   - `tokens`   `(NUM_FRAMES, 44, TOKEN_DIM)`  per-planet features, all frames
 //!   - `globals`  `(GLOBAL_DIM,)`                board-level summary at frame t
 //!   - `presence` `(NUM_FRAMES, 44)`             1 where a slot holds a planet
-//!   - `turns` / `angles` / `mask` `(44, 44, ACTIONS_DIM)`  decision frame (t) only
+//!   - `turns` `(NUM_FRAMES, 44, 44, ACTIONS_DIM)`  per-frame travel times
+//!   - `reachable_mask` `(NUM_FRAMES, 44, 44, ACTIONS_DIM)` per-frame clean-launch bits
+//!   - `angles` / `mask` `(44, 44, ACTIONS_DIM)`  decision frame (t) only
 //!   - `ship_counts` `(44, 44, ACTIONS_DIM)` integer ships sent by each action
-//!   - `reachable_mask` `(44, 44, ACTIONS_DIM)` 1 when the launch reaches target
 //!
-//! `turns`/`angles`/`mask`/`ship_counts`/`reachable_mask` are frame t only: the
-//! policy acts now and the aim solve is the whole cost, so it isn't run for
-//! lookahead frames.
+//! `angles`/`mask`/`ship_counts` are frame t only: the policy acts now. `turns`
+//! and `reachable_mask` are computed for every frame so temporal message
+//! passing has geometry for `t`, `t+1`, `t+10`, and `t_resolved`.
 //!
 //! Aim solver: one geometric solve per `(frame, i, j, count)` — lead the moving
 //! target for a launch angle, then project the straight-line fleet turn-by-turn
@@ -384,11 +385,11 @@ pub struct Features {
     pub tokens: Vec<f32>,        // (NUM_FRAMES, 44, TOKEN_DIM)
     pub globals: Vec<f32>,       // (GLOBAL_DIM,)
     pub presence: Vec<f32>,      // (NUM_FRAMES, 44)
-    pub turns: Vec<f32>,         // (44, 44, ACTIONS_DIM), frame t
+    pub turns: Vec<f32>,         // (NUM_FRAMES, 44, 44, ACTIONS_DIM)
     pub angles: Vec<f32>,        // (44, 44, ACTIONS_DIM), frame t
     pub mask: Vec<u8>,           // (44, 44, ACTIONS_DIM), frame t
     pub ship_counts: Vec<i64>,   // (44, 44, ACTIONS_DIM), frame t
-    pub reachable_mask: Vec<u8>, // (44, 44, ACTIONS_DIM), frame t
+    pub reachable_mask: Vec<u8>, // (NUM_FRAMES, 44, 44, ACTIONS_DIM)
     /// Raw per-frame planet state `[id, owner, x, y, ships]`, present planets
     /// only. Not a model input — exposed for validation/debugging against the
     /// reference engine.
@@ -414,7 +415,10 @@ impl Features {
         d.set_item("presence", self.presence.into_pyarray(py))?;
         d.set_item("presence_shape", (NUM_FRAMES, PLANET_SLOTS))?;
         d.set_item("turns", self.turns.into_pyarray(py))?;
-        d.set_item("turns_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
+        d.set_item(
+            "turns_shape",
+            (NUM_FRAMES, PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM),
+        )?;
         d.set_item("angles", self.angles.into_pyarray(py))?;
         d.set_item("angles_shape", (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM))?;
         d.set_item("mask", self.mask.into_pyarray(py))?;
@@ -427,7 +431,7 @@ impl Features {
         d.set_item("reachable_mask", self.reachable_mask.into_pyarray(py))?;
         d.set_item(
             "reachable_mask_shape",
-            (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM),
+            (NUM_FRAMES, PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM),
         )?;
         Ok(d.into_any().unbind())
     }
@@ -537,9 +541,9 @@ fn compute_globals(state: &EngineState, player: i64) -> Vec<f32> {
     ]
 }
 
-/// Compute the `(44, ACTIONS_DIM)` turns row for one source slot `si` at frame
-/// `f` (offset `off`), writing into `t_row`. For frame t (`extra` = Some), also
-/// fills that source's angles, legal-action mask, ship-count, and reachability rows. Pure / read-only
+/// Compute the `(44, ACTIONS_DIM)` turns/reachability row for one source slot
+/// `si` at frame offset `off`. For frame t (`extra` = Some), also fills that
+/// source's angles, legal-action mask, and ship-count rows. Pure / read-only
 /// over the trajectory, so it's safe to run across sources in parallel.
 #[allow(clippy::too_many_arguments)]
 fn compute_source_row(
@@ -551,7 +555,8 @@ fn compute_source_row(
     resolved: &FxHashMap<i64, (i64, i64)>,
     player: i64,
     t_row: &mut [f32],
-    mut extra: Option<(&mut [f32], &mut [u8], &mut [i64], &mut [u8])>,
+    r_row: &mut [u8],
+    mut extra: Option<(&mut [f32], &mut [u8], &mut [i64])>,
 ) {
     let id_i = slot_id[si];
     if id_i < 0 {
@@ -576,7 +581,7 @@ fn compute_source_row(
             else {
                 continue;
             };
-            if let Some((_, _, c_row, _)) = extra.as_mut() {
+            if let Some((_, _, c_row)) = extra.as_mut() {
                 c_row[sj * ACTIONS_DIM + a] = count;
             }
             let res = match memo[..memo_len].iter().find(|(c, _)| *c == count) {
@@ -591,9 +596,9 @@ fn compute_source_row(
             if let Some((turn, theta)) = res {
                 let k = sj * ACTIONS_DIM + a;
                 t_row[k] = norm_turns(turn);
-                if let Some((a_row, m_row, _, r_row)) = extra.as_mut() {
+                r_row[k] = 1;
+                if let Some((a_row, m_row, _)) = extra.as_mut() {
                     a_row[k] = theta as f32;
-                    r_row[k] = 1;
                     if pi.owner == player {
                         m_row[k] = 1;
                     }
@@ -626,13 +631,11 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
 
     let mut tokens = vec![0f32; NUM_FRAMES * PLANET_SLOTS * TOKEN_DIM];
     let mut presence = vec![0f32; NUM_FRAMES * PLANET_SLOTS];
-    // Decision-frame action tensors; lookahead frames give temporal context
-    // through their tokens/presence.
-    let mut turns = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    let mut turns = vec![0f32; NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut angles = vec![0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut ship_counts = vec![0i64; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
-    let mut reachable_mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    let mut reachable_mask = vec![0u8; NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     for si in 0..PLANET_SLOTS {
         mask[(si * PLANET_SLOTS) * ACTIONS_DIM + NOOP_ACTION] = 1;
     }
@@ -669,28 +672,33 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
             }
         }
 
-        // Turns + action metadata: frame t only.
-        if f != 0 {
-            continue;
-        }
         const ROW: usize = PLANET_SLOTS * ACTIONS_DIM;
+        const FRAME_ROWS: usize = PLANET_SLOTS * ROW;
         for si in 0..PLANET_SLOTS {
-            let t_row = &mut turns[si * ROW..(si + 1) * ROW];
-            let a_row = &mut angles[si * ROW..(si + 1) * ROW];
-            let m_row = &mut mask[si * ROW..(si + 1) * ROW];
-            let c_row = &mut ship_counts[si * ROW..(si + 1) * ROW];
-            let r_row = &mut reachable_mask[si * ROW..(si + 1) * ROW];
-            compute_source_row(
-                &traj,
-                off,
-                si,
-                &slot_id,
-                &by,
-                &resolved,
-                player,
-                t_row,
-                Some((a_row, m_row, c_row, r_row)),
-            );
+            let row_start = f * FRAME_ROWS + si * ROW;
+            let t_row = &mut turns[row_start..row_start + ROW];
+            let r_row = &mut reachable_mask[row_start..row_start + ROW];
+            if f == 0 {
+                let a_row = &mut angles[si * ROW..(si + 1) * ROW];
+                let m_row = &mut mask[si * ROW..(si + 1) * ROW];
+                let c_row = &mut ship_counts[si * ROW..(si + 1) * ROW];
+                compute_source_row(
+                    &traj,
+                    off,
+                    si,
+                    &slot_id,
+                    &by,
+                    &resolved,
+                    player,
+                    t_row,
+                    r_row,
+                    Some((a_row, m_row, c_row)),
+                );
+            } else {
+                compute_source_row(
+                    &traj, off, si, &slot_id, &by, &resolved, player, t_row, r_row, None,
+                );
+            }
         }
     }
 
@@ -1000,7 +1008,10 @@ mod tests {
             let f = encode(&st, 0);
             assert_eq!(f.tokens.len(), NUM_FRAMES * PLANET_SLOTS * TOKEN_DIM);
             assert_eq!(f.globals.len(), GLOBAL_DIM);
-            assert_eq!(f.turns.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
+            assert_eq!(
+                f.turns.len(),
+                NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM
+            );
             assert_eq!(f.mask.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(f.angles.len(), PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM);
             assert_eq!(
@@ -1009,7 +1020,7 @@ mod tests {
             );
             assert_eq!(
                 f.reachable_mask.len(),
-                PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM
+                NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM
             );
             for v in f
                 .tokens
