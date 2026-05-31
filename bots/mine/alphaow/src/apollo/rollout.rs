@@ -1,7 +1,7 @@
 //! Strategy-agnostic rollout/search infrastructure for scoring candidate plans.
 //!
 //! Structure: 2 turns of full simulation where every player replans via the
-//! supplied planner hook, then 20 turns of "ballistic" stepping with no new
+//! supplied planner hook, then HORIZON turns of "ballistic" stepping with no new
 //! launches (in-flight fleets keep moving, combat resolves, planets produce).
 
 #![allow(dead_code)]
