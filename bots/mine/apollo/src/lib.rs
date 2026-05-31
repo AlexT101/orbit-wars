@@ -41,6 +41,22 @@ fn get_item<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny
         .ok_or_else(|| PyValueError::new_err(format!("obs missing field '{}'", key)))
 }
 
+/// Extract an integer field, tolerating whole-number floats.
+///
+/// The Kaggle engine sanitizes a move's `ships` to `int(...)` but stores the
+/// move's `from_id` verbatim into the resulting fleet's `from_planet_id` slot
+/// (`orbit_wars.py`). An opponent who submits a move with a float planet id
+/// (e.g. `33.0`) therefore produces a fleet whose `from_planet_id` is a float,
+/// which a plain `extract::<i64>()` rejects with "'float' object cannot be
+/// interpreted as an integer", crashing our agent on its next turn. Falling
+/// back to an `f64` extraction makes parsing robust to such poisoned fields.
+fn extract_i64(v: &Bound<'_, PyAny>) -> PyResult<i64> {
+    match v.extract::<i64>() {
+        Ok(i) => Ok(i),
+        Err(_) => Ok(v.extract::<f64>()?.round() as i64),
+    }
+}
+
 fn parse_planets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Planet>> {
     let seq: Bound<'_, PySequence> = seq.downcast::<PySequence>()?.clone();
     let len = seq.len()?;
@@ -48,13 +64,13 @@ fn parse_planets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Planet>> {
     for i in 0..len {
         let row = seq.get_item(i)?;
         out.push(Planet {
-            id: row.get_item(0)?.extract()?,
-            owner: row.get_item(1)?.extract()?,
+            id: extract_i64(&row.get_item(0)?)?,
+            owner: extract_i64(&row.get_item(1)?)?,
             x: row.get_item(2)?.extract()?,
             y: row.get_item(3)?.extract()?,
             radius: row.get_item(4)?.extract()?,
-            ships: row.get_item(5)?.extract()?,
-            production: row.get_item(6)?.extract()?,
+            ships: extract_i64(&row.get_item(5)?)?,
+            production: extract_i64(&row.get_item(6)?)?,
         });
     }
     Ok(out)
@@ -67,13 +83,13 @@ fn parse_fleets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Fleet>> {
     for i in 0..len {
         let row = seq.get_item(i)?;
         out.push(Fleet {
-            id: row.get_item(0)?.extract()?,
-            owner: row.get_item(1)?.extract()?,
+            id: extract_i64(&row.get_item(0)?)?,
+            owner: extract_i64(&row.get_item(1)?)?,
             x: row.get_item(2)?.extract()?,
             y: row.get_item(3)?.extract()?,
             angle: row.get_item(4)?.extract()?,
-            from_planet_id: row.get_item(5)?.extract()?,
-            ships: row.get_item(6)?.extract()?,
+            from_planet_id: extract_i64(&row.get_item(5)?)?,
+            ships: extract_i64(&row.get_item(6)?)?,
         });
     }
     Ok(out)
@@ -106,7 +122,7 @@ fn parse_comets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<CometGroup>> {
         for j in 0..paths_seq.len()? {
             paths.push(parse_path(&paths_seq.get_item(j)?)?);
         }
-        let path_index: i64 = get_item(dict, "path_index")?.extract()?;
+        let path_index: i64 = extract_i64(&get_item(dict, "path_index")?)?;
         out.push(CometGroup {
             planet_ids,
             paths,
@@ -118,7 +134,7 @@ fn parse_comets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<CometGroup>> {
 
 impl Observation {
     fn from_dict(obs: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let player: i64 = get_item(obs, "player")?.extract()?;
+        let player: i64 = extract_i64(&get_item(obs, "player")?)?;
         let planets = parse_planets(&get_item(obs, "planets")?)?;
         let fleets = parse_fleets(&get_item(obs, "fleets")?)?;
         let initial_planets = parse_planets(&get_item(obs, "initial_planets")?)?;
@@ -280,4 +296,3 @@ fn apollo_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bot>()?;
     Ok(())
 }
-
