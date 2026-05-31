@@ -2,14 +2,16 @@
 seed range and reports win rate / average step time.
 
 Usage:
-    python run_batched.py <bot1> <bot2> <n_matches> [--start-seed S]
+    python run_batched.py <bot1> <bot2> <n_matches> [--start-seed S] [--threads T]
 
-Each match runs in the same Python process; agents are re-imported per match
-under a fresh module name so any module-level singletons (e.g. apollo's
-`_BOT = apollo_native.Bot()`) are re-created cleanly per match.
+Matches can run concurrently in worker processes. Within each worker process,
+agents are re-imported per match under a fresh module name so any module-level
+singletons (e.g. apollo's `_BOT = apollo_native.Bot()`) are re-created cleanly
+per match.
 """
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import contextlib
 import importlib.util
 import logging
@@ -115,6 +117,12 @@ def run_one_match(bot_paths, seed, match_idx):
     return rewards, steps_run, avg_ms
 
 
+def run_match_job(job):
+    bot_paths, seed, match_idx = job
+    rewards, steps, avg_ms = run_one_match(bot_paths, seed, match_idx)
+    return match_idx, seed, rewards, steps, avg_ms
+
+
 def main():
     parser = argparse.ArgumentParser(description="Batch tournament between two bots.")
     parser.add_argument("bot1")
@@ -126,7 +134,18 @@ def main():
         default=1,
         help="First seed to use; subsequent matches use start_seed+1, +2, ...",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=8,
+        help="Number of matches to run concurrently. Use 1 for sequential execution.",
+    )
     args = parser.parse_args()
+
+    if args.n_matches < 1:
+        parser.error("n_matches must be at least 1")
+    if args.threads < 1:
+        parser.error("--threads must be at least 1")
 
     bot_names = [args.bot1, args.bot2]
     bot_paths = [bot_entry(name) for name in bot_names]
@@ -138,15 +157,16 @@ def main():
         return 1
 
     n = args.n_matches
+    threads = min(args.threads, n)
     wins = [0, 0]
     draws = 0
     sum_steps = 0
     sum_avg_ms = [0.0, 0.0]
 
-    print(f"Running {n} matches: {bot_names[0]} vs {bot_names[1]} (seeds {args.start_seed}..{args.start_seed + n - 1})")
-    for k in range(n):
-        seed = args.start_seed + k
-        rewards, steps, avg_ms = run_one_match(bot_paths, seed, k)
+    def record_result(result):
+        nonlocal draws, sum_steps
+
+        _match_idx, seed, rewards, steps, avg_ms = result
         r0, r1 = rewards[0], rewards[1]
         if r0 is None or r1 is None:
             winner = "?"
@@ -166,6 +186,28 @@ def main():
             f"  seed={seed:>6} steps={steps:>3} r=({r0},{r1}) -> {winner}  "
             f"ms=({avg_ms[0]:.2f},{avg_ms[1]:.2f})"
         )
+
+    print(
+        f"Running {n} matches: {bot_names[0]} vs {bot_names[1]} "
+        f"(seeds {args.start_seed}..{args.start_seed + n - 1}, threads={threads})"
+    )
+
+    jobs = [(bot_paths, args.start_seed + k, k) for k in range(n)]
+    if threads == 1:
+        for job in jobs:
+            record_result(run_match_job(job))
+    else:
+        results_by_idx = {}
+        next_to_print = 0
+        with ProcessPoolExecutor(max_workers=threads) as executor:
+            futures = [executor.submit(run_match_job, job) for job in jobs]
+            for future in as_completed(futures):
+                result = future.result()
+                match_idx = result[0]
+                results_by_idx[match_idx] = result
+                while next_to_print in results_by_idx:
+                    record_result(results_by_idx.pop(next_to_print))
+                    next_to_print += 1
 
     decided = wins[0] + wins[1]
     p0_rate = (wins[0] / decided * 100.0) if decided else 0.0

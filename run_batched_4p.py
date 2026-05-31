@@ -2,14 +2,16 @@
 seed range and reports win rate / average step time.
 
 Usage:
-    python run_batched_4p.py <bot1> <bot2> <bot3> <bot4> <n_matches> [--start-seed S]
+    python run_batched_4p.py <bot1> <bot2> <bot3> <bot4> <n_matches> [--start-seed S] [--threads T]
 
-Each match runs in the same Python process; agents are re-imported per match
-under a fresh module name so any module-level singletons (e.g. apollo's
-`_BOT = apollo_native.Bot()`) are re-created cleanly per match.
+Matches can run concurrently in worker processes. Within each worker process,
+agents are re-imported per match under a fresh module name so any module-level
+singletons (e.g. apollo's `_BOT = apollo_native.Bot()`) are re-created cleanly
+per match.
 """
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import contextlib
 import itertools
 import importlib.util
@@ -142,6 +144,13 @@ def reorder_by_input(values, slot_order):
     return by_input
 
 
+def run_match_job(job):
+    bot_paths, seed, match_idx, slot_order = job
+    slotted_bot_paths = [bot_paths[i] for i in slot_order]
+    rewards, steps, avg_ms = run_one_match(slotted_bot_paths, seed, match_idx)
+    return match_idx, seed, slot_order, rewards, steps, avg_ms
+
+
 def main():
     parser = argparse.ArgumentParser(description="Batch tournament between four bots.")
     parser.add_argument("bot1")
@@ -155,10 +164,18 @@ def main():
         default=1,
         help="First seed to use; subsequent matches use start_seed+1, +2, ...",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=8,
+        help="Number of matches to run concurrently. Use 1 for sequential execution.",
+    )
     args = parser.parse_args()
 
     if args.n_matches < 1:
         parser.error("n_matches must be at least 1")
+    if args.threads < 1:
+        parser.error("--threads must be at least 1")
 
     bot_names = [args.bot1, args.bot2, args.bot3, args.bot4]
     bot_paths = [bot_entry(name) for name in bot_names]
@@ -170,22 +187,17 @@ def main():
         return 1
 
     n = args.n_matches
+    threads = min(args.threads, n)
     wins = [0] * N_PLAYERS
     draws = 0
     unknown = 0
     sum_steps = 0
     sum_avg_ms = [0.0] * N_PLAYERS
 
-    matchup = " vs ".join(bot_names)
-    print(
-        f"Running {n} matches: {matchup} "
-        f"(seeds {args.start_seed}..{args.start_seed + n - 1})"
-    )
-    for k in range(n):
-        seed = args.start_seed + k
-        slot_order = slot_order_for_seed(seed)
-        slotted_bot_paths = [bot_paths[i] for i in slot_order]
-        rewards, steps, avg_ms = run_one_match(slotted_bot_paths, seed, k)
+    def record_result(result):
+        nonlocal draws, unknown, sum_steps
+
+        _match_idx, seed, slot_order, rewards, steps, avg_ms = result
         rewards_by_input = reorder_by_input(rewards, slot_order)
         avg_ms_by_input = reorder_by_input(avg_ms, slot_order)
 
@@ -210,6 +222,32 @@ def main():
             f"  seed={seed:>6} steps={steps:>3} r=({rewards_str}) -> {winner_label}  "
             f"ms=({avg_ms_str})"
         )
+
+    matchup = " vs ".join(bot_names)
+    print(
+        f"Running {n} matches: {matchup} "
+        f"(seeds {args.start_seed}..{args.start_seed + n - 1}, threads={threads})"
+    )
+
+    jobs = [
+        (bot_paths, args.start_seed + k, k, slot_order_for_seed(args.start_seed + k))
+        for k in range(n)
+    ]
+    if threads == 1:
+        for job in jobs:
+            record_result(run_match_job(job))
+    else:
+        results_by_idx = {}
+        next_to_print = 0
+        with ProcessPoolExecutor(max_workers=threads) as executor:
+            futures = [executor.submit(run_match_job, job) for job in jobs]
+            for future in as_completed(futures):
+                result = future.result()
+                match_idx = result[0]
+                results_by_idx[match_idx] = result
+                while next_to_print in results_by_idx:
+                    record_result(results_by_idx.pop(next_to_print))
+                    next_to_print += 1
 
     decided = sum(wins)
     print()
