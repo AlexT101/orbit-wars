@@ -175,7 +175,7 @@ def main() -> int:
     bundle = HERE / "submission.tar.gz"
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        (td / "main.py").write_text(KAGGLE_MAIN_PY)
+        (td / "main.py").write_text(KAGGLE_MAIN_PY, encoding="utf-8")
         shutil.copy(BIN_OUT, td / "alphaow-bot")
         os.chmod(td / "alphaow-bot", 0o755)
         shutil.copy(WEIGHTS, td / "xgb_top10_d6.json")
