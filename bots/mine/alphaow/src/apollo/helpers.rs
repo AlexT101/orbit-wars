@@ -34,18 +34,7 @@ pub fn point_to_segment_distance_sq(
     x1: f64, y1: f64,
     x2: f64, y2: f64,
 ) -> f64 {
-    let dx = x2 - x1;
-    let dy = y2 - y1;
-    let l2 = dx * dx + dy * dy;
-    let (qx, qy) = if l2 == 0.0 {
-        (x1, y1)
-    } else {
-        let t = (((px - x1) * dx + (py - y1) * dy) / l2).clamp(0.0, 1.0);
-        (x1 + t * dx, y1 + t * dy)
-    };
-    let ex = px - qx;
-    let ey = py - qy;
-    ex * ex + ey * ey
+    crate::apollo::engine::point_to_segment_distance_sq((px, py), (x1, y1), (x2, y2))
 }
 
 #[inline]

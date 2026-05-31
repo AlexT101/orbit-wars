@@ -6,19 +6,15 @@
 
 #![allow(dead_code)]
 
-use crate::apollo::constants::{EPISODE_STEPS, HORIZON};
+use crate::apollo::constants::{EPISODE_STEPS, HORIZON, REACTIVE_TURNS};
 use crate::apollo::engine::{EngineState, Fleet, MoveAction, Planet};
 use crate::apollo::entity_cache::EntityCache;
 use crate::apollo::helpers::ArrivalLedger;
 use crate::apollo::engine::Simulator;
 use crate::apollo::world::WorldState;
 
-pub const REACTIVE_TURNS: i64 = 2;
-pub const BALLISTIC_TURNS: i64 = 20;
-
-pub type PlannedMove = (i64, f64, i64);
-pub type PlanFn = for<'a> fn(&WorldState<'a>) -> Vec<PlannedMove>;
-pub type CandidateFn = for<'a> fn(&WorldState<'a>) -> Vec<Vec<PlannedMove>>;
+pub type PlanFn = for<'a> fn(&WorldState<'a>) -> Vec<MoveAction>;
+pub type CandidateFn = for<'a> fn(&WorldState<'a>) -> Vec<Vec<MoveAction>>;
 
 /// Score pre-built candidate plans via rollout and return the best. The
 /// planner hooks make the rollout/search layer strategy-agnostic: any policy
@@ -27,13 +23,13 @@ pub type CandidateFn = for<'a> fn(&WorldState<'a>) -> Vec<Vec<PlannedMove>>;
 pub fn pick_plan_by_rollout(
     initial_state: &EngineState,
     my_player: i64,
-    candidates: Vec<Vec<PlannedMove>>,
+    candidates: Vec<Vec<MoveAction>>,
     reply_plan_fn: PlanFn,
     opponent_candidate_fn: CandidateFn,
     cache: &mut EntityCache,
     remaining_overage_time: f64,
     shared_ledger: Option<&ArrivalLedger>,
-) -> Vec<PlannedMove> {
+) -> Vec<MoveAction> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -77,7 +73,7 @@ pub fn pick_plan_by_rollout(
 pub fn rollout_score(
     initial_state: &EngineState,
     my_player: i64,
-    my_moves: &[PlannedMove],
+    my_moves: &[MoveAction],
     turn0_opponents: &[Vec<MoveAction>],
     reply_plan_fn: PlanFn,
     cache: &mut EntityCache,
@@ -109,7 +105,7 @@ pub fn rollout_score(
             let pid = p as i64;
             if pid == my_player {
                 if t == 0 {
-                    actions[p] = to_move_actions(my_moves);
+                    actions[p] = my_moves.to_vec();
                     continue;
                 }
             } else if t == 0 {
@@ -119,14 +115,14 @@ pub fn rollout_score(
             let ledger = ledger.as_ref().expect("ledger built for t >= 1");
             let mut ws = WorldState::from_simulator_with_ledger(pid, &sim, ledger, cache);
             ws.remaining_overage_time = remaining_overage_time;
-            actions[p] = to_move_actions(&reply_plan_fn(&ws));
+            actions[p] = reply_plan_fn(&ws);
         }
         let action_slices: Vec<&[MoveAction]> = actions.iter().map(|v| v.as_slice()).collect();
         sim.step_with_actions(&action_slices, Some(&*cache));
     }
 
     // Ballistic phase: no new launches. Fleets in flight still resolve.
-    for _ in 0..BALLISTIC_TURNS {
+    for _ in 0..HORIZON {
         if sim.step_count() >= EPISODE_STEPS {
             break;
         }
@@ -170,7 +166,7 @@ pub fn opponent_turn0_actions(
         }
         let mut ws = WorldState::from_simulator_with_ledger(pid, &sim, ledger, cache);
         ws.remaining_overage_time = remaining_overage_time;
-        actions[p] = to_move_actions(&reply_plan_fn(&ws));
+        actions[p] = reply_plan_fn(&ws);
     }
     cache.set_current_turn(saved_turn);
     actions
@@ -241,19 +237,8 @@ pub fn opponent_turn0_variants(
         .into_iter()
         .map(|opp_moves| {
             let mut per_player: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
-            per_player[opp_player as usize] = to_move_actions(&opp_moves);
+            per_player[opp_player as usize] = opp_moves;
             per_player
-        })
-        .collect()
-}
-
-fn to_move_actions(moves: &[PlannedMove]) -> Vec<MoveAction> {
-    moves
-        .iter()
-        .map(|&(from_id, angle, ships)| MoveAction {
-            from_id,
-            angle,
-            ships,
         })
         .collect()
 }

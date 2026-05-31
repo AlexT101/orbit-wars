@@ -11,7 +11,7 @@
 //!     [`WorldState::projected_timeline`] — hellburner's `simulate_planet_timeline`.
 //!
 //! Hellburner-specific data we build here:
-//!   * Proximity graph (`MAX_DISTANCE=38`, `ROTATION_LOOK_AHEAD=10`).
+//!   * Proximity graph (`MAX_DISTANCE=38`, `ROTATION_LOOK_AHEAD_TURNS=10`).
 //!   * `reinforcement_target` per owned planet (frontline BFS).
 //!   * Per-turn `PlanState` (spent ships + planned commitments).
 
@@ -21,43 +21,17 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::apollo::constants::HORIZON;
-use crate::apollo::engine::Planet;
+use crate::apollo::constants::{
+    A_S_LOOKAHEAD, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, OFFSET_LOOKAHEAD, OPENING_TURNS,
+    ROTATION_LOOK_AHEAD_TURNS, SECOND_ENEMY_ARRIVAL_TOL,
+};
+use crate::apollo::engine::{MoveAction, Planet};
 use crate::apollo::entity_cache::{AimCacheVerdict};
 use crate::apollo::helpers::{
     aim_with_prediction, dist, simulate_checkpoint_into, simulate_planet_timeline, AimResult,
     ArrivalEvent, PlanetTimeline,
 };
 use crate::apollo::world::{merge_arrivals, WorldState};
-
-// ── Constants ────────────────────────────────────────────────────────────
-const EARLY_ROUNDS: i64 = 3;
-const MAX_DISTANCE: f64 = 38.0;
-const ROTATION_LOOK_AHEAD: i64 = 10;
-const REINFORCEMENT_SIZE: i64 = 17;
-const GARRISON_SIZE: i64 = 11;
-const SECOND_ENEMY_ARRIVAL_TOL: i64 = 1;
-const TRIM_MIN_SHIPS: i64 = 10;
-/// How many turns of delayed-launch we sweep per target when computing the
-/// urgency of acting **this** turn. The δ=0 entry decides what we actually
-/// commit; δ>0 entries only feed the priority calculation.
-const OFFSET_LOOKAHEAD: i64 = 5;
-/// Cap on inbound owned sources we enumerate for full 2^N subset search.
-/// Beyond this the nearest `MAX_SUBSET_SOURCES` are kept (sources are
-/// already distance-ordered by `inbound_edges`) — in practice maps in this
-/// game rarely have more than a handful of inbound owned neighbors.
-const MAX_SUBSET_SOURCES: usize = 10;
-/// Max extra launch delay (beyond the subset's base offset) a single source
-/// will accept when coordinating arrivals to land on the same turn as the
-/// subset's latest-arriving source. Per-source scan, cache-friendly.
-const MAX_COORD_DELAY: i64 = 5;
-/// How many turns past the natural max-arrival the coordinated schedule will
-/// push the cluster. Lets slow-growing sources accumulate `production·d`
-/// extra ships at the cost of arriving later — a richer brute-force sweep
-/// that complements the `MAX_COORD_DELAY` per-source delay budget.
-const A_S_LOOKAHEAD: i64 = 3;
-
-type FleetOrder = (i64, f64, i64); // (src_id, angle, ships)
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -89,14 +63,17 @@ impl<'a> HellburnerModel<'a> {
             .map(|p| p.id)
             .collect();
 
+        let non_comets: Vec<&Planet> = state
+            .planets
+            .iter()
+            .filter(|p| non_comet_ids.contains(&p.id))
+            .collect();
+
         let mut future_pos: HashMap<i64, [f64; 2]> = HashMap::default();
-        for p in &state.planets {
-            if !non_comet_ids.contains(&p.id) {
-                continue;
-            }
+        for p in &non_comets {
             let pos = state
                 .entity_cache
-                .position(p.id, 1 + ROTATION_LOOK_AHEAD)
+                .position(p.id, 1 + ROTATION_LOOK_AHEAD_TURNS)
                 .unwrap_or([p.x, p.y]);
             future_pos.insert(p.id, pos);
         }
@@ -107,12 +84,9 @@ impl<'a> HellburnerModel<'a> {
             inbound_edges.insert(pid, Vec::new());
             outbound_edges.insert(pid, Vec::new());
         }
-        for src in &state.planets {
-            if !non_comet_ids.contains(&src.id) {
-                continue;
-            }
-            for dst in &state.planets {
-                if dst.id == src.id || !non_comet_ids.contains(&dst.id) {
+        for src in &non_comets {
+            for dst in &non_comets {
+                if src.id == dst.id {
                     continue;
                 }
                 let [fx, fy] = future_pos[&dst.id];
@@ -189,13 +163,6 @@ fn build_reinforcement_targets(
     outbound: &HashMap<i64, Vec<(i64, f64)>>,
     player: i64,
 ) -> HashMap<i64, i64> {
-    let owned_ids: HashSet<i64> = state
-        .my_planets
-        .iter()
-        .filter(|p| non_comet_ids.contains(&p.id))
-        .map(|p| p.id)
-        .collect();
-
     let mut front_line: HashSet<i64> = HashSet::default();
     for p in &state.my_planets {
         if !non_comet_ids.contains(&p.id) {
@@ -226,7 +193,7 @@ fn build_reinforcement_targets(
         head += 1;
         let dh = hops[&node];
         for (sid, _) in &inbound[&node] {
-            if !owned_ids.contains(sid) || hops.contains_key(sid) {
+            if state.planet(*sid).owner != player || hops.contains_key(sid) {
                 continue;
             }
             hops.insert(*sid, dh + 1);
@@ -257,7 +224,7 @@ fn build_reinforcement_targets(
         let mut reachable: Vec<i64> = outbound[&p.id]
             .iter()
             .filter_map(|(did, _)| {
-                if owned_ids.contains(did)
+                if state.planet(*did).owner == player
                     && !front_line.contains(did)
                     && hops.contains_key(did)
                 {
@@ -580,7 +547,7 @@ fn evaluate_frontline_strategy(
     if scratch.candidates.is_empty() {
         return None;
     }
-    let n = scratch.candidates.len().min(MAX_SUBSET_SOURCES);
+    let n = scratch.candidates.len();
 
     // ── 2. Enumerate non-empty subsets × {uncoordinated, coordinated}. ──
     //       Schedule A (uncoordinated): each source at `offset`. Earliest
@@ -906,16 +873,13 @@ fn evaluate_frontline_strategy(
                 excess = margin;
             }
         }
-        if excess == i64::MAX {
-            excess = 0;
-        }
         let marginal = &best_orders[best_marginal_in_orders];
         let src_id = marginal.src_id;
         let max_ships = marginal.ships;
         let marginal_eff_offset = marginal.effective_offset;
         let excess = excess.min(max_ships);
         let keep = excess / 2;
-        let trimmed = (max_ships - keep).max(TRIM_MIN_SHIPS);
+        let trimmed = (max_ships - keep).max(1);
         if trimmed < max_ships {
             if let Some((t_angle, t_turns, _, _, _)) =
                 model.plan_shot(src_id, target.id, trimmed, marginal_eff_offset)
@@ -1131,7 +1095,7 @@ fn send_reinforcements(
     world: &WorldState,
     model: &HellburnerModel,
     plan: &PlanState,
-) -> Vec<FleetOrder> {
+) -> Vec<MoveAction> {
     let mut out = Vec::new();
     let player = world.player;
     let empty: Vec<(i64, f64)> = Vec::new();
@@ -1143,7 +1107,7 @@ fn send_reinforcements(
             continue;
         };
         let available = plan.ships_available(p);
-        if available < REINFORCEMENT_SIZE + GARRISON_SIZE {
+        if available <= 0 {
             continue;
         }
         let has_enemy_incoming = model
@@ -1155,13 +1119,35 @@ fn send_reinforcements(
         if has_enemy_incoming {
             continue;
         }
-        let ships = available - GARRISON_SIZE;
-        let Some((angle, _turns, _, _, _)) =
+        let ships = available;
+        let Some((angle, turns_now, _, _, _)) =
             model.plan_shot(p.id, target_id, ships, 0)
         else {
+            // Blocked now — we can only emit launch-this-turn orders, so nothing
+            // to send regardless of how waiting would compare.
             continue;
         };
-        out.push((p.id, angle, ships));
+        let arrival_now = turns_now.max(1);
+
+        // Hold if waiting delivers the fleet no later than launching now.
+        // Fleet speed is log-shaped in ship count, so `production·d` extra ships
+        // accumulated over `d` turns (and any shifted geometry / cleared blockers
+        // at the future launch turn) can speed the fleet enough to offset the
+        // launch delay. When that happens, sending now is strictly dominated:
+        // same-or-earlier arrival while delivering fewer ships. We re-plan every
+        // turn, so this is a per-turn send-vs-hold decision, not a commitment to
+        // a specific delay. Replaces the old fixed `REINFORCEMENT_SIZE` floor.
+        let wait_is_better = (1..=OFFSET_LOOKAHEAD).any(|d| {
+            let ships_d = ships + p.production * d;
+            match model.plan_shot(p.id, target_id, ships_d, d) {
+                Some((_, turns_d, _, _, _)) => (d + turns_d).max(1) <= arrival_now,
+                None => false,
+            }
+        });
+        if wait_is_better {
+            continue;
+        }
+        out.push(MoveAction { from_id: p.id, angle, ships });
     }
     out
 }
@@ -1363,7 +1349,7 @@ fn early_score(state: &EarlyState, world: &WorldState) -> i64 {
     total
 }
 
-fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder> {
+fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<MoveAction> {
     let player = world.player;
     let owned_ids: HashSet<i64> = world
         .my_planets
@@ -1527,7 +1513,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
     );
 
     // Emit only moves whose launch_turn == current step.
-    let mut moves: Vec<FleetOrder> = Vec::new();
+    let mut moves: Vec<MoveAction> = Vec::new();
     for (target_planet, (source_id, fleet_size, launch_turn), _) in &best_sequence {
         if *launch_turn != world.step {
             continue;
@@ -1537,7 +1523,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
         else {
             continue;
         };
-        moves.push((*source_id, angle, *fleet_size));
+        moves.push(MoveAction { from_id: *source_id, angle, ships: *fleet_size });
     }
     moves
 }
@@ -1595,9 +1581,9 @@ fn run_strategy(
     world: &WorldState,
     model: &HellburnerModel,
     strategy: SelectionStrategy,
-) -> (Vec<FleetOrder>, PlanState) {
+) -> (Vec<MoveAction>, PlanState) {
     let mut state = PlanState::default();
-    let mut moves: Vec<FleetOrder> = Vec::new();
+    let mut moves: Vec<MoveAction> = Vec::new();
 
     // Fixed-order candidate targets (non-comet, with inbound edges). The scan
     // order matches the original per-iteration sweep so selection tie-breaking
@@ -1716,7 +1702,7 @@ fn run_strategy(
         for o in &orders {
             state.commit(o.src_id, target_id, o.ships, o.arrival, world.player);
             if o.effective_offset == 0 {
-                moves.push((o.src_id, o.angle, o.ships));
+                moves.push(MoveAction { from_id: o.src_id, angle: o.angle, ships: o.ships });
             }
             if let Some(outs) = model.outbound_edges.get(&o.src_id) {
                 for (did, _) in outs {
@@ -1741,19 +1727,19 @@ fn run_strategy(
 /// rollout layer), so its position is load-bearing — see the
 /// `search_candidates_includes_greedy_plan` test.
 const STRATEGIES: [SelectionStrategy; 4] = [
-    SelectionStrategy::PriorityFirst,
-    SelectionStrategy::ScoreFirst,
     SelectionStrategy::ScorePerShip,
     SelectionStrategy::ProductionFirst,
+    SelectionStrategy::PriorityFirst,
+    SelectionStrategy::ScoreFirst,
 ];
 
-pub fn plan(world: &WorldState) -> Vec<FleetOrder> {
+pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     if world.enemy_planets.is_empty() {
         return Vec::new();
     }
     let model = HellburnerModel::build(world);
 
-    if world.step < EARLY_ROUNDS {
+    if world.step < OPENING_TURNS {
         return run_early_game(world, &model);
     }
 
@@ -1804,17 +1790,17 @@ pub fn evaluate_one_target(world: &WorldState, target_id: i64) -> Option<(Vec<(i
     Some((orders, win.max_arrival))
 }
 
-pub fn search_candidates(world: &WorldState) -> Vec<Vec<FleetOrder>> {
+pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     if world.enemy_planets.is_empty() {
         return vec![Vec::new()];
     }
     let model = HellburnerModel::build(world);
 
-    if world.step < EARLY_ROUNDS {
+    if world.step < OPENING_TURNS {
         return vec![run_early_game(world, &model)];
     }
 
-    let mut out: Vec<Vec<FleetOrder>> = Vec::with_capacity(STRATEGIES.len());
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len());
     for &strat in &STRATEGIES {
         let (moves, _) = run_strategy(world, &model, strat);
         if !out.iter().any(|prev| prev == &moves) {

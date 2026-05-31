@@ -135,7 +135,7 @@ pub fn apollo_plan(state: &GameState, player: i32, cache: &EntityCache) -> Vec<A
     );
     hellburner::plan(&world)
         .into_iter()
-        .map(|(from_id, angle, ships)| (from_id, angle, ships, player))
+        .map(|m| (m.from_id, m.angle, m.ships, player))
         .collect()
 }
 
@@ -168,7 +168,7 @@ pub fn apollo_candidates(state: &GameState, player: i32) -> Vec<Vec<Action>> {
         .map(|orders| {
             orders
                 .into_iter()
-                .map(|(from_id, angle, ships)| (from_id, angle, ships, player))
+                .map(|m| (m.from_id, m.angle, m.ships, player))
                 .collect::<Vec<Action>>()
         })
         .collect()

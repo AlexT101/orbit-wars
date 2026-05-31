@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use std::f64::consts::FRAC_PI_2;
 use std::sync::Mutex;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -14,7 +15,7 @@ use crate::apollo::engine::{CometGroup, Planet};
 
 /// Aim solver result tuple: `(angle, turns, target_x, target_y,
 /// fractional_flight_time)`. See [`crate::apollo::blockers::AimResult`].
-pub type AimResult = (f64, i64, f64, f64, f64);
+pub use crate::apollo::blockers::AimResult;
 
 #[derive(Clone, Copy)]
 struct CachedAim {
@@ -219,6 +220,21 @@ impl EntityCache {
         }
     }
 
+    /// Store an aim result and, for free, populate its three quartet siblings.
+    ///
+    /// The whole obstacle field (sun at CENTER + every planet + every comet) is
+    /// invariant under rotation by 90° about CENTER **at every absolute turn**
+    /// — orbital motion and comet motion commute with that rotation, and each
+    /// quartet's four members are exactly the four reflections of the same base
+    /// point (see `rust_engine/src/lib.rs`). Hence rotating *both* endpoints to
+    /// their corresponding quartet members (member `i` → member `j` via the
+    /// rotation `(TAG[j] − TAG[i])·90°`) yields a congruent aim problem whose
+    /// solution is this one rotated by the same `k` quarter-turns: `angle` gains
+    /// `k·π/2`, the target point rotates about CENTER, and `turns`/`flight_time`
+    /// are unchanged. `None` (no feasible shot) propagates too. Both endpoints
+    /// are rotated by the *same* `k`, so same-quartet `src`/`target` pairs need
+    /// no special handling. Siblings share the `abs_launch` slot (the symmetry
+    /// holds at that exact turn) and a fresh `stored_at_turn`.
     pub fn aim_cache_store(
         &self,
         src: i64,
@@ -231,11 +247,36 @@ impl EntityCache {
         if abs_launch < 0 || (abs_launch as usize) >= EPISODE_STEPS as usize {
             return;
         }
-        let entry = CachedAim {
-            result,
-            stored_at_turn: self.current_turn,
-        };
-        self.aim_cache.lock().unwrap()[abs_launch as usize].insert((src, target, ships), entry);
+        let slot = abs_launch as usize;
+        let mut map = self.aim_cache.lock().unwrap();
+
+        // Original entry (always stored, preserving prior behavior).
+        map[slot].insert(
+            (src, target, ships),
+            CachedAim {
+                result,
+                stored_at_turn: self.current_turn,
+            },
+        );
+
+        // Three rotated siblings. Gated on existence so we never populate ids for
+        // a comet member that has expired or not yet spawned.
+        for k in 1..=3 {
+            let sib_src = rot_sibling(src, k);
+            let sib_target = rot_sibling(target, k);
+            if !self.entities.contains_key(&sib_src)
+                || !self.entities.contains_key(&sib_target)
+            {
+                continue;
+            }
+            map[slot].insert(
+                (sib_src, sib_target, ships),
+                CachedAim {
+                    result: rotate_aim_result(result, k),
+                    stored_at_turn: self.current_turn,
+                },
+            );
+        }
     }
 
     /// Drop all cached aim results for launches at absolute `turn`. Called
@@ -304,6 +345,52 @@ fn comet_spawn_crossed(stored: i64, current: i64) -> bool {
     COMET_SPAWN_STEPS
         .iter()
         .any(|&s| s > stored && s <= current)
+}
+
+/// Member-index ⇄ rotation-tag map for a quartet. The four members of a base
+/// point are its four D4 reflections, generated in this index order (engine
+/// `generate_planets` / `generate_comet_paths`); ordering them by the
+/// rotation taking member 0 → member i gives tags `[0, 1, 3, 2]` (members 2 and
+/// 3 are swapped vs. naive index order). `TAG` is its own inverse, so the same
+/// table maps both directions. The rotation from member `i` to member `j` is
+/// `(TAG[j] − TAG[i]) mod 4` quarter-turns CCW about CENTER.
+const TAG: [i64; 4] = [0, 1, 3, 2];
+
+/// Id of the quartet sibling reached by rotating `id`'s position `k`
+/// quarter-turns CCW about CENTER. Ids are assigned 4-per-group on a `/4`
+/// boundary (planets `0..4G`; each comet group's four ids start at `max_id+1`,
+/// itself a multiple of 4), so `id & 3` is the member index and `id - (id & 3)`
+/// the quartet base.
+#[inline]
+pub(crate) fn rot_sibling(id: i64, k: i64) -> i64 {
+    let m = (id & 3) as usize;
+    let rotated = TAG[((TAG[m] + k) & 3) as usize];
+    (id - id % 4) + rotated
+}
+
+/// Rotate `(x, y)` `k` quarter-turns CCW about CENTER. Exact (each step is the
+/// integer-coefficient map `(x, y) → (-y, x)` about CENTER).
+#[inline]
+fn rot_point(x: f64, y: f64, k: i64) -> (f64, f64) {
+    let mut dx = x - CENTER;
+    let mut dy = y - CENTER;
+    for _ in 0..(k & 3) {
+        let (nx, ny) = (-dy, dx);
+        dx = nx;
+        dy = ny;
+    }
+    (CENTER + dx, CENTER + dy)
+}
+
+/// Rotate an aim result `k` quarter-turns CCW: bearing gains `k·π/2`, the target
+/// point rotates about CENTER, `turns`/`flight_time` are invariant. `None`
+/// (no feasible shot) maps to `None`.
+#[inline]
+fn rotate_aim_result(result: Option<AimResult>, k: i64) -> Option<AimResult> {
+    result.map(|(angle, turns, tx, ty, flight_time)| {
+        let (rx, ry) = rot_point(tx, ty, k);
+        (angle + (k & 3) as f64 * FRAC_PI_2, turns, rx, ry, flight_time)
+    })
 }
 
 fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {
