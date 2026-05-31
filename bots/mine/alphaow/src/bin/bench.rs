@@ -81,8 +81,7 @@ fn main() {
     let mut sink = 0i64;
     for _ in 0..n {
         let mut s = state.clone();
-        let mut r = policy::XorRng(s.step as u64 | 1);
-        alphaow_bot::sim::tick(&mut s, &mut r);
+        alphaow_bot::sim::tick(&mut s);
         sink += s.fleets.len() as i64;
     }
     let dt = t0.elapsed().as_secs_f64();
@@ -103,13 +102,12 @@ fn main() {
     let mut sink = 0i64;
     for _ in 0..(n/10) {
         let mut s = state.clone();
-        let mut r = policy::XorRng(1);
         for _ in 0..8 {
             let a = ow2_plan::plan(&s, s.player, false);
             let b = ow2_plan::plan(&s, 1 - s.player, false);
             alphaow_bot::sim::apply_launches(&mut s, &a);
             alphaow_bot::sim::apply_launches(&mut s, &b);
-            alphaow_bot::sim::tick(&mut s, &mut r);
+            alphaow_bot::sim::tick(&mut s);
             sink += s.fleets.len() as i64;
         }
     }
@@ -120,8 +118,7 @@ fn main() {
     let mut sink2 = 0i64;
     for _ in 0..n {
         let mut s = state.clone();
-        let mut r = policy::XorRng(s.step as u64 | 1);
-        for _ in 0..15 { alphaow_bot::sim::tick(&mut s, &mut r); }
+        for _ in 0..15 { alphaow_bot::sim::tick(&mut s); }
         sink2 += s.fleets.len() as i64;
     }
     let dt = t0.elapsed().as_secs_f64();

@@ -17,7 +17,7 @@ use crate::policy::XorRng;
 use crate::sim::{alive_players, apply_launches, tick, Action};
 use crate::{ow2_plan, GameState};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 const EXPLORATION: f64 = 0.3;
@@ -77,6 +77,80 @@ thread_local! {
     /// Stash the root after each turn, so next turn's matching state can
     /// reuse the joint subtree corresponding to (my_chosen, opp_actual).
     static LAST_TREE: RefCell<Option<(i64, Box<Node>)>> = RefCell::new(None);
+
+    /// Persistent apollo `EntityCache`, shared across every candidate-generation
+    /// call, every rollout, and every real turn of a game. The cache holds no
+    /// strategy/player-specific state — only game-static orbiter geometry and an
+    /// owner-agnostic aim cache keyed by absolute launch turn — so a single
+    /// instance is correct everywhere. Paired with a `GeometryKey` so a process
+    /// that serves multiple games (benchmarks, harness reuse) rebuilds on a new
+    /// map instead of reusing stale geometry. Mirrors apollo's `Bot.cache`
+    /// (`bots/mine/apollo/src/lib.rs`).
+    static ENTITY_CACHE: RefCell<Option<(GeometryKey, crate::apollo::entity_cache::EntityCache)>> =
+        RefCell::new(None);
+}
+
+/// Fingerprint of a game's fixed geometry: angular velocity plus the static
+/// orbiter layout (id + initial radius/angle of every non-comet planet). Two
+/// observations of the same game share this; a new game (different map or
+/// angular velocity) does not, triggering a cache rebuild.
+#[derive(Clone, PartialEq)]
+struct GeometryKey {
+    av_bits: u64,
+    planets: Vec<(i64, u64, u64)>,
+}
+
+fn geometry_key(state: &GameState) -> GeometryKey {
+    let mut planets: Vec<(i64, u64, u64)> = state
+        .planets
+        .iter()
+        .filter(|p| !p.is_comet)
+        .map(|p| (p.id, p.orbital_radius.to_bits(), p.initial_angle.to_bits()))
+        .collect();
+    planets.sort_unstable_by_key(|t| t.0);
+    GeometryKey {
+        av_bits: state.angular_velocity.to_bits(),
+        planets,
+    }
+}
+
+/// Rebuild-if-needed + per-turn refresh of the persistent [`ENTITY_CACHE`],
+/// mirroring apollo's `Bot::refresh_cache`: build once per game, refresh comets
+/// only on a spawn step, then set the current turn and drop the now-unqueryable
+/// prior turn's aim slot. Run once at the top of [`best_move`].
+fn refresh_entity_cache(state: &GameState) {
+    use crate::apollo::constants::COMET_SPAWN_STEPS;
+    let key = geometry_key(state);
+    ENTITY_CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let needs_build = match slot.as_ref() {
+            Some((k, _)) => *k != key,
+            None => true,
+        };
+        if needs_build {
+            *slot = Some((key, crate::apollo_bridge::rollout_cache(state)));
+        } else if COMET_SPAWN_STEPS.contains(&state.step) {
+            if let Some((_, cache)) = slot.as_mut() {
+                crate::apollo_bridge::refresh_cache_comets(cache, state);
+            }
+        }
+        if let Some((_, cache)) = slot.as_mut() {
+            cache.set_current_turn(state.step);
+            cache.clear_aim_cache_slot(state.step - 1);
+        }
+    });
+}
+
+/// Run `f` with the shared entity cache's `current_turn` set to `turn`. Used by
+/// candidate generation (one call per node, whose step may differ from the real
+/// turn). The cache is interior-mutable for its aim table, so `f` takes `&_`.
+fn with_entity_cache_at<R>(turn: i64, f: impl FnOnce(&crate::apollo::entity_cache::EntityCache) -> R) -> R {
+    ENTITY_CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let (_, cache) = slot.as_mut().expect("entity cache built in best_move");
+        cache.set_current_turn(turn);
+        f(cache)
+    })
 }
 
 #[derive(Clone)]
@@ -173,7 +247,9 @@ fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: boo
         }
     }
     if apollo_candidates_enabled() {
-        let mut alts = crate::apollo_bridge::apollo_candidates(state, player);
+        let mut alts = with_entity_cache_at(state.step, |cache| {
+            crate::apollo_bridge::apollo_candidates(state, player, cache)
+        });
         if !alts.is_empty() {
             if alts.len() > k {
                 alts.truncate(k);
@@ -196,6 +272,38 @@ fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: boo
     } else {
         enumerate_alternatives_fast(state, player, k)
     }
+}
+
+/// Candidate sets for both players at `state`. Fast path: when apollo candidates
+/// are the active generator for both (the default — no focused override), build
+/// the player-agnostic `Simulator` + arrival ledger once and derive both sets
+/// from it via [`crate::apollo_bridge::apollo_candidates_pair`], so the
+/// `HORIZON`-turn ledger walk is paid once instead of per player. Falls back to
+/// the per-player [`enumerate_alternatives`] when focused candidates are enabled
+/// or apollo yields nothing for a side.
+fn enumerate_pair(
+    state: &GameState,
+    me: i32,
+    opp: i32,
+    k: usize,
+    is_root: bool,
+) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
+    if !focused_candidates_enabled() && apollo_candidates_enabled() {
+        let (mut my, mut op) = with_entity_cache_at(state.step, |cache| {
+            crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache)
+        });
+        if !my.is_empty() && !op.is_empty() {
+            my.truncate(k);
+            op.truncate(k);
+            return (my, op);
+        }
+        // One side empty — fall back to the per-player path (its ow2 fallback
+        // fills the empty side; the non-empty side is recomputed, rare).
+    }
+    (
+        enumerate_alternatives(state, me, k, is_root),
+        enumerate_alternatives(state, opp, k, is_root),
+    )
 }
 
 fn actions_equal(a: &[Action], b: &[Action]) -> bool {
@@ -357,8 +465,7 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     }
     let k = if root { k_root() } else { k_non_root() };
     let opp = dominant_enemy(&node.state, me).unwrap_or(1 - me);
-    let my_alts = enumerate_alternatives(&node.state, me, k, root);
-    let opp_alts = enumerate_alternatives(&node.state, opp, k, root);
+    let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k, root);
     let my_n = my_alts.len();
     let opp_n = opp_alts.len();
     node.my_priors = (0..my_n).map(|i| rank_prior(i, my_n)).collect();
@@ -382,14 +489,6 @@ fn apollo_rollout_enabled() -> bool {
             Some("0") | Some("false") | Some("off")
         )
     })
-}
-
-fn comet_id_set(state: &GameState) -> HashSet<i64> {
-    state
-        .comets
-        .iter()
-        .flat_map(|g| g.planet_ids.iter().copied())
-        .collect()
 }
 
 fn rollout_config() -> (&'static str, i64) {
@@ -455,15 +554,15 @@ fn prof_reset() {
 fn rollout(mut state: GameState, me: i32, rng: &mut XorRng) -> f64 {
     let _prof_t = if prof_enabled() { Some(Instant::now()) } else { None };
     let (mode, depth) = rollout_config();
-    // apollo rollout: build the EntityCache once at the leaf and reuse it across
-    // ticks (orbiter geometry is fixed for the whole game). `comet_ids` tracks
-    // the comet set so we only refresh (and discard cached blocker tables) when
-    // a comet actually spawns/expires mid-rollout.
-    let mut apollo_cache = if apollo_rollout_enabled() {
-        Some((crate::apollo_bridge::rollout_cache(&state), comet_id_set(&state)))
-    } else {
-        None
-    };
+    // apollo rollout borrows the persistent shared EntityCache (built once per
+    // game in `best_move`). The forward sim is comet-free (see `mcts_tick`), so
+    // the cache's comet set stays consistent with `state` throughout — no
+    // mid-rollout refresh needed, matching apollo's deliberately comet-free
+    // forward sim (`bots/mine/apollo/src/engine.rs`). Each reactive tick sets
+    // the cache's `current_turn` before planning; the next consumer (rollout
+    // tick, sibling node, or next real turn) does likewise, so no save/restore
+    // of `current_turn` is required.
+    let apollo = apollo_rollout_enabled();
     let reactive_turns = rollout_reactive_turns();
     for t in 0..depth {
         if state.step >= TERMINAL_STEP || alive_players(&state) <= 1 {
@@ -491,18 +590,14 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng) -> f64 {
         // tick() still moves fleets and resolves combat/production.
         if t < reactive_turns {
             let opp = dominant_enemy(&state, me);
-            let (my_act, opp_act) = if let Some((cache, comet_ids)) = apollo_cache.as_mut() {
-                cache.set_current_turn(state.step);
-                let cur = comet_id_set(&state);
-                if &cur != comet_ids {
-                    crate::apollo_bridge::refresh_cache_comets(cache, &state);
-                    *comet_ids = cur;
-                }
-                (
-                    crate::apollo_bridge::apollo_plan(&state, me, cache),
-                    opp.map(|o| crate::apollo_bridge::apollo_plan(&state, o, cache))
-                        .unwrap_or_default(),
-                )
+            let (my_act, opp_act) = if apollo {
+                ENTITY_CACHE.with(|cell| {
+                    let mut slot = cell.borrow_mut();
+                    let (_, cache) = slot.as_mut().expect("entity cache built in best_move");
+                    cache.set_current_turn(state.step);
+                    // Share one Simulator + arrival ledger across both players.
+                    crate::apollo_bridge::apollo_plan_pair(&state, me, opp, cache)
+                })
             } else if mode == "ow2_fast" {
                 (
                     crate::policy::rollout_policy_fast(&state, me),
@@ -520,7 +615,7 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng) -> f64 {
             apply_launches(&mut state, &my_act);
             apply_launches(&mut state, &opp_act);
         }
-        tick(&mut state, rng);
+        tick(&mut state);
     }
     if let Some(t) = _prof_t {
         let ns = t.elapsed().as_nanos() as u64;
@@ -611,7 +706,7 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng, is_root: bool) 
         apply_launches(&mut s, &node.opp_candidates[opp_idx]);
         crate::profiling::add(&crate::profiling::APPLY_LAUNCHES_NS, __al_t0);
         let __tick_t0 = std::time::Instant::now();
-        tick(&mut s, rng);
+        tick(&mut s);
         crate::profiling::add(&crate::profiling::TICK_NS, __tick_t0);
         crate::profiling::inc(&crate::profiling::TICK_CALLS);
         let rollout_value = rollout(s.clone(), me, rng);
@@ -659,6 +754,9 @@ fn state_hash(state: &GameState) -> u64 {
 }
 
 pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
+    // Build/refresh the persistent shared apollo cache before any candidate
+    // generation or rollout reads it.
+    refresh_entity_cache(state);
     let reuse_disabled = std::env::var("OW_NO_REUSE").is_ok();
     let target_hash = state_hash(state);
     let mut reused: Option<Box<Node>> = None;

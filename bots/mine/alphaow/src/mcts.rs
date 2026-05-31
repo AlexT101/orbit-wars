@@ -151,12 +151,11 @@ fn evaluate(state: &GameState, me: i32) -> f64 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(15);
     let mut s = state.clone();
-    let mut rng = XorRng(0xdeadbeef ^ (s.step as u64));
     for _ in 0..lookahead {
         if alive_players(&s) <= 1 || s.step >= TERMINAL_STEP {
             break;
         }
-        crate::sim::tick(&mut s, &mut rng);
+        tick(&mut s);
     }
     raw_score(&s, me)
 }
@@ -337,7 +336,7 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng, _depth: i64) -> f64 
         };
         apply_launches(&mut state, &my_act);
         apply_launches(&mut state, &opp_act);
-        tick(&mut state, rng);
+        tick(&mut state);
     }
     let v = evaluate(&state, me);
     // Add small noise ONLY to rollout-returned values (not to terminal-state
@@ -516,7 +515,7 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng) -> f64 {
                 let mut s = node.state.clone();
                 apply_launches(&mut s, my_action);
                 apply_launches(&mut s, &action);
-                tick(&mut s, rng);
+                tick(&mut s);
                 (s, NodeKind::MyTurn)
             }
         };
@@ -531,7 +530,7 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng) -> f64 {
                     let opp_act = crate::ow2_plan::plan(&s, o, nc);
                     apply_launches(&mut s, &opp_act);
                 }
-                tick(&mut s, rng);
+                tick(&mut s);
                 s
             }
         };
