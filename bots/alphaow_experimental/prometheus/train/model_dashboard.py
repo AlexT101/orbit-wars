@@ -359,6 +359,68 @@ def binary_metrics(y_true: np.ndarray, pred_prob: np.ndarray) -> dict[str, float
     }
 
 
+def baseline_accuracy_comparisons(
+    X: np.ndarray,
+    y_true: np.ndarray,
+    pred_prob: np.ndarray,
+    names: list[str],
+    infos: list[dict[str, str | int]],
+) -> list[dict[str, float | int | str]]:
+    """Accuracy of simple sign heuristics on the same validation rows."""
+    yb = (y_true > 0).astype(np.int32)
+    model_hard = (pred_prob >= 0.5).astype(np.int32)
+    out: list[dict[str, float | int | str]] = [
+        {
+            "kind": "model",
+            "name": "xgboost",
+            "label": "XGBoost model",
+            "description": "Full model prediction on the selected validation split.",
+            "accuracy": float((model_hard == yb).mean()),
+            "positive_prediction_rate": float(model_hard.mean()),
+            "tie_rate": 0.0,
+            "n": int(yb.shape[0]),
+        }
+    ]
+
+    by_name = {name: i for i, name in enumerate(names)}
+    specs = [
+        ("eng.cur.ships_planets_diff", "standing ships diff", "Predict win when my stationed ships exceed opponent stationed ships."),
+        ("eng.cur.ships_total_diff", "total ships diff", "Predict win when my stationed plus flying ships exceed opponent total ships."),
+        ("eng.cur.prod_total_diff", "production diff", "Predict win when my current production exceeds opponent production."),
+        ("eng.cur.prod_total_share", "production share", "Predict win from the sign of normalized production advantage."),
+        ("eng.cur.planet_count_diff", "planet count diff", "Predict win when I own more current planets."),
+        ("eng.cur.static_count_diff", "static planets diff", "Predict win when I own more current static planets."),
+        ("eng.forecast.cur_adv_50", "projected 50 sign", "Predict win from current ship diff plus up to 50 turns of production diff."),
+        ("eng.forecast.cur_adv_100", "projected 100 sign", "Predict win from current ship diff plus up to 100 turns of production diff."),
+        ("eng.margin.cur_adv_100_log", "projected 100 log sign", "Predict win from the sign of the signed-log projected 100-turn advantage."),
+        ("eng.forecast.cur_adv_remaining", "projected remaining sign", "Predict win from current ship diff plus remaining-game production diff."),
+        ("eng.speed.total_speed_diff", "total speed diff", "Predict win when my estimated total-fleet speed is higher."),
+        ("eng.cur.ships_flying_diff", "flying ships diff", "Predict win when I have more ships currently in flight."),
+    ]
+    seen: set[str] = set()
+    for name, label, description in specs:
+        idx = by_name.get(name)
+        if idx is None or name in seen:
+            continue
+        seen.add(name)
+        vals = X[:, idx].astype(np.float64, copy=False)
+        hard = (vals >= 0.0).astype(np.int32)
+        info = infos[idx] if idx < len(infos) else {}
+        out.append(
+            {
+                "kind": "baseline",
+                "name": name,
+                "label": str(info.get("label") or label),
+                "description": description,
+                "accuracy": float((hard == yb).mean()),
+                "positive_prediction_rate": float(hard.mean()),
+                "tie_rate": float((vals == 0.0).mean()),
+                "n": int(yb.shape[0]),
+            }
+        )
+    return out
+
+
 def auc_score(yb: np.ndarray, score: np.ndarray) -> float:
     pos = int(yb.sum())
     neg = int(yb.shape[0] - pos)
@@ -671,6 +733,7 @@ def render_xgb_dashboard(
     metrics = binary_metrics(y_val, pred_prob)
     cal = calibration_bins(y_val, pred_prob)
     phases = phase_accuracy_buckets(y_val, pred_prob, X_val, names, phase_frac=phase_frac)
+    baselines = baseline_accuracy_comparisons(X_val, y_val, pred_prob, names, infos)
     imp = xgb_importance(booster, X_val.shape[1])
     gain = imp["gain"]
     weight = imp["weight"]
@@ -738,6 +801,13 @@ def render_xgb_dashboard(
                 f"{100*float(b['gap']):+6.1f} {100*float(b['accuracy']):6.1f} "
                 f"{100*float(b['pos_pred_accuracy']):6.1f} {100*float(b['neg_pred_accuracy']):6.1f}"
             )
+    print("baselines    heuristic                      acc   +pred   ties")
+    for b in baselines:
+        print(
+            f"             {str(b['label']):30.30s} "
+            f"{100*float(b['accuracy']):6.1f} {100*float(b['positive_prediction_rate']):7.1f} "
+            f"{100*float(b['tie_rate']):6.1f}"
+        )
 
     if isinstance(perm, dict) and "sample_rows" in perm:
         print(
@@ -764,6 +834,7 @@ def render_xgb_dashboard(
         "metrics": metrics,
         "calibration": cal,
         "phase_buckets": phases,
+        "baseline_comparisons": baselines,
         "training_curve": training_curve or [],
         "features": [
             {
@@ -886,6 +957,8 @@ th:first-child, td:first-child {{ text-align: left; }}
 th {{ color: var(--muted); font-weight: 600; background: #12181d; position: sticky; top: 0; z-index: 1; }}
 tr:hover td {{ background: #1a2329; }}
 .scroll {{ max-height: 420px; overflow: auto; position: relative; }}
+.runs-scroll {{ max-height: 244px; }}
+.old-run td {{ color: #72808a; opacity: .72; }}
 .barcell {{ min-width: 110px; }}
 .bar {{ height: 8px; background: #26323a; border-radius: 999px; overflow: hidden; }}
 .fill {{ height: 100%; background: var(--a); }}
@@ -909,8 +982,19 @@ svg {{ width: 100%; display: block; }}
 .legend {{ display: flex; gap: 14px; align-items: center; color: var(--muted); }}
 .sw {{ display:inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }}
 .trend-note {{ padding: 0 10px 9px; color: var(--muted); font-size: 11px; }}
+.baseline-list {{ display: grid; gap: 6px; padding: 10px; }}
+.baseline-row {{ display: grid; grid-template-columns: minmax(190px, 260px) 1fr 64px 88px; gap: 9px; align-items: center; }}
+.baseline-name {{ min-width: 0; }}
+.baseline-title {{ font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.baseline-tech {{ color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.baseline-track {{ position: relative; height: 14px; background: #26323a; border-radius: 999px; overflow: hidden; }}
+.baseline-track::before {{ content: ""; position: absolute; inset: 0 auto 0 0; width: 1px; background: #667681; opacity: .75; }}
+.baseline-fill {{ height: 100%; background: var(--a); }}
+.baseline-fill.model {{ background: var(--c); }}
+.baseline-value {{ text-align: right; font-weight: 700; }}
+.baseline-extra {{ text-align: right; color: var(--muted); font-size: 11px; }}
 .empty {{ padding: 24px; color: var(--muted); }}
-@media (max-width: 980px) {{ .two {{ grid-template-columns: 1fr; }} th {{ position: static; }} }}
+@media (max-width: 980px) {{ .two {{ grid-template-columns: 1fr; }} th {{ position: static; }} .baseline-row {{ grid-template-columns: minmax(150px, 1fr) 1fr 58px; }} .baseline-extra {{ display: none; }} }}
 </style>
 </head>
 <body>
@@ -927,9 +1011,13 @@ svg {{ width: 100%; display: block; }}
     </section>
     <section>
       <div class="section-head"><h2>Training Trials</h2></div>
-      <div class="scroll"><table id="runs"></table></div>
+      <div class="scroll runs-scroll"><table id="runs"></table></div>
     </section>
   </div>
+  <section>
+    <div class="section-head"><h2>Baseline Accuracy</h2><div class="muted">same validation rows | bars start at 50%</div></div>
+    <div id="baselines"></div>
+  </section>
   <section>
     <div class="section-head"><h2>Feature Importance</h2><select id="modelSelect"></select></div>
     <div class="scroll"><table id="features"></table></div>
@@ -978,10 +1066,17 @@ function renderCards() {{
 
 function renderRuns() {{
   if (!models.length) {{ document.getElementById('runs').innerHTML = '<tr><td class="empty">No model records yet.</td></tr>'; return; }}
+  const setKey = r => {{
+    const m = String(r.title || '').match(/^(xgb_[0-9]+p[0-9]+e[0-9]+)/);
+    return m ? m[1] : '';
+  }};
+  const latestKey = setKey(latestModel());
+  const rows = [...models].reverse();
   let html = '<thead><tr><th>time</th><th>title</th><th>n</th><th>pos</th><th>acc</th><th>auc</th><th>logloss</th><th>brier</th><th>top feature</th></tr></thead><tbody>';
-  models.forEach(r => {{
+  rows.forEach(r => {{
     const top = [...(r.features || [])].sort((a,b) => (b.gain_share + Math.max(0,b.permutation_acc_drop)*8) - (a.gain_share + Math.max(0,a.permutation_acc_drop)*8))[0];
-    html += `<tr><td>${{esc(r.created_at?.slice(11) || '')}}</td><td>${{esc(r.title)}}</td><td>${{r.metrics.n.toLocaleString()}}</td><td>${{pct(r.metrics.positive_rate)}}</td><td>${{pct(r.metrics.accuracy)}}</td><td>${{pct(r.metrics.auc)}}</td><td>${{num(r.metrics.logloss,4)}}</td><td>${{num(r.metrics.brier,4)}}</td><td>${{esc(top?.label || top?.name || '-')}}</td></tr>`;
+    const old = latestKey && setKey(r) && setKey(r) !== latestKey;
+    html += `<tr class="${{old ? 'old-run' : ''}}" title="${{old ? 'older feature set' : 'latest feature set'}}"><td>${{esc(r.created_at?.slice(11) || '')}}</td><td>${{esc(r.title)}}</td><td>${{r.metrics.n.toLocaleString()}}</td><td>${{pct(r.metrics.positive_rate)}}</td><td>${{pct(r.metrics.accuracy)}}</td><td>${{pct(r.metrics.auc)}}</td><td>${{num(r.metrics.logloss,4)}}</td><td>${{num(r.metrics.brier,4)}}</td><td>${{esc(top?.label || top?.name || '-')}}</td></tr>`;
   }});
   document.getElementById('runs').innerHTML = html + '</tbody>';
 }}
@@ -1061,11 +1156,34 @@ function renderTrend() {{
 function renderFeatureSelect() {{
   const sel = document.getElementById('modelSelect');
   sel.innerHTML = models.map((r,i) => `<option value="${{i}}" ${{i===models.length-1?'selected':''}}>${{esc(r.title)}} | ${{esc(r.created_at || '')}}</option>`).join('');
-  sel.onchange = () => {{ renderBoostingCurve(); renderFeatures(); renderCalibration(); renderPhaseBuckets(); }};
+  sel.onchange = () => {{ renderBoostingCurve(); renderBaselines(); renderFeatures(); renderCalibration(); renderPhaseBuckets(); }};
 }}
 function currentModel() {{
   const i = +(document.getElementById('modelSelect').value || models.length - 1);
   return models[i];
+}}
+function renderBaselines() {{
+  const r = currentModel();
+  const box = document.getElementById('baselines');
+  if (!r) {{ box.innerHTML = '<div class="empty">No model selected.</div>'; return; }}
+  const rows = r.baseline_comparisons || [];
+  if (!rows.length) {{ box.innerHTML = '<div class="empty">No baseline comparisons for this older record. New training runs will include them.</div>'; return; }}
+  const model = rows.filter(x => x.kind === 'model');
+  const heuristics = rows.filter(x => x.kind !== 'model').sort((a,b) => b.accuracy - a.accuracy);
+  const ordered = model.concat(heuristics);
+  let html = '<div class="baseline-list">';
+  ordered.forEach(b => {{
+    const acc = Number.isFinite(b.accuracy) ? b.accuracy : 0.5;
+    const width = Math.max(0, Math.min(100, 100 * (acc - 0.5) / 0.5));
+    const pos = Number.isFinite(b.positive_prediction_rate) ? `+pred ${{pct(b.positive_prediction_rate)}}` : '';
+    const ties = Number.isFinite(b.tie_rate) && b.tie_rate > 0 ? `ties ${{pct(b.tie_rate)}}` : '';
+    const meta = [pos, ties].filter(Boolean).join(' | ');
+    const tech = b.kind === 'model' ? 'full feature model' : b.name;
+    const fillCls = b.kind === 'model' ? 'baseline-fill model' : 'baseline-fill';
+    const title = `${{b.description || ''}} accuracy=${{pct(acc)}}; ${{meta}}`;
+    html += `<div class="baseline-row" title="${{esc(title)}}"><div class="baseline-name"><div class="baseline-title">${{esc(b.label || b.name)}}</div><div class="baseline-tech">${{esc(tech)}}</div></div><div class="baseline-track"><div class="${{fillCls}}" style="width:${{width.toFixed(1)}}%"></div></div><div class="baseline-value">${{pct(acc)}}</div><div class="baseline-extra">${{esc(meta)}}</div></div>`;
+  }});
+  box.innerHTML = html + '</div>';
 }}
 function renderFeatures() {{
   const r = currentModel();
@@ -1113,7 +1231,7 @@ function renderEvals() {{
   }}));
   document.getElementById('evals').innerHTML = html + '</tbody>';
 }}
-renderCards(); renderRuns(); renderFeatureSelect(); renderBoostingCurve(); renderFeatures(); renderCalibration(); renderPhaseBuckets(); renderEvals();
+renderCards(); renderRuns(); renderFeatureSelect(); renderBoostingCurve(); renderBaselines(); renderFeatures(); renderCalibration(); renderPhaseBuckets(); renderEvals();
 </script>
 </body>
 </html>
