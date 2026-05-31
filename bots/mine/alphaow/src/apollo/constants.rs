@@ -38,7 +38,6 @@ pub const ROTATION_LOOK_AHEAD_TURNS: i64 = 10;                      // Number of
 pub const OFFSET_LOOKAHEAD: i64 = 5;                                // Max base launch delay swept per target. Offset 0 emits now; winning delayed offsets become reservations so later choices cannot spend those ships.
 pub const MAX_COORD_DELAY: i64 = 5;                                 // Max extra launch delay a source may add beyond the subset's base offset while trying to coordinate arrivals near the subset's natural latest arrival.
 pub const A_S_LOOKAHEAD: i64 = 3;                                   // Max turns past the natural latest arrival that coordinated schedules may target, letting delayed sources grow extra production before launch.
-pub const SECOND_ENEMY_ARRIVAL_TOL: i64 = 1;                        // Skip third-party target steals if our fleet would arrive no later than this many turns after another non-owner enemy arrival.
 
 pub const REACTIVE_TURNS: i64 = 2;                                  // Number of turns to forward simulate ally/enemy steps during rollouts
 pub const OPENING_TURNS: i64 = 3;                                   // Number of turns at the start where we focus on economy over combat

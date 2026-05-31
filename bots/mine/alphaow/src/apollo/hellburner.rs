@@ -23,7 +23,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::apollo::constants::{
     A_S_LOOKAHEAD, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, OFFSET_LOOKAHEAD, OPENING_TURNS,
-    ROTATION_LOOK_AHEAD_TURNS, SECOND_ENEMY_ARRIVAL_TOL,
+    ROTATION_LOOK_AHEAD_TURNS,
 };
 use crate::apollo::engine::{MoveAction, Planet};
 use crate::apollo::entity_cache::{AimCacheVerdict};
@@ -335,6 +335,32 @@ fn neighbor_holds_under_worst_case(
         });
         half_pressure += half_ships;
     }
+
+    // TODO: When we properly integrate comets into our graph model, this extra
+    // comet check can be removed.
+    //
+    // Enemy comets are excluded from the proximity graph (`inbound_edges`), so
+    // the loop above never sees them.
+    for &cid in &world.comet_ids {
+        let comet = world.planet(cid);
+        if comet.owner == world.player || comet.owner == -1 || comet.ships == 0 {
+            continue;
+        }
+        if dist(comet.x, comet.y, neighbor.x, neighbor.y) > MAX_DISTANCE {
+            continue;
+        }
+        let Some((_, turns, _, _, _)) = model.plan_shot(cid, neighbor.id, comet.ships, 0) else {
+            continue;
+        };
+        let half_ships = (comet.ships / 2).max(1);
+        extras.push(ArrivalEvent {
+            turns: turns.max(1),
+            owner: comet.owner,
+            ships: half_ships,
+        });
+        half_pressure += half_ships;
+    }
+
     if extras.is_empty() {
         return (true, 0);
     }
@@ -413,25 +439,53 @@ fn source_defense(
 
 // ── Unified zero-sum scoring ─────────────────────────────────────────────
 
-/// Captured production weighting: enemy targets count double (we gain the
-/// production *and* they lose it — true zero-sum delta), neutral and
-/// own-planet defense are 1×.
-fn zero_sum_mult(world: &WorldState, target: &Planet) -> f64 {
-    if target.owner != world.player && target.owner != -1 {
-        2.0
-    } else {
+fn owner_value(owner: i64, player: i64) -> f64 {
+    if owner == player {
         1.0
+    } else if owner == -1 {
+        0.0
+    } else {
+        -1.0
     }
 }
 
-/// Score of capturing/holding `target` with last arrival at `arrival_turn`
-/// (relative to current step). The integral `prod × remaining` automatically
-/// trades arrival-time against production: waiting 2 turns for a 5-prod
-/// target beats grabbing a 2-prod target now once `5(H−A−2) > 2(H−A)`.
-fn score_capture(world: &WorldState, target: &Planet, arrival_turn: i64) -> f64 {
-    let h = world.timeline_cache.horizon;
-    let remaining = (h - arrival_turn).max(0) as f64;
-    target.production as f64 * remaining * zero_sum_mult(world, target)
+fn signed_ships(owner: i64, ships: i64, player: i64) -> f64 {
+    owner_value(owner, player) * ships.max(0) as f64
+}
+
+/// Zero-sum value of a trial target timeline relative to its baseline.
+///
+/// The old local score valued only "we own it at horizon" and latest arrival
+/// time. This consumes the full simulated timeline already produced for each
+/// trial, so temporary steals, third-party pileups, weak holds, and costly
+/// captures are priced by actual ownership duration and final ship delta.
+fn timeline_delta_score(
+    world: &WorldState,
+    target: &Planet,
+    baseline: &PlanetTimeline,
+    owner_at: &[i64],
+    ships_at: &[i64],
+    ships_committed: i64,
+    start_turn: i64,
+) -> f64 {
+    let player = world.player;
+    let h = baseline.horizon as usize;
+    let production = target.production as f64;
+    let mut score = 0.0;
+
+    // Turns before `start_turn` are copied verbatim from `baseline` by
+    // `simulate_checkpoint_into`, so their owner delta is exactly zero — start
+    // the integral at the first rewritten turn. `start_turn` is clamped the same
+    // way the checkpoint clamps it, so turn `h` is never skipped.
+    let start = (start_turn.clamp(1, h.max(1) as i64)) as usize;
+    for t in start..=h {
+        score += production
+            * (owner_value(owner_at[t], player) - owner_value(baseline.owner_at[t], player));
+    }
+
+    score += signed_ships(owner_at[h], ships_at[h], player)
+        - signed_ships(baseline.owner_at[h], baseline.ships_at[h], player);
+    score - ships_committed as f64
 }
 
 // ── evaluate_frontline_strategy ──────────────────────────────────────────
@@ -456,6 +510,8 @@ struct FrontlineWin {
     orders: Vec<PlannedOrder>,
     /// Latest arrival turn among `orders`, relative to current step.
     max_arrival: i64,
+    /// Timeline-delta score of this target commitment relative to baseline.
+    score: f64,
 }
 
 /// Reusable scratch buffers for [`evaluate_frontline_strategy`], pooled across
@@ -483,9 +539,6 @@ struct FrontlineScratch {
 struct TargetContext {
     /// Owned inbound sources of the target, distance-sorted (nearest first).
     origins: Vec<(i64, f64)>,
-    /// Earliest arrival of a *third*-party enemy when the target belongs to
-    /// another player — gates dropping into a battle between two opponents.
-    second_enemy_arrival: Option<i64>,
 }
 
 fn target_context(world: &WorldState, model: &HellburnerModel, target: &Planet) -> TargetContext {
@@ -500,24 +553,7 @@ fn target_context(world: &WorldState, model: &HellburnerModel, target: &Planet) 
         .collect();
     origins.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Don't drop in mid-battle between two other players: if target isn't ours,
-    // note the earliest arrival of an enemy other than the current owner.
-    let second_enemy_arrival: Option<i64> = if target.owner != world.player {
-        world
-            .timeline_cache
-            .arrivals(target.id)
-            .iter()
-            .filter(|ev| ev.owner != world.player && ev.owner != target.owner)
-            .map(|ev| ev.turns)
-            .min()
-    } else {
-        None
-    };
-
-    TargetContext {
-        origins,
-        second_enemy_arrival,
-    }
+    TargetContext { origins }
 }
 
 /// Offset-aware frontline assembly. `offset == 0` is "launch this turn" —
@@ -616,7 +652,7 @@ fn evaluate_frontline_strategy(
         owner_buf: &mut Vec<i64>,
         ships_buf: &mut Vec<i64>,
         by_turn_buf: &mut Vec<Vec<ArrivalEvent>>,
-    | -> i64 {
+    | -> (i64, i64) {
         let start_turn = trial.iter().map(|e| e.turns.max(1)).min().unwrap_or(1);
         merged_scratch.clear();
         merged_scratch.extend_from_slice(fixed_arrivals);
@@ -631,13 +667,14 @@ fn evaluate_frontline_strategy(
             ships_buf,
             by_turn_buf,
         );
-        owner_buf[horizon as usize]
+        (owner_buf[horizon as usize], start_turn)
     };
 
     let consider = |
         orders: &Vec<PlannedOrder>,
         max_arrival: i64,
         ships_total: i64,
+        score: f64,
         marginal_idx: usize,
         marginal_not_doomed: bool,
         best_score: &mut f64,
@@ -647,8 +684,13 @@ fn evaluate_frontline_strategy(
         best_marginal_in_orders: &mut usize,
         best_marginal_not_doomed: &mut bool,
     | {
-        let score = score_capture(world, target, max_arrival);
-        let better = score > *best_score || (score == *best_score && ships_total < *best_ships);
+        if score <= 0.0 {
+            return;
+        }
+        let better = score > *best_score
+            || (score == *best_score
+                && (ships_total < *best_ships
+                    || (ships_total == *best_ships && max_arrival < *best_max_arrival)));
         if better {
             *best_score = score;
             *best_ships = ships_total;
@@ -715,7 +757,7 @@ fn evaluate_frontline_strategy(
             scratch.plan_orders.push(order);
             scratch.trial.push(event);
         }
-        let final_owner_a = run_trial(
+        let (final_owner_a, start_turn_a) = run_trial(
             &scratch.trial,
             &scratch.fixed_arrivals,
             &mut scratch.merged_scratch,
@@ -724,8 +766,17 @@ fn evaluate_frontline_strategy(
             &mut scratch.by_turn_buf,
         );
         if final_owner_a == world.player {
+            let score_a = timeline_delta_score(
+                world,
+                target,
+                prefix_baseline,
+                &scratch.owner_buf,
+                &scratch.ships_buf,
+                ships_total,
+                start_turn_a,
+            );
             consider(
-                &scratch.plan_orders, max_arrival_a, ships_total,
+                &scratch.plan_orders, max_arrival_a, ships_total, score_a,
                 marginal_idx_a, marginal_not_doomed_a,
                 &mut best_score, &mut best_ships, &mut best_orders,
                 &mut best_max_arrival, &mut best_marginal_in_orders,
@@ -770,52 +821,52 @@ fn evaluate_frontline_strategy(
                     let c = &scratch.candidates[i];
                     (c.id, c.angle, c.ships_max, c.not_doomed)
                 };
-                let mut best_d: i64 = -1;
-                let mut best_arr: i64 = -1;
-                let mut best_ang: f64 = c_angle;
-                let mut best_ships: i64 = c_ships_max;
+                let mut sel_d: i64 = -1;
+                let mut sel_arr: i64 = -1;
+                let mut sel_ang: f64 = c_angle;
+                let mut sel_ships: i64 = c_ships_max;
                 // Pick the latest arrival ≤ target_a_s within the delay budget
                 // from the precomputed table (ties resolve to the smallest `d`,
-                // matching the original `arr > best_arr` strict comparison).
+                // matching the original `arr > sel_arr` strict comparison).
                 let row = i * delay_stride;
                 for d in 0..=max_delay {
                     let Some((arr, a, ships_try)) = scratch.delay_table[row + d as usize] else {
                         continue;
                     };
-                    if arr <= target_a_s && arr > best_arr {
-                        best_d = d;
-                        best_arr = arr;
-                        best_ang = a;
-                        best_ships = ships_try;
+                    if arr <= target_a_s && arr > sel_arr {
+                        sel_d = d;
+                        sel_arr = arr;
+                        sel_ang = a;
+                        sel_ships = ships_try;
                     }
                 }
-                if best_d < 0 {
+                if sel_d < 0 {
                     feasible = false;
                     break;
                 }
-                if best_arr > max_arrival_b {
-                    max_arrival_b = best_arr;
+                if sel_arr > max_arrival_b {
+                    max_arrival_b = sel_arr;
                     marginal_idx_b = scratch.plan_orders.len();
                     marginal_not_doomed_b = c_not_doomed;
                 }
                 scratch.plan_orders.push(PlannedOrder {
                     src_id: c_id,
-                    angle: best_ang,
-                    ships: best_ships,
-                    arrival: best_arr,
-                    effective_offset: offset + best_d,
+                    angle: sel_ang,
+                    ships: sel_ships,
+                    arrival: sel_arr,
+                    effective_offset: offset + sel_d,
                 });
                 scratch.trial.push(ArrivalEvent {
-                    turns: best_arr,
+                    turns: sel_arr,
                     owner: world.player,
-                    ships: best_ships,
+                    ships: sel_ships,
                 });
-                ships_total += best_ships;
+                ships_total += sel_ships;
             }
             if !feasible {
                 continue;
             }
-            let final_owner_b = run_trial(
+            let (final_owner_b, start_turn_b) = run_trial(
                 &scratch.trial,
                 &scratch.fixed_arrivals,
                 &mut scratch.merged_scratch,
@@ -824,8 +875,17 @@ fn evaluate_frontline_strategy(
                 &mut scratch.by_turn_buf,
             );
             if final_owner_b == world.player {
+                let score_b = timeline_delta_score(
+                    world,
+                    target,
+                    prefix_baseline,
+                    &scratch.owner_buf,
+                    &scratch.ships_buf,
+                    ships_total,
+                    start_turn_b,
+                );
                 consider(
-                    &scratch.plan_orders, max_arrival_b, ships_total,
+                    &scratch.plan_orders, max_arrival_b, ships_total, score_b,
                     marginal_idx_b, marginal_not_doomed_b,
                     &mut best_score, &mut best_ships, &mut best_orders,
                     &mut best_max_arrival, &mut best_marginal_in_orders,
@@ -852,7 +912,7 @@ fn evaluate_frontline_strategy(
                 ships: o.ships,
             });
         }
-        run_trial(
+        let _ = run_trial(
             &scratch.trial,
             &scratch.fixed_arrivals,
             &mut scratch.merged_scratch,
@@ -891,7 +951,7 @@ fn evaluate_frontline_strategy(
                     owner: world.player,
                     ships: trimmed,
                 };
-                let final_owner_2 = run_trial(
+                let (final_owner_2, start_turn_2) = run_trial(
                     &scratch.trial,
                     &scratch.fixed_arrivals,
                     &mut scratch.merged_scratch,
@@ -900,14 +960,30 @@ fn evaluate_frontline_strategy(
                     &mut scratch.by_turn_buf,
                 );
                 if final_owner_2 == world.player {
-                    best_orders[best_marginal_in_orders] = PlannedOrder {
-                        src_id,
-                        angle: t_angle,
-                        ships: trimmed,
-                        arrival: t_arrival,
-                        effective_offset: marginal_eff_offset,
-                    };
-                    best_max_arrival = best_orders.iter().map(|o| o.arrival).max().unwrap_or(0);
+                    let trimmed_ships_total = best_ships - max_ships + trimmed;
+                    let score_2 = timeline_delta_score(
+                        world,
+                        target,
+                        prefix_baseline,
+                        &scratch.owner_buf,
+                        &scratch.ships_buf,
+                        trimmed_ships_total,
+                        start_turn_2,
+                    );
+                    if score_2 >= best_score {
+                        best_orders[best_marginal_in_orders] = PlannedOrder {
+                            src_id,
+                            angle: t_angle,
+                            ships: trimmed,
+                            arrival: t_arrival,
+                            effective_offset: marginal_eff_offset,
+                        };
+                        best_score = score_2;
+                        best_max_arrival =
+                            best_orders.iter().map(|o| o.arrival).max().unwrap_or(0);
+                    } else {
+                        scratch.trial[best_marginal_in_orders] = saved;
+                    }
                 } else {
                     scratch.trial[best_marginal_in_orders] = saved;
                 }
@@ -918,6 +994,7 @@ fn evaluate_frontline_strategy(
     Some(FrontlineWin {
         orders: best_orders,
         max_arrival: best_max_arrival,
+        score: best_score,
     })
 }
 
@@ -979,11 +1056,6 @@ fn collect_source_candidates(
             continue;
         };
         let arrival = (offset + turns).max(1);
-        if let Some(sea) = ctx.second_enemy_arrival {
-            if arrival <= sea + SECOND_ENEMY_ARRIVAL_TOL {
-                continue;
-            }
-        }
         out.push(SourceCandidate {
             id: src_id,
             angle,
@@ -1003,11 +1075,8 @@ fn collect_source_candidates(
 /// "which sort key is right" is decided empirically per turn, not baked in.
 #[derive(Clone, Copy)]
 enum SelectionStrategy {
-    /// `score_now − max(0, best_score_later)` — urgency-aware. The default
-    /// from when we added the offset sweep.
-    PriorityFirst,
-    /// Pure `score_capture(now)`. Ignores how the target's value would
-    /// decay if deferred — better when timing isn't fragile.
+    /// Pure timeline-delta score: production control, final ship delta, and
+    /// committed-ship cost relative to the baseline target timeline.
     ScoreFirst,
     /// `score_now / ships_total` — favours efficient captures, freeing
     /// fleet for subsequent iterations.
@@ -1021,11 +1090,7 @@ enum SelectionStrategy {
 impl SelectionStrategy {
     fn key(self, score: f64, production: i64, ships_total: i64) -> f64 {
         match self {
-            // PriorityFirst and ScoreFirst both key on the offset-aware score;
-            // the old urgency-delta term is subsumed because we now pick the
-            // best offset per target, so the score already reflects whether
-            // waiting helps.
-            SelectionStrategy::PriorityFirst | SelectionStrategy::ScoreFirst => score,
+            SelectionStrategy::ScoreFirst => score,
             SelectionStrategy::ScorePerShip => score / (1.0 + ships_total as f64),
             SelectionStrategy::ProductionFirst => production as f64,
         }
@@ -1070,7 +1135,7 @@ fn evaluate_target(
 
     // Sweep offsets and keep the highest-scoring commitment. Acting now
     // (offset 0) competes head-to-head against waiting (offset > 0): whichever
-    // offset yields the better `score_capture` wins. Delayed wins return
+    // offset yields the better timeline-delta score wins. Delayed wins return
     // `effective_offset > 0` orders, which `run_strategy` commits as
     // reservations (no emission this turn).
     let mut best_for_target: Option<(f64, FrontlineWin)> = None;
@@ -1079,7 +1144,7 @@ fn evaluate_target(
             world, model, target, plan, delta, defense_cache, &ctx, scratch,
         )
         else { continue };
-        let s = score_capture(world, target, win.max_arrival);
+        let s = win.score;
         match &best_for_target {
             None => best_for_target = Some((s, win)),
             Some((bs, _)) if s > *bs => best_for_target = Some((s, win)),
@@ -1726,10 +1791,9 @@ fn run_strategy(
 /// `plan()` runs directly (used as the cheap reply-policy hook inside the
 /// rollout layer), so its position is load-bearing — see the
 /// `search_candidates_includes_greedy_plan` test.
-const STRATEGIES: [SelectionStrategy; 4] = [
+const STRATEGIES: [SelectionStrategy; 3] = [
     SelectionStrategy::ScorePerShip,
     SelectionStrategy::ProductionFirst,
-    SelectionStrategy::PriorityFirst,
     SelectionStrategy::ScoreFirst,
 ];
 
@@ -1801,6 +1865,7 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     }
 
     let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len());
+
     for &strat in &STRATEGIES {
         let (moves, _) = run_strategy(world, &model, strat);
         if !out.iter().any(|prev| prev == &moves) {
