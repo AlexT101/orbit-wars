@@ -106,6 +106,24 @@ ENGINEERED_DIM = len(ENGINEERED_NAMES)
 BASE_DIM = 58
 
 
+TEMPO_NAMES = [
+    "tempo.prod_diff_slope_50",
+    "tempo.ships_total_diff_slope_50",
+    "tempo.ships_planets_diff_slope_50",
+    "tempo.planet_count_diff_slope_50",
+    "tempo.static_count_diff_slope_50",
+    "tempo.prod_share_slope_50",
+    "tempo.ships_total_share_slope_50",
+    "tempo.adv100_slope_50",
+    "tempo.flying_commitment_diff_slope_50",
+    "tempo.history_frac_50",
+    "tempo.development_score_50",
+]
+TEMPO_DIM = len(TEMPO_NAMES)
+CORE_DIM = BASE_DIM + ENGINEERED_DIM
+FULL_DIM = CORE_DIM + TEMPO_DIM
+
+
 def _share(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return (a - b) / np.maximum(1.0, a + b)
 
@@ -333,3 +351,104 @@ def append_engineered_features(base: np.ndarray) -> np.ndarray:
         raise ValueError(f"expected at least {BASE_DIM} features, got {base.shape[1]}")
     base58 = base[:, :BASE_DIM].astype(np.float32, copy=False)
     return np.concatenate([base58, engineered_from_base(base58)], axis=1).astype(np.float32)
+
+
+def _rolling_slopes(
+    features: np.ndarray,
+    meta: np.ndarray,
+    metric_indices: list[int],
+    window: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Causal per-(game, player) rolling linear slopes over prior rows."""
+    slopes = np.zeros((features.shape[0], len(metric_indices)), dtype=np.float32)
+    history_frac = np.zeros(features.shape[0], dtype=np.float32)
+    if features.shape[0] == 0:
+        return slopes, history_frac
+
+    games = meta[:, 0].astype(np.int64, copy=False)
+    ticks = meta[:, 1].astype(np.float64, copy=False)
+    players = meta[:, 2].astype(np.int64, copy=False)
+    order = np.lexsort((ticks, players, games))
+    ordered_games = games[order]
+    ordered_players = players[order]
+
+    start = 0
+    while start < order.shape[0]:
+        end = start + 1
+        while (
+            end < order.shape[0]
+            and ordered_games[end] == ordered_games[start]
+            and ordered_players[end] == ordered_players[start]
+        ):
+            end += 1
+
+        idx = order[start:end]
+        x = ticks[idx].astype(np.float64, copy=False)
+        y = features[idx][:, metric_indices].astype(np.float64, copy=False)
+        n = x.shape[0]
+        if n >= 2:
+            left = np.searchsorted(x, x - window, side="left")
+            count = (np.arange(n) - left + 1).astype(np.float64)
+
+            cx = np.concatenate(([0.0], np.cumsum(x)))
+            cx2 = np.concatenate(([0.0], np.cumsum(x * x)))
+            cy = np.vstack([np.zeros((1, y.shape[1]), dtype=np.float64), np.cumsum(y, axis=0)])
+            cxy = np.vstack([np.zeros((1, y.shape[1]), dtype=np.float64), np.cumsum(y * x[:, None], axis=0)])
+
+            right = np.arange(n) + 1
+            sum_x = cx[right] - cx[left]
+            sum_x2 = cx2[right] - cx2[left]
+            sum_y = cy[right] - cy[left]
+            sum_xy = cxy[right] - cxy[left]
+            denom = count * sum_x2 - sum_x * sum_x
+            ok = (count >= 2.0) & (np.abs(denom) > 1e-9)
+            group_slopes = np.zeros((n, y.shape[1]), dtype=np.float64)
+            group_slopes[ok] = (
+                count[ok, None] * sum_xy[ok] - sum_x[ok, None] * sum_y[ok]
+            ) / denom[ok, None]
+            slopes[idx] = group_slopes.astype(np.float32)
+            history_frac[idx] = np.clip((x - x[left]) / window, 0.0, 1.0).astype(np.float32)
+
+        start = end
+
+    return slopes, history_frac
+
+
+def tempo_features_from_history(features: np.ndarray, meta: np.ndarray, window: float = 50.0) -> np.ndarray:
+    """Return causal tempo columns from prior rows within each game/player."""
+    if features.ndim != 2 or features.shape[1] < CORE_DIM:
+        raise ValueError(f"expected at least {CORE_DIM} core features, got {features.shape}")
+    if meta.ndim != 2 or meta.shape[0] != features.shape[0] or meta.shape[1] < 3:
+        raise ValueError(f"expected meta [N,>=3] aligned to features, got {meta.shape}")
+
+    core_names = list(ENGINEERED_NAMES)
+    idx = {name: BASE_DIM + i for i, name in enumerate(core_names)}
+    metric_names = [
+        "eng.cur.prod_total_diff",
+        "eng.cur.ships_total_diff",
+        "eng.cur.ships_planets_diff",
+        "eng.cur.planet_count_diff",
+        "eng.cur.static_count_diff",
+        "eng.cur.prod_total_share",
+        "eng.cur.ships_total_share",
+        "eng.forecast.cur_adv_100",
+        "eng.cur.flying_commitment_diff",
+    ]
+    metric_indices = [idx[name] for name in metric_names]
+    slopes, history_frac = _rolling_slopes(features[:, :CORE_DIM], meta, metric_indices, window)
+
+    prod_slope = slopes[:, 0]
+    ship_slope = slopes[:, 1]
+    development_score = ship_slope * window + prod_slope * (0.5 * window * window)
+    return np.column_stack([slopes, history_frac, development_score]).astype(np.float32)
+
+
+def append_tempo_features(features: np.ndarray, meta: np.ndarray) -> np.ndarray:
+    """Append causal tempo features unless already present."""
+    if features.ndim != 2:
+        raise ValueError(f"expected 2D feature matrix, got {features.shape}")
+    if features.shape[1] == FULL_DIM:
+        return features.astype(np.float32, copy=False)
+    core = append_engineered_features(features)
+    tempo = tempo_features_from_history(core, meta)
+    return np.concatenate([core, tempo], axis=1).astype(np.float32, copy=False)

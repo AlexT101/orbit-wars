@@ -27,20 +27,28 @@ from pathlib import Path
 
 import numpy as np
 
-from engineered_features import ENGINEERED_DIM, ENGINEERED_NAMES, append_engineered_features
+from engineered_features import (
+    ENGINEERED_DIM,
+    ENGINEERED_NAMES,
+    TEMPO_DIM,
+    TEMPO_NAMES,
+    append_engineered_features,
+    append_tempo_features,
+)
 
 HERE = Path(__file__).resolve().parent
 BOT_DIR = HERE.parent
 DEFAULT_WORK = HERE / "data" / "pipeline"
 DEFAULT_MANIFEST = HERE / "manifest.csv"
 DEFAULT_DASHBOARD = HERE / "dashboard.html"
-DEFAULT_MODEL = BOT_DIR / "train" / "weights" / "xgb_46p12_latest.json"
 
 SUMMARY_DIM = 46
 EXTRAS_DIM = 12
 BASE_FEATURE_DIM = SUMMARY_DIM + EXTRAS_DIM
-FEATURE_DIM = BASE_FEATURE_DIM + ENGINEERED_DIM
-FEATURE_LAYOUT = "summary_v2[46] + extras_v4[12] + engineered[%d]" % ENGINEERED_DIM
+FEATURE_DIM = BASE_FEATURE_DIM + ENGINEERED_DIM + TEMPO_DIM
+FEATURE_TAG = f"46p12e{ENGINEERED_DIM}t{TEMPO_DIM}"
+FEATURE_LAYOUT = "summary_v2[46] + extras_v4[12] + engineered[%d] + tempo[%d]" % (ENGINEERED_DIM, TEMPO_DIM)
+DEFAULT_MODEL = BOT_DIR / "train" / "weights" / f"xgb_{FEATURE_TAG}_latest.json"
 
 
 @dataclass(frozen=True)
@@ -208,9 +216,10 @@ def combine_days(day_artifacts: list[tuple[ManifestRow, Path, Path]], out_npz: P
     summary = np.concatenate(summary_all, axis=0)
     extras = np.concatenate(extras_all, axis=0)
     base_features = np.concatenate([summary, extras], axis=1).astype(np.float32)
-    features = append_engineered_features(base_features)
     labels = np.concatenate(labels_all, axis=0)
     meta = np.concatenate(meta_all, axis=0)
+    core_features = append_engineered_features(base_features)
+    features = append_tempo_features(core_features, meta)
     is_strong = np.concatenate(strong_all, axis=0)
     game_dates = np.concatenate(game_dates_all, axis=0)
 
@@ -240,8 +249,10 @@ def feature_names_for_dim(dim: int) -> list[str]:
 
     if dim == BASE_FEATURE_DIM:
         return list(SUMMARY_V2_NAMES) + list(EXTRA_12_NAMES)
-    if dim == FEATURE_DIM:
+    if dim == BASE_FEATURE_DIM + ENGINEERED_DIM:
         return list(SUMMARY_V2_NAMES) + list(EXTRA_12_NAMES) + list(ENGINEERED_NAMES)
+    if dim == FEATURE_DIM:
+        return list(SUMMARY_V2_NAMES) + list(EXTRA_12_NAMES) + list(ENGINEERED_NAMES) + list(TEMPO_NAMES)
     return [f"f{i}" for i in range(dim)]
 
 
@@ -293,9 +304,9 @@ def train_xgb(dataset_npz: Path, model_out: Path, dashboard_html: Path | None, f
         return model_out
 
     d = np.load(dataset_npz, allow_pickle=False)
-    X = append_engineered_features(d["features"].astype(np.float32))
     y = d["labels"].astype(np.float32)
     meta = d["meta"]
+    X = append_tempo_features(d["features"].astype(np.float32), meta)
     if filter_strong and "is_strong" in d.files:
         keep = d["is_strong"].astype(bool)
         X, y, meta = X[keep], y[keep], meta[keep]
@@ -312,14 +323,14 @@ def train_xgb(dataset_npz: Path, model_out: Path, dashboard_html: Path | None, f
     print(f"training rows={Xtr.shape[0]:,} val_rows={val_mask.sum():,} games={n_games:,} val_games={n_val:,}")
 
     configs = [
-        dict(name=f"xgb_46p12e{ENGINEERED_DIM}_d6_lr008", max_depth=6, learning_rate=0.08, n_est=900),
+        dict(name=f"xgb_{FEATURE_TAG}_d6_lr008", max_depth=6, learning_rate=0.08, n_est=900),
     ]
     if tune:
         configs.extend(
             [
-                dict(name=f"xgb_46p12e{ENGINEERED_DIM}_d8_lr005", max_depth=8, learning_rate=0.05, n_est=1600),
-                dict(name=f"xgb_46p12e{ENGINEERED_DIM}_d8_lr003", max_depth=8, learning_rate=0.03, n_est=2400),
-                dict(name=f"xgb_46p12e{ENGINEERED_DIM}_d6_lr005_bin512", max_depth=6, learning_rate=0.05, n_est=1800, max_bin=512),
+                dict(name=f"xgb_{FEATURE_TAG}_d8_lr005", max_depth=8, learning_rate=0.05, n_est=1600),
+                dict(name=f"xgb_{FEATURE_TAG}_d8_lr003", max_depth=8, learning_rate=0.03, n_est=2400),
+                dict(name=f"xgb_{FEATURE_TAG}_d6_lr005_bin512", max_depth=6, learning_rate=0.05, n_est=1800, max_bin=512),
             ]
         )
 
@@ -417,7 +428,7 @@ def main() -> None:
     p.add_argument("--dashboard-html", type=Path, default=DEFAULT_DASHBOARD)
     args = p.parse_args()
 
-    combined_out = args.combined_out or (args.work_dir / f"combined_46p12e{ENGINEERED_DIM}.npz")
+    combined_out = args.combined_out or (args.work_dir / f"combined_{FEATURE_TAG}.npz")
     if not args.train_only:
         rows = read_manifest(args.manifest, args.start_date, args.end_date, args.limit_days)
         if not rows:

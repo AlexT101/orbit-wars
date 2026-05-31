@@ -16,9 +16,10 @@ from typing import Callable
 import numpy as np
 
 try:
-    from engineered_features import ENGINEERED_NAMES
+    from engineered_features import ENGINEERED_NAMES, TEMPO_NAMES
 except ImportError:
     ENGINEERED_NAMES = []
+    TEMPO_NAMES = []
 
 
 # Feature naming is deliberately centralized here. When you add, remove, or
@@ -165,6 +166,8 @@ def feature_names(dim: int, names: list[str] | None = None) -> list[str]:
         out = list(SUMMARY_V2_NAMES) + list(EXTRA_12_NAMES)
     elif dim == 58 + len(ENGINEERED_NAMES):
         out = list(SUMMARY_V2_NAMES) + list(EXTRA_12_NAMES) + list(ENGINEERED_NAMES)
+    elif dim == 58 + len(ENGINEERED_NAMES) + len(TEMPO_NAMES):
+        out = list(SUMMARY_V2_NAMES) + list(EXTRA_12_NAMES) + list(ENGINEERED_NAMES) + list(TEMPO_NAMES)
     elif dim == 62:
         out = list(SUMMARY_V2_NAMES) + list(EXTRA_16_NAMES)
     else:
@@ -186,6 +189,9 @@ def _describe_feature(index: int, name: str) -> dict[str, str | int]:
     if len(parts) >= 3 and parts[0] == "eng":
         group, label, description = _describe_engineered(parts[1], "_".join(parts[2:]))
         return {"index": index, "name": name, "label": label, "group": group, "description": description}
+    if len(parts) >= 2 and parts[0] == "tempo":
+        label, description = _describe_tempo("_".join(parts[1:]))
+        return {"index": index, "name": name, "label": label, "group": "Tempo", "description": description}
     if len(parts) >= 3 and parts[0] in {"me", "opp"}:
         side = "Me" if parts[0] == "me" else "Opponent"
         phase = "current" if parts[1] == "cur" else "extrapolated"
@@ -330,6 +336,23 @@ def _describe_engineered(scope: str, metric: str) -> tuple[str, str, str]:
     return scope_label, label, description
 
 
+def _describe_tempo(metric: str) -> tuple[str, str]:
+    labels = {
+        "prod_diff_slope_50": ("production diff slope 50", "Causal 50-turn rolling slope of total production difference."),
+        "ships_total_diff_slope_50": ("total ships diff slope 50", "Causal 50-turn rolling slope of total ships difference."),
+        "ships_planets_diff_slope_50": ("standing ships diff slope 50", "Causal 50-turn rolling slope of ships-on-planets difference."),
+        "planet_count_diff_slope_50": ("planet count slope 50", "Causal 50-turn rolling slope of current planet-count difference."),
+        "static_count_diff_slope_50": ("static planets slope 50", "Causal 50-turn rolling slope of static planet-count difference."),
+        "prod_share_slope_50": ("production share slope 50", "Causal 50-turn rolling slope of normalized production share."),
+        "ships_total_share_slope_50": ("total ships share slope 50", "Causal 50-turn rolling slope of normalized total ship share."),
+        "adv100_slope_50": ("projected 100 slope 50", "Causal 50-turn rolling slope of projected 100-turn advantage."),
+        "flying_commitment_diff_slope_50": ("flying commitment slope 50", "Causal 50-turn rolling slope of flying commitment difference."),
+        "history_frac_50": ("history available 50", "Fraction of the 50-turn tempo window covered by prior observations."),
+        "development_score_50": ("development score 50", "Projected 50-turn advantage from recent ship and production-difference slopes."),
+    }
+    return labels.get(metric, (metric.replace("_", " "), f"Causal tempo feature: {metric.replace('_', ' ')}."))
+
+
 def _clip_prob(p: np.ndarray) -> np.ndarray:
     return np.clip(p.astype(np.float64), 1e-6, 1.0 - 1e-6)
 
@@ -396,6 +419,12 @@ def baseline_accuracy_comparisons(
         ("eng.forecast.cur_adv_remaining", "projected remaining sign", "Predict win from current ship diff plus remaining-game production diff."),
         ("eng.speed.total_speed_diff", "total speed diff", "Predict win when my estimated total-fleet speed is higher."),
         ("eng.cur.ships_flying_diff", "flying ships diff", "Predict win when I have more ships currently in flight."),
+        ("tempo.prod_diff_slope_50", "production tempo", "Predict win when production difference has been improving over the last 50 turns."),
+        ("tempo.ships_total_diff_slope_50", "total ships tempo", "Predict win when total ship difference has been improving over the last 50 turns."),
+        ("tempo.ships_planets_diff_slope_50", "standing ships tempo", "Predict win when stationed ship difference has been improving over the last 50 turns."),
+        ("tempo.planet_count_diff_slope_50", "planet count tempo", "Predict win when planet-count difference has been improving over the last 50 turns."),
+        ("tempo.adv100_slope_50", "projected 100 tempo", "Predict win when projected 100-turn advantage has been improving over the last 50 turns."),
+        ("tempo.development_score_50", "development score", "Predict win from the sign of the combined recent ship and production tempo score."),
     ]
     seen: set[str] = set()
     for name, label, description in specs:
@@ -1067,7 +1096,7 @@ function renderCards() {{
 function renderRuns() {{
   if (!models.length) {{ document.getElementById('runs').innerHTML = '<tr><td class="empty">No model records yet.</td></tr>'; return; }}
   const setKey = r => {{
-    const m = String(r.title || '').match(/^(xgb_[0-9]+p[0-9]+e[0-9]+)/);
+    const m = String(r.title || '').match(/^(xgb_[0-9]+p[0-9]+e[0-9]+(?:t[0-9]+)?)/);
     return m ? m[1] : '';
   }};
   const latestKey = setKey(latestModel());
