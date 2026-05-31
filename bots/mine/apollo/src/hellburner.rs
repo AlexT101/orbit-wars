@@ -1831,16 +1831,11 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     }
     let model = HellburnerModel::build(world);
 
-    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len() + 1);
-    out.push(Vec::new());
-
     if world.step < OPENING_TURNS {
-        let moves = run_early_game(world, &model);
-        if !out.iter().any(|prev| prev == &moves) {
-            out.push(moves);
-        }
-        return out;
+        return vec![run_early_game(world, &model)];
     }
+
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len());
 
     for &strat in &STRATEGIES {
         let (moves, _) = run_strategy(world, &model, strat);
