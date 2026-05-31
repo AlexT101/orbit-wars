@@ -79,6 +79,19 @@ pub fn aim_with_prediction(
     blockers::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
 }
 
+/// Comet-free aim used to compute the turn-invariant base for the invariant-aim
+/// cache; see [`crate::blockers::aim_ignoring_comets`].
+#[inline]
+pub fn aim_ignoring_comets(
+    cache: &EntityCache,
+    shooter_id: i64,
+    target_id: i64,
+    ships: i64,
+    launch_turn_offset: i64,
+) -> Option<AimResult> {
+    blockers::aim_ignoring_comets(cache, shooter_id, target_id, ships, launch_turn_offset)
+}
+
 /// Returns the engine's player-slot count: `max_owner + 1` across all
 /// non-neutral planets and fleets, floored at 2. Engine code indexes into
 /// per-player arrays by owner id directly, so the slot count has to be

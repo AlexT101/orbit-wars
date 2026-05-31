@@ -4,7 +4,7 @@
 //! collision against every obstacle, and require the two to agree.
 
 use super::reference_engine::RefEngine;
-use crate::blockers::{aim_with_prediction, lead_target};
+use crate::blockers::{aim_with_prediction, lead_target, shot_blocked_exact};
 use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
 use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
 use crate::entity_cache::{EntityCache, EntityKind};
@@ -599,4 +599,79 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
         "accepted orbiting shots that did not reach target (broad scan):\n  {}",
         misses.join("\n  "),
     );
+}
+
+/// Bit-identity guard for the binary-searched H-reduction in `blocked_on_path`.
+///
+/// The reduction skips turns it proves can't contact (the fleet's monotonic
+/// outward radius makes the radially-reachable turns a contiguous band) and runs
+/// the exact swept test only inside that band — with an exact full-scan fallback
+/// when a slow fleet can be out-paced radially (`fleet_speed ≤ obstacle step`).
+/// Either way the verdict must equal an exhaustive per-turn scan.
+///
+/// We advance until a comet group spawns (comets are the fast movers that drive
+/// the fallback branch and the windowed clamp), then sweep every bearing from
+/// several launchers across the ships grid (`5` → slow fleet/fallback, `500` →
+/// fast fleet/binary-search) and require `shot_blocked_exact` to agree with the
+/// brute-force `ground_truth_collision` for every angle.
+#[test]
+fn h_reduction_matches_exhaustive_scan_with_comets() {
+    let mut state = RefEngine::new(42, 2, Configuration::default());
+    let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
+    let mut guard = 0;
+    while state.comet_planet_ids.is_empty() && guard < EPISODE_STEPS {
+        state.step_with_actions(&noop).unwrap();
+        guard += 1;
+    }
+    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+
+    let cache = cache_for(&state);
+    let now = cache.current_turn as usize;
+    // Entities on board *now* (offset 0) — includes the freshly spawned comets,
+    // which `entity_ids_at_t0` (keyed on absolute turn 0) would miss.
+    let mut on_board: Vec<i64> = cache
+        .entities
+        .iter()
+        .filter(|(_, e)| e.positions.get(now).map(|p| p.is_some()).unwrap_or(false))
+        .map(|(&id, _)| id)
+        .collect();
+    on_board.sort();
+    let launchers: Vec<i64> = on_board
+        .iter()
+        .copied()
+        .filter(|id| !cache.get(*id).map(|e| e.is_comet()).unwrap_or(true))
+        .take(8)
+        .collect();
+    assert!(!launchers.is_empty(), "need planet launchers");
+
+    let ships_grid = [5i64, 50, 500];
+    let steps = 240usize;
+    let mut compared = 0usize;
+    for &shooter in &launchers {
+        for &target in on_board.iter().take(4) {
+            if shooter == target {
+                continue;
+            }
+            for &ships in &ships_grid {
+                let v = fleet_speed(ships.max(1), 6.0);
+                // A generous flight budget so the swept window spans the comets.
+                let flight_time = HORIZON as f64;
+                for k in 0..steps {
+                    let angle = std::f64::consts::TAU * k as f64 / steps as f64;
+                    let band = shot_blocked_exact(&cache, shooter, target, angle, flight_time, v, 0);
+                    let brute = ground_truth_collision(
+                        &cache, shooter, target, angle, ships, flight_time,
+                    )
+                    .is_some();
+                    assert_eq!(
+                        band, brute,
+                        "verdict mismatch: shooter={shooter} target={target} ships={ships} \
+                         v={v:.3} angle={angle:.6} — band={band} exhaustive={brute}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert!(compared > 1000, "expected a broad sweep, only {compared} comparisons");
 }

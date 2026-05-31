@@ -26,10 +26,10 @@ use crate::constants::{
     ROTATION_LOOK_AHEAD_TURNS,
 };
 use crate::engine::{MoveAction, Planet};
-use crate::entity_cache::{AimCacheVerdict};
+use crate::entity_cache::{AimCacheVerdict, InvariantVerdict};
 use crate::helpers::{
-    aim_with_prediction, dist, simulate_checkpoint_into, simulate_planet_timeline,
-    state_at_timeline, AimResult, ArrivalEvent, PlanetTimeline,
+    aim_ignoring_comets, aim_with_prediction, dist, simulate_checkpoint_into,
+    simulate_planet_timeline, state_at_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
 
@@ -146,9 +146,44 @@ impl<'a> HellburnerModel<'a> {
         let result = match cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset) {
             AimCacheVerdict::Hit(r) => r,
             AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
-                let r = aim_with_prediction(cache, src_id, target_id, ships, launch_turn_offset);
-                cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
-                r
+                // L3 — cross-turn invariant fast path for disc-qualified
+                // static→static / orbiting→orbiting shots. Skips lead_target and
+                // the per-entity planet sweep, only re-checking comets per turn.
+                match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
+                    InvariantVerdict::Use(r) => Some(r),
+                    InvariantVerdict::SingleSolve => {
+                        let r =
+                            aim_with_prediction(cache, src_id, target_id, ships, launch_turn_offset);
+                        cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
+                        r
+                    }
+                    InvariantVerdict::DualSolve => {
+                        // Populate the invariant base with one comet-free solve,
+                        // then gate it against just the comets. Comet-clear ⇒ the
+                        // base is exactly this turn's shot (no second solve);
+                        // comet-blocked / disqualified ⇒ fall back to a normal
+                        // full solve.
+                        let base =
+                            aim_ignoring_comets(cache, src_id, target_id, ships, launch_turn_offset);
+                        cache.invariant_aim_store(
+                            src_id, target_id, ships, launch_turn_offset, base,
+                        );
+                        match cache.invariant_aim_lookup(
+                            src_id, target_id, ships, launch_turn_offset,
+                        ) {
+                            InvariantVerdict::Use(r) => Some(r),
+                            _ => {
+                                let r = aim_with_prediction(
+                                    cache, src_id, target_id, ships, launch_turn_offset,
+                                );
+                                cache.aim_cache_store(
+                                    src_id, target_id, ships, launch_turn_offset, r,
+                                );
+                                r
+                            }
+                        }
+                    }
+                }
             }
         };
         self.shot_cache.borrow_mut().insert(key, result);
@@ -1854,6 +1889,22 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
         return vec![Vec::new()];
     }
     let model = HellburnerModel::build(world);
+
+    // Stress test: probe `plan_shot` for every ordered pair of planets
+    // (both directions) with fleet sizes up to 50. Results are discarded —
+    // this just exercises the function. The `std::hint::black_box` keeps the
+    // optimizer from eliding the calls.
+    
+    // for i in 0..50 {
+    //     for src in &world.planets {
+    //         for dst in &world.planets {
+    //             if src.id == dst.id {
+    //                 continue;
+    //             }
+    //             std::hint::black_box(model.plan_shot(src.id, dst.id, i, 0));
+    //         }
+    //     }
+    // }
 
     if world.step < OPENING_TURNS {
         return vec![run_early_game(world, &model)];

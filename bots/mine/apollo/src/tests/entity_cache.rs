@@ -1,8 +1,10 @@
 use super::reference_engine::RefEngine;
-use crate::blockers::aim_with_prediction;
+use crate::blockers::{aim_ignoring_comets, aim_with_prediction};
 use crate::constants::EPISODE_STEPS;
 use crate::engine::Configuration;
-use crate::entity_cache::{rot_sibling, AimCacheVerdict, EntityCache, EntityKind};
+use crate::entity_cache::{
+    rot_sibling, AimCacheVerdict, EntityCache, EntityKind, InvariantVerdict,
+};
 
 fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(
@@ -299,4 +301,204 @@ fn quartet_aim_siblings_match_direct_solve_with_comets() {
         }
     }
     assert!(checked > 0, "expected comet sibling pairs to be checked");
+}
+
+/// Compare two aim results to floating tolerance (bearing wrapped).
+fn assert_aim_eq(a: crate::entity_cache::AimResult, b: crate::entity_cache::AimResult, ctx: &str) {
+    assert_eq!(a.1, b.1, "turns mismatch ({ctx})");
+    assert!(wrap_pi(a.0 - b.0).abs() < 1e-6, "angle mismatch ({ctx}): {} vs {}", a.0, b.0);
+    assert!(
+        (a.2 - b.2).abs() < 1e-6 && (a.3 - b.3).abs() < 1e-6,
+        "point mismatch ({ctx}): ({},{}) vs ({},{})",
+        a.2, a.3, b.2, b.3
+    );
+    assert!((a.4 - b.4).abs() < 1e-6, "flight_time mismatch ({ctx})");
+}
+
+/// When no comet blocks it, the comet-free base equals the full solve: with no
+/// comets on the board `aim_ignoring_comets` is bit-identical to
+/// `aim_with_prediction`. Guards that the two share the same scan/cone logic.
+#[test]
+fn aim_ignoring_comets_matches_full_solve_without_comets() {
+    let state = RefEngine::new(42, 2, Configuration::default());
+    let mut cache = cache_for(&state);
+    assert!(cache.comet_ids.is_empty(), "seed 42 starts with no comets");
+    let mut ids: Vec<i64> = cache.entities.keys().copied().collect();
+    ids.sort();
+    let ships_grid = [5i64, 50, 500];
+
+    let mut checked = 0usize;
+    for t in [1i64, 7, 20] {
+        cache.set_current_turn(t);
+        for &src in &ids {
+            for &target in &ids {
+                if src == target {
+                    continue;
+                }
+                for &ships in &ships_grid {
+                    let cf = aim_ignoring_comets(&cache, src, target, ships, 0);
+                    let full = aim_with_prediction(&cache, src, target, ships, 0);
+                    match (cf, full) {
+                        (None, None) => {}
+                        (Some(a), Some(b)) => {
+                            assert_eq!(a.0.to_bits(), b.0.to_bits(), "angle {src}->{target}");
+                            assert_eq!(a.1, b.1, "turns {src}->{target}");
+                        }
+                        (a, b) => panic!(
+                            "feasibility differ {src}->{target} s={ships}: {} vs {}",
+                            a.is_some(),
+                            b.is_some()
+                        ),
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 0);
+}
+
+/// Core invariant-cache guarantee: a static→static / orbiting→orbiting aim
+/// solved at one (base) turn and carried to a later turn via
+/// `invariant_aim_lookup` must equal an independent `aim_with_prediction` solve
+/// at that later turn. Built at step 0 (no comets), so the comet gate never
+/// fires and this isolates the static-fixed / orbiting-rotating carry.
+#[test]
+fn invariant_aim_matches_direct_solve_across_turns() {
+    let seeds = [42u64, 7, 100, 1234, 2025];
+    let ships_grid = [5i64, 50, 500];
+    let mut nudged_carries = 0usize;
+    for seed in seeds {
+        let state = RefEngine::new(seed, 2, Configuration::default());
+        let mut cache = cache_for(&state);
+        let mut ids: Vec<i64> = cache
+            .entities
+            .values()
+            .filter(|e| !e.is_comet())
+            .map(|e| e.id)
+            .collect();
+        ids.sort();
+
+        // Solve + store every same-kind pair at the base turn, feeding the
+        // comet-free base to the cache exactly as `plan_shot` does.
+        let base_turn = 5;
+        cache.set_current_turn(base_turn);
+        for &src in &ids {
+            for &target in &ids {
+                if src == target {
+                    continue;
+                }
+                for &ships in &ships_grid {
+                    let base = aim_ignoring_comets(&cache, src, target, ships, 0);
+                    cache.invariant_aim_store(src, target, ships, 0, base);
+                }
+            }
+        }
+
+        // Carry to later turns and compare against fresh solves.
+        let mut checked = 0usize;
+        for t in [6i64, 11, 23, 47, 88] {
+            cache.set_current_turn(t);
+            for &src in &ids {
+                for &target in &ids {
+                    if src == target {
+                        continue;
+                    }
+                    for &ships in &ships_grid {
+                        let InvariantVerdict::Use(inv) =
+                            cache.invariant_aim_lookup(src, target, ships, 0)
+                        else {
+                            continue;
+                        };
+                        let fresh = aim_with_prediction(&cache, src, target, ships, 0).expect(
+                            "invariant returned Use but fresh solve says None — feasibility drift",
+                        );
+                        assert_aim_eq(inv, fresh, &format!("seed={seed} t={t} {src}->{target} s={ships}"));
+                        checked += 1;
+                        // Detect a cone-scanned (nudged) carry: bearing no longer
+                        // points straight at the intercept point. With no comets,
+                        // such a nudge is around a fixed/rotating planet and must
+                        // still carry — the capability this whole change adds.
+                        if let Some([lx, ly]) = cache.position(src, 0) {
+                            let bearing = (inv.3 - ly).atan2(inv.2 - lx);
+                            if wrap_pi(inv.0 - bearing).abs() > 1e-6 {
+                                nudged_carries += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "seed {seed}: expected at least one invariant hit");
+    }
+    assert!(
+        nudged_carries > 0,
+        "expected at least one planet-nudged shot to be cached and carried across turns"
+    );
+}
+
+/// With comets actually on the board, the invariant cache must stay sound: any
+/// `Use` it returns (comet gate passed) must still match a fresh solve that
+/// also sees those comets. Cases where a comet blocks the carried path surface
+/// as `SingleSolve` (fall-back) and are simply skipped here.
+#[test]
+fn invariant_aim_sound_with_comets_present() {
+    let mut state = RefEngine::new(42, 2, Configuration::default());
+    let noop: Vec<Vec<crate::engine::MoveAction>> = vec![Vec::new(), Vec::new()];
+    let mut guard = 0;
+    while state.comet_planet_ids.is_empty() && guard < EPISODE_STEPS {
+        state.step_with_actions(&noop).unwrap();
+        guard += 1;
+    }
+    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+
+    let mut cache = cache_for(&state);
+    let comet_ids: std::collections::HashSet<i64> =
+        state.comet_planet_ids.iter().copied().collect();
+    let mut ids: Vec<i64> = cache
+        .entities
+        .values()
+        .filter(|e| !e.is_comet())
+        .map(|e| e.id)
+        .collect();
+    ids.sort();
+
+    let ships_grid = [5i64, 50];
+    let base_turn = state.step.max(1);
+    cache.set_current_turn(base_turn);
+    for &src in &ids {
+        for &target in &ids {
+            if src == target {
+                continue;
+            }
+            for &ships in &ships_grid {
+                let base = aim_ignoring_comets(&cache, src, target, ships, 0);
+                cache.invariant_aim_store(src, target, ships, 0, base);
+            }
+        }
+    }
+
+    for dt in [1i64, 3, 6, 10] {
+        cache.set_current_turn(base_turn + dt);
+        for &src in &ids {
+            for &target in &ids {
+                if src == target {
+                    continue;
+                }
+                for &ships in &ships_grid {
+                    let InvariantVerdict::Use(inv) =
+                        cache.invariant_aim_lookup(src, target, ships, 0)
+                    else {
+                        continue;
+                    };
+                    // A returned shot's carried path is comet-clear, so a fresh
+                    // full solve (sun+planets+comets) must agree.
+                    let fresh = aim_with_prediction(&cache, src, target, ships, 0)
+                        .expect("invariant Use but fresh None with comets present");
+                    assert_aim_eq(inv, fresh, &format!("comets t={} {src}->{target} s={ships}", base_turn + dt));
+                }
+            }
+        }
+    }
+    let _ = comet_ids;
 }
