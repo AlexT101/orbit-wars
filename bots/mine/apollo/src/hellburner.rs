@@ -28,8 +28,8 @@ use crate::constants::{
 use crate::engine::{MoveAction, Planet};
 use crate::entity_cache::{AimCacheVerdict};
 use crate::helpers::{
-    aim_with_prediction, dist, simulate_checkpoint_into, simulate_planet_timeline, AimResult,
-    ArrivalEvent, PlanetTimeline,
+    aim_with_prediction, dist, simulate_checkpoint_into, simulate_planet_timeline,
+    state_at_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
 
@@ -255,13 +255,37 @@ impl PlanState {
     fn ships_available(&self, src: &Planet) -> i64 {
         (src.ships - self.spent.get(&src.id).copied().unwrap_or(0)).max(0)
     }
-    /// Growth-aware available ships at a future launch offset. Counts the
-    /// production a source will accumulate over `offset` turns on top of its
-    /// current pool. Conservative against `spent`: every prior commitment is
-    /// subtracted regardless of when those ships are scheduled to leave.
-    fn ships_available_at(&self, src: &Planet, offset: i64) -> i64 {
+    /// Rollout-aware available ships at a future launch offset.
+    ///
+    /// O(1) in the common case — it reads the prebuilt baseline trajectory the
+    /// arrival ledger already produced. Only when this source has its own
+    /// planned reinforcements queued *this* turn does it pay a single per-call
+    /// planet sim to fold those in. Conservative against `spent`: every prior
+    /// commitment from this source is subtracted regardless of when those ships
+    /// are scheduled to leave.
+    fn ships_available_at(&self, world: &WorldState, src: &Planet, offset: i64) -> i64 {
+        let offset = offset.max(0);
         let spent = self.spent.get(&src.id).copied().unwrap_or(0);
-        (src.ships - spent + src.production * offset.max(0)).max(0)
+        let planned: &[ArrivalEvent] = self
+            .planned
+            .get(&src.id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let (owner, ships) = if planned.is_empty() {
+            match world.timeline_cache.baseline(src.id) {
+                Some(b) => state_at_timeline(b, offset),
+                // No cached trajectory: fall back to linear growth.
+                None => (src.owner, src.ships + src.production * offset),
+            }
+        } else {
+            // This source also has reinforcements we've planned this turn
+            let tl = world.projected_timeline(src.id, offset, planned, &[]);
+            state_at_timeline(&tl, offset)
+        };
+        if owner != world.player {
+            return 0;
+        }
+        (ships - spent).max(0)
     }
     fn commit(&mut self, src_id: i64, target_id: i64, ships: i64, arrival_turn: i64, owner: i64) {
         *self.spent.entry(src_id).or_insert(0) += ships;
@@ -1029,7 +1053,7 @@ fn collect_source_candidates(
         let src = *world.planet(src_id);
         // Growth-aware: at launch offset the source will have accumulated
         // `production·offset` extra ships on top of the current pool.
-        let available = plan.ships_available_at(&src, offset);
+        let available = plan.ships_available_at(world, &src, offset);
         if available == 0 {
             continue;
         }
