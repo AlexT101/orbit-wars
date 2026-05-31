@@ -303,8 +303,24 @@ pub fn shot_blocked_exact(
     // before arrival matter; later turns are irrelevant.
     let max_turn = (flight_time.ceil() as i64).max(1);
 
+    // The fleet flies one straight ray at constant speed from the launch ring
+    // out to the arrival distance `ring_d`. Precompute that whole segment once.
+    let ring_d = launch_offset + flight_time * v;
+    let sx = lx + launch_offset * ux;
+    let sy = ly + launch_offset * uy;
+    let ex = lx + ring_d * ux;
+    let ey = ly + ring_d * uy;
+
+    // Static disk: a single swept-pair test over the entire flight segment. The
+    // per-turn segments merely tile this same ray, so one test is exact; and the
+    // segment already stops at `ring_d`, so no `<= flight_time` gate is needed.
+    let static_hit = |cx: f64, cy: f64, r: f64| -> bool {
+        segment_contact_s(sx, sy, ex, ey, cx, cy, cx, cy, r).is_some()
+    };
+
     // Fleet segment for turn `t`: ring distance `D(s) = launch_offset + (t-1+s)·v`
     // along the fixed bearing. Returns true iff the disk is struck by arrival.
+    // Only needed for *moving* blockers (each turn is a different chord).
     let contact_before = |p0x: f64, p0y: f64, p1x: f64, p1y: f64, r: f64, t: i64| -> bool {
         let d_start = launch_offset + (t as f64 - 1.0) * v;
         let d_end = launch_offset + t as f64 * v;
@@ -319,10 +335,8 @@ pub fn shot_blocked_exact(
     };
 
     // Sun: static disk at board center.
-    for t in 1..=max_turn {
-        if contact_before(CENTER, CENTER, CENTER, CENTER, SUN_RADIUS, t) {
-            return true;
-        }
+    if static_hit(CENTER, CENTER, SUN_RADIUS) {
+        return true;
     }
 
     // Planets and comets (including the source — see above).
@@ -332,6 +346,19 @@ pub fn shot_blocked_exact(
             continue;
         }
         let r = ent.radius;
+
+        // Static planets don't move: their disk is fixed across the whole flight
+        // window, so one segment test suffices instead of the per-turn loop.
+        if ent.is_static() {
+            let idx = abs_base.clamp(0, EPISODE_STEPS - 1) as usize;
+            if let Some(Some(p)) = ent.positions.get(idx) {
+                if static_hit(p[0], p[1], r) {
+                    return true;
+                }
+            }
+            continue;
+        }
+
         let positions = &ent.positions;
         for t in 1..=max_turn {
             let abs0 = abs_base + t - 1;
