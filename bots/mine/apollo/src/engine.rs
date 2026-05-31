@@ -71,7 +71,7 @@ impl Default for Configuration {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MoveAction {
     pub from_id: i64,
     pub angle: f64,
@@ -234,11 +234,7 @@ pub fn resolve_combat(owner: i64, garrison: i64, incoming: &[i64; MAX_PLAYERS]) 
     }
 
     let (survivor_owner, survivor_ships) = if entry_count > 1 {
-        let s = if top_ships == second_ships {
-            0
-        } else {
-            top_ships - second_ships
-        };
+        let s = top_ships - second_ships;
         let o = if s > 0 { top_player } else { -1 };
         (o, s)
     } else if entry_count == 1 {

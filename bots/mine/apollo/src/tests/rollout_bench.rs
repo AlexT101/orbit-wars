@@ -32,8 +32,8 @@ fn advance(state: &mut RefEngine, cache: &mut EntityCache, turns: i64) {
         let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); state.num_players];
         for p in 0..state.num_players {
             let ws = WorldState::from_engine(p as i64, &snap, cache);
-            for (from_id, angle, ships) in hellburner::plan(&ws) {
-                actions[p].push(MoveAction { from_id, angle, ships });
+            for ma in hellburner::plan(&ws) {
+                actions[p].push(ma);
             }
         }
         if state.step_with_actions(&actions).is_err() {

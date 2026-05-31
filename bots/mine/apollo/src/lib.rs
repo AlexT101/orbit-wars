@@ -187,7 +187,7 @@ impl Bot {
 
         let moves = crate::hellburner::plan(&world);
         self.current_turn += 1;
-        Ok(moves)
+        Ok(moves.into_iter().map(|m| (m.from_id, m.angle, m.ships)).collect())
     }
 
     /// Plan with rollout-based multi-candidate selection. Costs ~5-10x more
@@ -245,7 +245,7 @@ impl Bot {
             Some(&initial_ledger),
         );
         self.current_turn += 1;
-        Ok(moves)
+        Ok(moves.into_iter().map(|m| (m.from_id, m.angle, m.ships)).collect())
     }
 }
 

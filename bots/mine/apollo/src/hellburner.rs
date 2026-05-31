@@ -25,15 +25,13 @@ use crate::constants::{
     A_S_LOOKAHEAD, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, OFFSET_LOOKAHEAD, OPENING_TURNS,
     ROTATION_LOOK_AHEAD_TURNS, SECOND_ENEMY_ARRIVAL_TOL,
 };
-use crate::engine::Planet;
+use crate::engine::{MoveAction, Planet};
 use crate::entity_cache::{AimCacheVerdict};
 use crate::helpers::{
     aim_with_prediction, dist, simulate_checkpoint_into, simulate_planet_timeline, AimResult,
     ArrivalEvent, PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
-
-type FleetOrder = (i64, f64, i64); // (src_id, angle, ships)
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -65,11 +63,14 @@ impl<'a> HellburnerModel<'a> {
             .map(|p| p.id)
             .collect();
 
+        let non_comets: Vec<&Planet> = state
+            .planets
+            .iter()
+            .filter(|p| non_comet_ids.contains(&p.id))
+            .collect();
+
         let mut future_pos: HashMap<i64, [f64; 2]> = HashMap::default();
-        for p in &state.planets {
-            if !non_comet_ids.contains(&p.id) {
-                continue;
-            }
+        for p in &non_comets {
             let pos = state
                 .entity_cache
                 .position(p.id, 1 + ROTATION_LOOK_AHEAD_TURNS)
@@ -83,12 +84,9 @@ impl<'a> HellburnerModel<'a> {
             inbound_edges.insert(pid, Vec::new());
             outbound_edges.insert(pid, Vec::new());
         }
-        for src in &state.planets {
-            if !non_comet_ids.contains(&src.id) {
-                continue;
-            }
-            for dst in &state.planets {
-                if dst.id == src.id || !non_comet_ids.contains(&dst.id) {
+        for src in &non_comets {
+            for dst in &non_comets {
+                if src.id == dst.id {
                     continue;
                 }
                 let [fx, fy] = future_pos[&dst.id];
@@ -165,13 +163,6 @@ fn build_reinforcement_targets(
     outbound: &HashMap<i64, Vec<(i64, f64)>>,
     player: i64,
 ) -> HashMap<i64, i64> {
-    let owned_ids: HashSet<i64> = state
-        .my_planets
-        .iter()
-        .filter(|p| non_comet_ids.contains(&p.id))
-        .map(|p| p.id)
-        .collect();
-
     let mut front_line: HashSet<i64> = HashSet::default();
     for p in &state.my_planets {
         if !non_comet_ids.contains(&p.id) {
@@ -202,7 +193,7 @@ fn build_reinforcement_targets(
         head += 1;
         let dh = hops[&node];
         for (sid, _) in &inbound[&node] {
-            if !owned_ids.contains(sid) || hops.contains_key(sid) {
+            if state.planet(*sid).owner != player || hops.contains_key(sid) {
                 continue;
             }
             hops.insert(*sid, dh + 1);
@@ -233,7 +224,7 @@ fn build_reinforcement_targets(
         let mut reachable: Vec<i64> = outbound[&p.id]
             .iter()
             .filter_map(|(did, _)| {
-                if owned_ids.contains(did)
+                if state.planet(*did).owner == player
                     && !front_line.contains(did)
                     && hops.contains_key(did)
                 {
@@ -882,9 +873,6 @@ fn evaluate_frontline_strategy(
                 excess = margin;
             }
         }
-        if excess == i64::MAX {
-            excess = 0;
-        }
         let marginal = &best_orders[best_marginal_in_orders];
         let src_id = marginal.src_id;
         let max_ships = marginal.ships;
@@ -1107,7 +1095,7 @@ fn send_reinforcements(
     world: &WorldState,
     model: &HellburnerModel,
     plan: &PlanState,
-) -> Vec<FleetOrder> {
+) -> Vec<MoveAction> {
     let mut out = Vec::new();
     let player = world.player;
     let empty: Vec<(i64, f64)> = Vec::new();
@@ -1159,7 +1147,7 @@ fn send_reinforcements(
         if wait_is_better {
             continue;
         }
-        out.push((p.id, angle, ships));
+        out.push(MoveAction { from_id: p.id, angle, ships });
     }
     out
 }
@@ -1361,7 +1349,7 @@ fn early_score(state: &EarlyState, world: &WorldState) -> i64 {
     total
 }
 
-fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder> {
+fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<MoveAction> {
     let player = world.player;
     let owned_ids: HashSet<i64> = world
         .my_planets
@@ -1525,7 +1513,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
     );
 
     // Emit only moves whose launch_turn == current step.
-    let mut moves: Vec<FleetOrder> = Vec::new();
+    let mut moves: Vec<MoveAction> = Vec::new();
     for (target_planet, (source_id, fleet_size, launch_turn), _) in &best_sequence {
         if *launch_turn != world.step {
             continue;
@@ -1535,7 +1523,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
         else {
             continue;
         };
-        moves.push((*source_id, angle, *fleet_size));
+        moves.push(MoveAction { from_id: *source_id, angle, ships: *fleet_size });
     }
     moves
 }
@@ -1593,9 +1581,9 @@ fn run_strategy(
     world: &WorldState,
     model: &HellburnerModel,
     strategy: SelectionStrategy,
-) -> (Vec<FleetOrder>, PlanState) {
+) -> (Vec<MoveAction>, PlanState) {
     let mut state = PlanState::default();
-    let mut moves: Vec<FleetOrder> = Vec::new();
+    let mut moves: Vec<MoveAction> = Vec::new();
 
     // Fixed-order candidate targets (non-comet, with inbound edges). The scan
     // order matches the original per-iteration sweep so selection tie-breaking
@@ -1714,7 +1702,7 @@ fn run_strategy(
         for o in &orders {
             state.commit(o.src_id, target_id, o.ships, o.arrival, world.player);
             if o.effective_offset == 0 {
-                moves.push((o.src_id, o.angle, o.ships));
+                moves.push(MoveAction { from_id: o.src_id, angle: o.angle, ships: o.ships });
             }
             if let Some(outs) = model.outbound_edges.get(&o.src_id) {
                 for (did, _) in outs {
@@ -1745,7 +1733,7 @@ const STRATEGIES: [SelectionStrategy; 4] = [
     SelectionStrategy::ScoreFirst,
 ];
 
-pub fn plan(world: &WorldState) -> Vec<FleetOrder> {
+pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     if world.enemy_planets.is_empty() {
         return Vec::new();
     }
@@ -1773,7 +1761,7 @@ pub fn plan(world: &WorldState) -> Vec<FleetOrder> {
 /// Duplicate plans are deduplicated so the rollout doesn't pay for the same
 /// move set twice (different strategies often converge on the same answer
 /// once trial-timeline ownership is the binding constraint).
-pub fn search_candidates(world: &WorldState) -> Vec<Vec<FleetOrder>> {
+pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     if world.enemy_planets.is_empty() {
         return vec![Vec::new()];
     }
@@ -1783,7 +1771,7 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<FleetOrder>> {
         return vec![run_early_game(world, &model)];
     }
 
-    let mut out: Vec<Vec<FleetOrder>> = Vec::with_capacity(STRATEGIES.len());
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len());
     for &strat in &STRATEGIES {
         let (moves, _) = run_strategy(world, &model, strat);
         if !out.iter().any(|prev| prev == &moves) {

@@ -15,7 +15,7 @@ use crate::engine::{CometGroup, Planet};
 
 /// Aim solver result tuple: `(angle, turns, target_x, target_y,
 /// fractional_flight_time)`. See [`crate::blockers::AimResult`].
-pub type AimResult = (f64, i64, f64, f64, f64);
+pub use crate::blockers::AimResult;
 
 #[derive(Clone, Copy)]
 struct CachedAim {
