@@ -53,7 +53,6 @@ import json
 import os
 import stat
 import subprocess
-import sys
 import threading
 
 _PROC = None
@@ -118,7 +117,7 @@ def _ensure():
         [_BIN],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=sys.stderr,
+        stderr=subprocess.DEVNULL,
         cwd=_HERE,
         env=env,
         bufsize=0,
