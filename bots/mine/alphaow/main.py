@@ -88,7 +88,7 @@ def _ensure():
         [bin_path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         cwd=_here(),
         env=env,
         bufsize=0,
