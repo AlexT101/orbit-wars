@@ -50,7 +50,9 @@ pub const NUDGE_SCAN: i64 = 16;                                     // Number of
 
 
 // Nudge scan notes:
-// Measured over 30 seeds × 5 ship counts × all shooter/target pairs. Of 58,684 blocked-direct shots, only 7,444 (~13%) are nudge-recoverable at all (a clear angle exists in the cone); the other ~87% return None at any N. Recovery of those 7,444 vs a thorough n=256 reference:
+// Measured over 30 seeds × 5 ship counts × all shooter/target pairs:
+// Of 58,684 blocked-direct shots, only 7,444 (~13%) are nudge-recoverable at all (a clear angle exists in the cone)
+// The other ~87% return None at any N. Recovery of those 7,444 vs a thorough n=256 reference:
 
 // NUDGE_SCAN	recovered	cost rel.
 // 1	0%	—
@@ -62,3 +64,6 @@ pub const NUDGE_SCAN: i64 = 16;                                     // Number of
 // 16	96%	0.67×
 // 24	96.6%	1×
 // 48	98.7%	2×
+
+// For bot submissions, NUDGE_SCAN should be increased if we have remaining runtime
+// For local testing, keep NUDGE_SCAN = 16 to balance test runtime with nudge recovery coverage
