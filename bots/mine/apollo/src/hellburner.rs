@@ -22,9 +22,8 @@ use std::cell::RefCell;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::{
-    A_S_LOOKAHEAD, GARRISON_SIZE, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, MAX_SUBSET_SOURCES,
-    OFFSET_LOOKAHEAD, OPENING_TURNS, ROTATION_LOOK_AHEAD_TURNS, SECOND_ENEMY_ARRIVAL_TOL,
-    TRIM_MIN_SHIPS,
+    A_S_LOOKAHEAD, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, OFFSET_LOOKAHEAD, OPENING_TURNS,
+    ROTATION_LOOK_AHEAD_TURNS, SECOND_ENEMY_ARRIVAL_TOL,
 };
 use crate::engine::Planet;
 use crate::entity_cache::{AimCacheVerdict};
@@ -557,7 +556,7 @@ fn evaluate_frontline_strategy(
     if scratch.candidates.is_empty() {
         return None;
     }
-    let n = scratch.candidates.len().min(MAX_SUBSET_SOURCES);
+    let n = scratch.candidates.len();
 
     // ── 2. Enumerate non-empty subsets × {uncoordinated, coordinated}. ──
     //       Schedule A (uncoordinated): each source at `offset`. Earliest
@@ -892,7 +891,7 @@ fn evaluate_frontline_strategy(
         let marginal_eff_offset = marginal.effective_offset;
         let excess = excess.min(max_ships);
         let keep = excess / 2;
-        let trimmed = (max_ships - keep).max(TRIM_MIN_SHIPS);
+        let trimmed = (max_ships - keep).max(1);
         if trimmed < max_ships {
             if let Some((t_angle, t_turns, _, _, _)) =
                 model.plan_shot(src_id, target.id, trimmed, marginal_eff_offset)
@@ -1120,7 +1119,7 @@ fn send_reinforcements(
             continue;
         };
         let available = plan.ships_available(p);
-        if available <= GARRISON_SIZE {
+        if available <= 0 {
             continue;
         }
         let has_enemy_incoming = model
@@ -1132,7 +1131,7 @@ fn send_reinforcements(
         if has_enemy_incoming {
             continue;
         }
-        let ships = available - GARRISON_SIZE;
+        let ships = available;
         let Some((angle, turns_now, _, _, _)) =
             model.plan_shot(p.id, target_id, ships, 0)
         else {
@@ -1740,10 +1739,10 @@ fn run_strategy(
 /// rollout layer), so its position is load-bearing — see the
 /// `search_candidates_includes_greedy_plan` test.
 const STRATEGIES: [SelectionStrategy; 4] = [
-    SelectionStrategy::PriorityFirst,
-    SelectionStrategy::ScoreFirst,
     SelectionStrategy::ScorePerShip,
     SelectionStrategy::ProductionFirst,
+    SelectionStrategy::PriorityFirst,
+    SelectionStrategy::ScoreFirst,
 ];
 
 pub fn plan(world: &WorldState) -> Vec<FleetOrder> {

@@ -34,18 +34,14 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450];   // Game step
 
 // Turn rules
 pub const HORIZON: i64 = 30;                                        // Number of turns to look into the future.
-pub const REACTIVE_TURNS: i64 = 2;                                  // Number of turns to forward simulate ally/enemy steps during rollouts
-pub const OPENING_TURNS: i64 = 3;                                   // Number of turns at the start where we focus on economy over combat
 pub const ROTATION_LOOK_AHEAD_TURNS: i64 = 10;                      // Number of turns to look ahead when estimating future position of planets
 pub const OFFSET_LOOKAHEAD: i64 = 5;                                // Max base launch delay swept per target. Offset 0 emits now; winning delayed offsets become reservations so later choices cannot spend those ships.
 pub const MAX_COORD_DELAY: i64 = 5;                                 // Max extra launch delay a source may add beyond the subset's base offset while trying to coordinate arrivals near the subset's natural latest arrival.
 pub const A_S_LOOKAHEAD: i64 = 3;                                   // Max turns past the natural latest arrival that coordinated schedules may target, letting delayed sources grow extra production before launch.
 pub const SECOND_ENEMY_ARRIVAL_TOL: i64 = 1;                        // Skip third-party target steals if our fleet would arrive no later than this many turns after another non-owner enemy arrival.
 
-// Fleet rules
-pub const GARRISON_SIZE: i64 = 0;                                   // Ships kept behind on a reinforcement source after sending surplus forward.
-pub const TRIM_MIN_SHIPS: i64 = 10;                                 // Lower bound when halve-trimming the marginal capture fleet; avoids saving excess by shrinking it into a tiny slow fleet.
-pub const MAX_SUBSET_SOURCES: usize = 10;                           // Cap on inbound owned sources enumerated for full 2^N subset search; the nearest sources are kept after distance sorting.
+pub const REACTIVE_TURNS: i64 = 2;                                  // Number of turns to forward simulate ally/enemy steps during rollouts
+pub const OPENING_TURNS: i64 = 3;                                   // Number of turns at the start where we focus on economy over combat
 
 // Distance rules
 pub const MAX_DISTANCE: f64 = 38.0;                                 // Maximum distance between planets for us to consider fleet travel
