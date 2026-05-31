@@ -335,6 +335,32 @@ fn neighbor_holds_under_worst_case(
         });
         half_pressure += half_ships;
     }
+
+    // TODO: When we properly integrate comets into our graph model, this extra
+    // comet check can be removed.
+    //
+    // Enemy comets are excluded from the proximity graph (`inbound_edges`), so
+    // the loop above never sees them.
+    for &cid in &world.comet_ids {
+        let comet = world.planet(cid);
+        if comet.owner == world.player || comet.owner == -1 || comet.ships == 0 {
+            continue;
+        }
+        if dist(comet.x, comet.y, neighbor.x, neighbor.y) > MAX_DISTANCE {
+            continue;
+        }
+        let Some((_, turns, _, _, _)) = model.plan_shot(cid, neighbor.id, comet.ships, 0) else {
+            continue;
+        };
+        let half_ships = (comet.ships / 2).max(1);
+        extras.push(ArrivalEvent {
+            turns: turns.max(1),
+            owner: comet.owner,
+            ships: half_ships,
+        });
+        half_pressure += half_ships;
+    }
+
     if extras.is_empty() {
         return (true, 0);
     }
