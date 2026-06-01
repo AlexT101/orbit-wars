@@ -716,8 +716,6 @@ fn evaluate_frontline_strategy(
     let mut best_ships = i64::MAX;
     let mut best_orders: Vec<PlannedOrder> = Vec::new();
     let mut best_max_arrival: i64 = 0;
-    let mut best_marginal_in_orders: usize = 0;
-    let mut best_marginal_not_doomed = false;
 
     // ── Shared per-target arrival context (fixed across all masks). ──
     // Every (subset, schedule) trial layers its candidate arrivals on top of
@@ -793,14 +791,10 @@ fn evaluate_frontline_strategy(
                     max_arrival: i64,
                     ships_total: i64,
                     score: f64,
-                    marginal_idx: usize,
-                    marginal_not_doomed: bool,
                     best_score: &mut f64,
                     best_ships: &mut i64,
                     best_orders: &mut Vec<PlannedOrder>,
-                    best_max_arrival: &mut i64,
-                    best_marginal_in_orders: &mut usize,
-                    best_marginal_not_doomed: &mut bool| {
+                    best_max_arrival: &mut i64| {
         if score <= 0.0 {
             return;
         }
@@ -813,8 +807,6 @@ fn evaluate_frontline_strategy(
             *best_ships = ships_total;
             *best_orders = orders.clone();
             *best_max_arrival = max_arrival;
-            *best_marginal_in_orders = marginal_idx;
-            *best_marginal_not_doomed = marginal_not_doomed;
         }
     };
 
@@ -846,8 +838,6 @@ fn evaluate_frontline_strategy(
         scratch.trial.clear();
         let mut ships_total: i64 = 0;
         let mut max_arrival_a: i64 = 0;
-        let mut marginal_idx_a: usize = 0;
-        let mut marginal_not_doomed_a = false;
         for i in 0..n {
             if mask & (1u32 << i) == 0 {
                 continue;
@@ -855,8 +845,6 @@ fn evaluate_frontline_strategy(
             let c = &scratch.candidates[i];
             if c.arrival > max_arrival_a {
                 max_arrival_a = c.arrival;
-                marginal_idx_a = scratch.plan_orders.len();
-                marginal_not_doomed_a = c.not_doomed;
             }
             let order = PlannedOrder {
                 src_id: c.id,
@@ -897,14 +885,10 @@ fn evaluate_frontline_strategy(
                 max_arrival_a,
                 ships_total,
                 score_a,
-                marginal_idx_a,
-                marginal_not_doomed_a,
                 &mut best_score,
                 &mut best_ships,
                 &mut best_orders,
                 &mut best_max_arrival,
-                &mut best_marginal_in_orders,
-                &mut best_marginal_not_doomed,
             );
         }
 
@@ -938,16 +922,14 @@ fn evaluate_frontline_strategy(
             scratch.trial.clear();
             let mut ships_total: i64 = 0;
             let mut max_arrival_b: i64 = 0;
-            let mut marginal_idx_b: usize = 0;
-            let mut marginal_not_doomed_b = false;
             let mut feasible = true;
             for i in 0..n {
                 if mask & (1u32 << i) == 0 {
                     continue;
                 }
-                let (c_id, c_angle, c_ships_max, c_not_doomed) = {
+                let (c_id, c_angle, c_ships_max) = {
                     let c = &scratch.candidates[i];
-                    (c.id, c.angle, c.ships_max, c.not_doomed)
+                    (c.id, c.angle, c.ships_max)
                 };
                 let mut sel_d: i64 = -1;
                 let mut sel_arr: i64 = -1;
@@ -974,8 +956,6 @@ fn evaluate_frontline_strategy(
                 }
                 if sel_arr > max_arrival_b {
                     max_arrival_b = sel_arr;
-                    marginal_idx_b = scratch.plan_orders.len();
-                    marginal_not_doomed_b = c_not_doomed;
                 }
                 scratch.plan_orders.push(PlannedOrder {
                     src_id: c_id,
@@ -1017,14 +997,10 @@ fn evaluate_frontline_strategy(
                     max_arrival_b,
                     ships_total,
                     score_b,
-                    marginal_idx_b,
-                    marginal_not_doomed_b,
                     &mut best_score,
                     &mut best_ships,
                     &mut best_orders,
                     &mut best_max_arrival,
-                    &mut best_marginal_in_orders,
-                    &mut best_marginal_not_doomed,
                 );
             }
         }
@@ -1032,97 +1008,6 @@ fn evaluate_frontline_strategy(
 
     if best_orders.is_empty() {
         return None;
-    }
-
-    // ── 3. Halve-trim on the marginal (latest-arriving) source. ──
-    // (Binary-search-to-minimum was tested and dropped win rate: smaller
-    // marginal fleets are also slower under log-shaped fleet_speed, and
-    // arriving earlier with overcommitted ships forces the opponent's hand.)
-    if best_marginal_not_doomed {
-        scratch.trial.clear();
-        for o in &best_orders {
-            scratch.trial.push(ArrivalEvent {
-                turns: o.arrival,
-                owner: world.player,
-                ships: o.ships,
-            });
-        }
-        let _ = run_trial(
-            &scratch.trial,
-            &scratch.fixed_arrivals,
-            &mut scratch.merged_scratch,
-            &mut scratch.owner_buf,
-            &mut scratch.ships_buf,
-            &mut scratch.by_turn_buf,
-        );
-        let h = horizon as usize;
-        let arrival_idx = (best_max_arrival as usize).min(h);
-        let mut excess: i64 = i64::MAX;
-        for t in arrival_idx..=h {
-            let margin = if scratch.owner_buf[t] == world.player {
-                scratch.ships_buf[t]
-            } else {
-                0
-            };
-            if margin < excess {
-                excess = margin;
-            }
-        }
-        let marginal = &best_orders[best_marginal_in_orders];
-        let src_id = marginal.src_id;
-        let max_ships = marginal.ships;
-        let marginal_eff_offset = marginal.effective_offset;
-        let excess = excess.min(max_ships);
-        let keep = excess / 2;
-        let trimmed = (max_ships - keep).max(1);
-        if trimmed < max_ships {
-            if let Some((t_angle, t_turns, _, _, _)) =
-                model.plan_shot(src_id, target.id, trimmed, marginal_eff_offset)
-            {
-                let t_arrival = (marginal_eff_offset + t_turns).max(1);
-                let saved = scratch.trial[best_marginal_in_orders];
-                scratch.trial[best_marginal_in_orders] = ArrivalEvent {
-                    turns: t_arrival,
-                    owner: world.player,
-                    ships: trimmed,
-                };
-                let (final_owner_2, start_turn_2) = run_trial(
-                    &scratch.trial,
-                    &scratch.fixed_arrivals,
-                    &mut scratch.merged_scratch,
-                    &mut scratch.owner_buf,
-                    &mut scratch.ships_buf,
-                    &mut scratch.by_turn_buf,
-                );
-                if final_owner_2 == world.player {
-                    let trimmed_ships_total = best_ships - max_ships + trimmed;
-                    let score_2 = timeline_delta_score(
-                        world,
-                        target,
-                        prefix_baseline,
-                        &scratch.owner_buf,
-                        &scratch.ships_buf,
-                        trimmed_ships_total,
-                        start_turn_2,
-                    );
-                    if score_2 >= best_score {
-                        best_orders[best_marginal_in_orders] = PlannedOrder {
-                            src_id,
-                            angle: t_angle,
-                            ships: trimmed,
-                            arrival: t_arrival,
-                            effective_offset: marginal_eff_offset,
-                        };
-                        best_score = score_2;
-                        best_max_arrival = best_orders.iter().map(|o| o.arrival).max().unwrap_or(0);
-                    } else {
-                        scratch.trial[best_marginal_in_orders] = saved;
-                    }
-                } else {
-                    scratch.trial[best_marginal_in_orders] = saved;
-                }
-            }
-        }
     }
 
     Some(FrontlineWin {
@@ -1141,8 +1026,7 @@ struct SourceCandidate {
     id: i64,
     angle: f64,
     arrival: i64,   // turns from current step until arrival
-    ships_max: i64, // pre-trim ships willing to send at base `offset`
-    not_doomed: bool,
+    ships_max: i64, // ships willing to send at base `offset`
     /// Production rate; used by the coordinated schedule to grow `ships_max`
     /// when this source delays beyond its natural arrival.
     production: i64,
@@ -1199,7 +1083,6 @@ fn collect_source_candidates(
             angle,
             arrival,
             ships_max: ships_to_send,
-            not_doomed,
             production: src.production,
         });
     }
