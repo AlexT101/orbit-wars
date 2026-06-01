@@ -3,15 +3,15 @@ Let NUM_FRAMES = 4.
 I wanna have NUM_FRAMES: t, t+1, t+10, t_resolved,
 where t_resolved is the time in the future when all moving ships have resolved (landed).
 
-Let ACTIONS_DIM = 7 (subject to change).
-For each source row, the actions are (noop, 25%, 50%, 75%, 100%, 42, target_planet_resolved + 1)
-where
-    noop / 0 sends no fleet and is always valid once per source row.
-    25%, 50%, 75%, 100% are fractions of the planet's ship count currently.
-    42 is a constant.
-    target_planet_resolved 
-        is the number of ships required to take the planet once all moving ships have resolved,
-        if the target planet is already in ally control once ships have resolved, this action is invalid.
+Let ACTIONS_DIM = 2 for encoder geometry tensors:
+    action bin 0 is noop metadata.
+    action bin 1 is 100%, sending every ship currently on the source planet to
+    the selected target.
+
+The policy action space is separate and smaller. For each source row it emits
+one of 45 choices:
+    choice 0: noop.
+    choice 1..44: send 100% of ships to target slot choice - 1.
 
 Launch actions are invalid if there are insufficient ships at the source planet.
 Launch actions are invalid if the source planet is not under ally control.
@@ -22,8 +22,8 @@ is not "clean" - i.e. the ships don't arrive at the destination in the future - 
 because they intersect with another planet or intersect the sun.
 (I don't see any other reason for obstruction.)
 
-The output action space is therefore (44, 44, ACTIONS_DIM).
-Create a valid action mask. I think this mask should also be of shape (44, 44, ACTIONS_DIM).
+The output action space is therefore (44, 45), one categorical distribution per
+source slot. The policy valid action mask is also (44, 45).
 
 A planet token (TOKEN_DIM = 11, see features.rs::fill_token):
     * is_mine          (0/1)
@@ -95,16 +95,19 @@ reshape each with its paired `*_shape`. The rest are plain Python objects.
     globals_shape  tuple (16,)
     presence       float32, flat        reshape (4, 44)     1.0 where a slot holds a planet
     presence_shape tuple (4, 44)
-    turns          float32, flat        reshape (4, 44, 44, 7) = (frame, src, tgt, action);
+    turns          float32, flat        reshape (4, 44, 44, 2) = (frame, src, tgt, action);
                                         turns-to-arrive /20, 0 if invalid
-    turns_shape    tuple (4, 44, 44, 7)
-    angles         float32, flat        reshape (44, 44, 7) launch angle (radians) to issue
+    turns_shape    tuple (4, 44, 44, 2)
+    angles         float32, flat        reshape (44, 44, 2) launch angle (radians) to issue
                                         the move; 0 if invalid
-    angles_shape   tuple (44, 44, 7)
-    mask           uint8, flat          reshape (44, 44, 7) 1 = legal action now, else 0
-    mask_shape     tuple (44, 44, 7)
-    ship_counts    int64, flat          reshape (44, 44, 7) integer ships sent; 0 for noop/invalid
-    ship_counts_shape tuple (44, 44, 7)
-    reachable_mask uint8, flat          reshape (4, 44, 44, 7) 1 = clean launch reaches target
-    reachable_mask_shape tuple (4, 44, 44, 7)
+    angles_shape   tuple (44, 44, 2)
+    mask           uint8, flat          reshape (44, 44, 2) 1 = legal action now, else 0
+    mask_shape     tuple (44, 44, 2)
+    ship_counts    int64, flat          reshape (44, 44, 2) integer ships sent; 0 for noop/invalid
+    ship_counts_shape tuple (44, 44, 2)
+    reachable_mask uint8, flat          reshape (4, 44, 44, 2) 1 = clean launch reaches target
+    reachable_mask_shape tuple (4, 44, 44, 2)
 
+Python training converts `mask` into `valid_actions_mask` with shape (44, 45):
+    valid_actions_mask[:, 0]    is the per-source noop.
+    valid_actions_mask[:, 1:]   is the all-in target legality matrix.

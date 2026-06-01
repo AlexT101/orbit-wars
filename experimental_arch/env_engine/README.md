@@ -26,9 +26,10 @@ engine = OrbitWarsEngine(
     num_players=2,
     configuration={"shipSpeed": 6.0, "episodeSteps": 500, "cometSpeed": 4.0},
     reward_weights={
-        "terminal":         1.0,   # ships-share at game end, in [0, 1]
-        "terminal_time":    1.0,   # ±remaining-fraction (+ winner, − loser)
-        "production_share": 0.001, # per-step × own/Σ-player production
+        "terminal":          1.0,    # centered ships-share at game end
+        "terminal_time":     1.0,    # zero-sum outcome x remaining-fraction
+        "production_income": 0.0002, # per-step centered absolute production
+        "launch_penalty":   -0.00004, # per successful launch
     },
 )
 
@@ -45,9 +46,10 @@ result = engine.step([player0_moves, player1_moves])
 #   "done": bool,
 #   "reward": [r0, r1],
 #   "reward_components": {
-#     "terminal":         [..., ...],
-#     "terminal_time":    [..., ...],
-#     "production_share": [..., ...],
+#     "terminal":          [..., ...],
+#     "terminal_time":     [..., ...],
+#     "production_income": [..., ...],
+#     "launch_penalty":    [..., ...],
 #   },
 # }
 
@@ -55,7 +57,7 @@ result = engine.step([player0_moves, player1_moves])
 result = engine.step_fast(actions)   # {"done", "reward"}
 
 # Tune shaping mid-experiment without restarting the game:
-engine.set_reward_weights({"production_share": 0.002})
+engine.set_reward_weights({"production_income": 0.0005})
 
 state = engine.get_state()
 engine.done
@@ -67,16 +69,23 @@ engine.step_count
 For each player `i`:
 
 ```
+baseline          = 1 / num_players
 ships_share_i     = own_ships_i / Σ_j own_ships_j        # in [0, 1], sums to 1
-prod_share_i      = own_prod_i  / Σ_j own_prod_j         # players only, per step
-reward_i = w_terminal         * ships_share_i            # terminal turn only
-         + w_terminal_time    * sign_i * remaining_fraction   # terminal turn only
-         + w_production_share * prod_share_i             # every step
+mean_prod         = Σ_j own_prod_j / num_players         # players only, per step
+launches_i        = successful launches by player i      # per step
+outcome_i         = zero-sum win/loss value              # ties are 0
+reward_i = w_terminal          * (ships_share_i - baseline)  # terminal turn only
+         + w_terminal_time     * outcome_i * remaining_fraction
+         + w_production_income * (own_prod_i - mean_prod)    # every step
+         + w_launch_penalty    * launches_i                  # every step
 ```
 
-`sign_i = +1` if player `i` ends with the max total ships (>0; ties count as
-winners), else `−1`. The terminal terms are 0 on non-terminal turns;
-`production_share` is applied every step (0 if no player owns any production).
+For two players, `outcome_i` is `+1` for the winner and `-1` for the loser.
+Ties are zero for every player. For more than two players, the winner set sums
+to `+1` and the loser set sums to `-1`. The terminal terms are 0 on
+non-terminal turns; `production_income` is applied every step. Each component
+except `launch_penalty` is centered, so the reward sums to the launch penalties
+across players.
 
 ## Build
 

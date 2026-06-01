@@ -132,9 +132,8 @@ impl PyRandom {
             }
             for kk in (MT_N - MT_M)..(MT_N - 1) {
                 let y = (self.mt[kk] & MT_UPPER_MASK) | (self.mt[kk + 1] & MT_LOWER_MASK);
-                self.mt[kk] = self.mt[kk + MT_M - MT_N]
-                    ^ (y >> 1)
-                    ^ if y & 1 != 0 { MT_MATRIX_A } else { 0 };
+                self.mt[kk] =
+                    self.mt[kk + MT_M - MT_N] ^ (y >> 1) ^ if y & 1 != 0 { MT_MATRIX_A } else { 0 };
             }
             let y = (self.mt[MT_N - 1] & MT_UPPER_MASK) | (self.mt[0] & MT_LOWER_MASK);
             self.mt[MT_N - 1] =
@@ -210,7 +209,15 @@ struct Planet {
 
 impl Planet {
     fn as_tuple(&self) -> (i64, i64, f64, f64, f64, i64, i64) {
-        (self.id, self.owner, self.x, self.y, self.radius, self.ships, self.production)
+        (
+            self.id,
+            self.owner,
+            self.x,
+            self.y,
+            self.radius,
+            self.ships,
+            self.production,
+        )
     }
 }
 
@@ -227,7 +234,15 @@ struct Fleet {
 
 impl Fleet {
     fn as_tuple(&self) -> (i64, i64, f64, f64, f64, i64, i64) {
-        (self.id, self.owner, self.x, self.y, self.angle, self.from_planet_id, self.ships)
+        (
+            self.id,
+            self.owner,
+            self.x,
+            self.y,
+            self.angle,
+            self.from_planet_id,
+            self.ships,
+        )
     }
 }
 
@@ -247,26 +262,32 @@ struct Configuration {
 
 impl Default for Configuration {
     fn default() -> Self {
-        Self { episode_steps: 500, ship_speed: 6.0, comet_speed: 4.0 }
+        Self {
+            episode_steps: 500,
+            ship_speed: 6.0,
+            comet_speed: 4.0,
+        }
     }
 }
 
 /// Weights applied per step. Set any to 0.0 to disable that term.
 #[derive(Clone, Debug)]
 struct RewardWeights {
-    /// Terminal ships-share: own_ships / all_players_ships, in [0, 1]. Rewards
-    /// ending with a large share of the board's ships rather than just winning.
+    /// Terminal centered ships-share: own_ships / all_players_ships - 1/N.
+    /// This keeps self-play rewards zero-sum while still rewarding ending with
+    /// a larger share of the board's ships.
     terminal: f64,
-    /// Terminal time bonus: ±remaining_turns/episode_steps — `+` for the
-    /// winner, `−` for losers. Rewards fast wins / harshens fast losses; max
-    /// magnitude ~1.0 for finishing on the first turn.
+    /// Terminal time bonus: zero-sum outcome × remaining_turns/episode_steps.
+    /// For two players this is `+` for the winner and `-` for the loser; ties
+    /// are zero. Rewards fast wins / harshens fast losses.
     terminal_time: f64,
-    /// Per-step shaping: weight × production_share, where production_share =
-    /// own_production / Σ all players' production (0 if no player has any). A
-    /// small dense nudge toward owning more of the board's production; default
-    /// weight 0.001, so it's bounded by ~episode_steps/1000 over a game and
-    /// stays weaker than the per-turn fast-win pull of terminal_time (1/500).
-    production_share: f64,
+    /// Per-step shaping: weight × centered absolute production, where centered
+    /// production = own_production - mean_player_production. This is a small
+    /// dense zero-sum nudge toward holding productive planets.
+    production_income: f64,
+    /// Per-successful-launch shaping. This is intentionally non-zero-sum:
+    /// each launched fleet costs the launching player a tiny amount.
+    launch_penalty: f64,
 }
 
 impl Default for RewardWeights {
@@ -274,7 +295,9 @@ impl Default for RewardWeights {
         Self {
             terminal: 1.0,
             terminal_time: 1.0,
-            production_share: 0.001,
+            production_income: 0.0002,
+            launch_penalty: -0.00004,
+            // launch_penalty: -9.0,
         }
     }
 }
@@ -307,7 +330,7 @@ struct EngineState {
     last_reward: Vec<f64>,
     last_components: RewardComponents,
     /// Scratch buffer reused across steps to hold the current per-player
-    /// production count (used for the production_share term). Pre-allocated to
+    /// production count (used for the production_income term). Pre-allocated to
     /// skip the per-step `Vec::with_capacity`.
     scratch_production: Vec<i64>,
 }
@@ -316,7 +339,8 @@ struct EngineState {
 struct RewardComponents {
     terminal: Vec<f64>,
     terminal_time: Vec<f64>,
-    production_share: Vec<f64>,
+    production_income: Vec<f64>,
+    launch_penalty: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -380,7 +404,8 @@ impl EngineState {
             last_components: RewardComponents {
                 terminal: vec![0.0; num_players],
                 terminal_time: vec![0.0; num_players],
-                production_share: vec![0.0; num_players],
+                production_income: vec![0.0; num_players],
+                launch_penalty: vec![0.0; num_players],
             },
             scratch_production: vec![0; num_players],
         };
@@ -416,8 +441,9 @@ impl EngineState {
             self.spawn_comets();
         }
 
+        let mut launches_by_player = vec![0usize; self.num_players];
         for (player_id, action) in actions.iter().enumerate() {
-            self.process_moves(player_id as i64, action);
+            launches_by_player[player_id] = self.process_moves(player_id as i64, action);
         }
 
         for planet in &mut self.planets {
@@ -625,47 +651,50 @@ impl EngineState {
             }
         }
 
-        // Total player production this step, for the production_share term.
+        // Total player production this step, for the production_income term.
         let total_production: i64 = self.scratch_production[..self.num_players].iter().sum();
 
-        // Compute terminal shares / win flags (if any) before mutably borrowing
+        // Compute terminal shares / outcomes (if any) before mutably borrowing
         // last_components.
-        let terminal_info: Option<(Vec<f64>, Vec<bool>, f64)> = if terminated {
-            let (shares, won) = self.terminal_shares();
+        let terminal_info: Option<(Vec<f64>, Vec<f64>, f64)> = if terminated {
+            let (shares, outcomes) = self.terminal_shares_and_outcomes();
             // Turns left when the game ends; full at turn 0, ~0 at the cap.
             let remaining = (self.configuration.episode_steps - turn_step).max(0) as f64;
             let remaining_frac =
                 (remaining / self.configuration.episode_steps.max(1) as f64).clamp(0.0, 1.0);
-            Some((shares, won, remaining_frac))
+            Some((shares, outcomes, remaining_frac))
         } else {
             None
         };
 
         let n = self.num_players;
-        let share_w = self.reward_weights.production_share;
+        let baseline = if n > 0 { 1.0 / n as f64 } else { 0.0 };
+        let mean_production = if n > 0 {
+            total_production as f64 / n as f64
+        } else {
+            0.0
+        };
+        let production_w = self.reward_weights.production_income;
+        let launch_w = self.reward_weights.launch_penalty;
         let term_w = self.reward_weights.terminal;
         let term_t_w = self.reward_weights.terminal_time;
         let c = &mut self.last_components;
         for i in 0..n {
-            // production_share = own / Σ all players' production (0 if none).
-            let share = if total_production > 0 {
-                self.scratch_production[i] as f64 / total_production as f64
-            } else {
-                0.0
-            };
-            c.production_share[i] = share_w * share;
+            let centered_production = self.scratch_production[i] as f64 - mean_production;
+            c.production_income[i] = production_w * centered_production;
+            c.launch_penalty[i] = launch_w * launches_by_player[i] as f64;
             c.terminal[i] = 0.0;
             c.terminal_time[i] = 0.0;
         }
-        if let Some((shares, won, remaining_frac)) = terminal_info {
+        if let Some((shares, outcomes, remaining_frac)) = terminal_info {
             for i in 0..n {
-                c.terminal[i] = term_w * shares[i];
-                let sign = if won[i] { 1.0 } else { -1.0 };
-                c.terminal_time[i] = term_t_w * sign * remaining_frac;
+                c.terminal[i] = term_w * (shares[i] - baseline);
+                c.terminal_time[i] = term_t_w * outcomes[i] * remaining_frac;
             }
         }
         for i in 0..n {
-            self.last_reward[i] = c.terminal[i] + c.terminal_time[i] + c.production_share[i];
+            self.last_reward[i] =
+                c.terminal[i] + c.terminal_time[i] + c.production_income[i] + c.launch_penalty[i];
         }
 
         self.done = terminated;
@@ -673,11 +702,12 @@ impl EngineState {
         Ok(self.done)
     }
 
-    /// Terminal reward inputs per player: `(ships_share, won)`.
+    /// Terminal reward inputs per player: `(ships_share, outcome)`.
     /// `score` = total ships a player controls (planets + in-flight fleets).
     /// `ships_share` = own_score / Σ all players' scores (0 if no player ships).
-    /// `won` = at the max score (>0) — used only for the time-bonus sign.
-    fn terminal_shares(&self) -> (Vec<f64>, Vec<bool>) {
+    /// `outcome` is zero-sum: tied games are all zero; otherwise the winner set
+    /// sums to +1 and the loser set sums to -1.
+    fn terminal_shares_and_outcomes(&self) -> (Vec<f64>, Vec<f64>) {
         let mut scores = vec![0i64; self.num_players];
         for planet in &self.planets {
             if planet.owner >= 0 && (planet.owner as usize) < self.num_players {
@@ -691,12 +721,43 @@ impl EngineState {
         }
         let total: i64 = scores.iter().sum();
         let max_score = *scores.iter().max().unwrap_or(&0);
+        let baseline = if self.num_players > 0 {
+            1.0 / self.num_players as f64
+        } else {
+            0.0
+        };
         let shares = scores
             .iter()
-            .map(|&s| if total > 0 { s as f64 / total as f64 } else { 0.0 })
+            .map(|&s| {
+                if total > 0 {
+                    s as f64 / total as f64
+                } else {
+                    baseline
+                }
+            })
             .collect();
-        let won = scores.iter().map(|&s| s == max_score && max_score > 0).collect();
-        (shares, won)
+        let mut outcomes = vec![0.0; self.num_players];
+        if max_score > 0 {
+            let winners: Vec<usize> = scores
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &s)| if s == max_score { Some(i) } else { None })
+                .collect();
+            let loser_count = self.num_players.saturating_sub(winners.len());
+            if !winners.is_empty() && loser_count > 0 {
+                let winner_value = 1.0 / winners.len() as f64;
+                let loser_value = -1.0 / loser_count as f64;
+                for &i in &winners {
+                    outcomes[i] = winner_value;
+                }
+                for (i, outcome) in outcomes.iter_mut().enumerate() {
+                    if !winners.contains(&i) {
+                        *outcome = loser_value;
+                    }
+                }
+            }
+        }
+        (shares, outcomes)
     }
 
     fn expired_comet_ids(&self) -> Vec<i64> {
@@ -718,8 +779,10 @@ impl EngineState {
     fn remove_comets(&mut self, expired_ids: &[i64]) {
         let expired_set: HashSet<i64> = expired_ids.iter().copied().collect();
         self.planets.retain(|p| !expired_set.contains(&p.id));
-        self.initial_planets.retain(|p| !expired_set.contains(&p.id));
-        self.comet_planet_ids.retain(|pid| !expired_set.contains(pid));
+        self.initial_planets
+            .retain(|p| !expired_set.contains(&p.id));
+        self.comet_planet_ids
+            .retain(|pid| !expired_set.contains(pid));
         for group in &mut self.comets {
             group.planet_ids.retain(|pid| !expired_set.contains(pid));
         }
@@ -767,7 +830,8 @@ impl EngineState {
         self.comets.push(group);
     }
 
-    fn process_moves(&mut self, player_id: i64, action: &[MoveAction]) {
+    fn process_moves(&mut self, player_id: i64, action: &[MoveAction]) -> usize {
+        let mut launches = 0usize;
         for mv in action {
             let Some(idx) = self.planet_index_by_id.get(&mv.from_id).copied() else {
                 continue;
@@ -792,7 +856,9 @@ impl EngineState {
                 ships: mv.ships,
             });
             self.next_fleet_id += 1;
+            launches += 1;
         }
+        launches
     }
 }
 
@@ -874,10 +940,42 @@ fn generate_planets(rng: &mut PyRandom) -> Vec<Planet> {
         }
         let ships = rng.randint(5, 99).min(rng.randint(5, 99));
         let temp_planets = vec![
-            Planet { id: id_counter,     owner: -1, x: y,                y: x,                radius: r, ships, production: prod },
-            Planet { id: id_counter + 1, owner: -1, x: BOARD_SIZE - x,   y,                   radius: r, ships, production: prod },
-            Planet { id: id_counter + 2, owner: -1, x,                   y: BOARD_SIZE - y,   radius: r, ships, production: prod },
-            Planet { id: id_counter + 3, owner: -1, x: BOARD_SIZE - y,   y: BOARD_SIZE - x,   radius: r, ships, production: prod },
+            Planet {
+                id: id_counter,
+                owner: -1,
+                x: y,
+                y: x,
+                radius: r,
+                ships,
+                production: prod,
+            },
+            Planet {
+                id: id_counter + 1,
+                owner: -1,
+                x: BOARD_SIZE - x,
+                y,
+                radius: r,
+                ships,
+                production: prod,
+            },
+            Planet {
+                id: id_counter + 2,
+                owner: -1,
+                x,
+                y: BOARD_SIZE - y,
+                radius: r,
+                ships,
+                production: prod,
+            },
+            Planet {
+                id: id_counter + 3,
+                owner: -1,
+                x: BOARD_SIZE - y,
+                y: BOARD_SIZE - x,
+                radius: r,
+                ships,
+                production: prod,
+            },
         ];
         let mut valid = true;
         for tp in &temp_planets {
@@ -921,10 +1019,42 @@ fn generate_planets(rng: &mut PyRandom) -> Vec<Planet> {
         }
         let ships = rng.randint(5, 30);
         let temp_planets = vec![
-            Planet { id: id_counter,     owner: -1, x: y,                y: x,                radius: r, ships, production: prod },
-            Planet { id: id_counter + 1, owner: -1, x: BOARD_SIZE - x,   y,                   radius: r, ships, production: prod },
-            Planet { id: id_counter + 2, owner: -1, x,                   y: BOARD_SIZE - y,   radius: r, ships, production: prod },
-            Planet { id: id_counter + 3, owner: -1, x: BOARD_SIZE - y,   y: BOARD_SIZE - x,   radius: r, ships, production: prod },
+            Planet {
+                id: id_counter,
+                owner: -1,
+                x: y,
+                y: x,
+                radius: r,
+                ships,
+                production: prod,
+            },
+            Planet {
+                id: id_counter + 1,
+                owner: -1,
+                x: BOARD_SIZE - x,
+                y,
+                radius: r,
+                ships,
+                production: prod,
+            },
+            Planet {
+                id: id_counter + 2,
+                owner: -1,
+                x,
+                y: BOARD_SIZE - y,
+                radius: r,
+                ships,
+                production: prod,
+            },
+            Planet {
+                id: id_counter + 3,
+                owner: -1,
+                x: BOARD_SIZE - y,
+                y: BOARD_SIZE - x,
+                radius: r,
+                ships,
+                production: prod,
+            },
         ];
         let mut valid = true;
         for tp in &temp_planets {
@@ -1010,7 +1140,9 @@ fn generate_comet_paths(
                 board_end = Some(i);
             }
         }
-        let Some(start_idx) = board_start else { continue };
+        let Some(start_idx) = board_start else {
+            continue;
+        };
         let end_idx = board_end.unwrap();
         let visible = path[start_idx..=end_idx].to_vec();
         if !(5..=40).contains(&visible.len()) {
@@ -1018,9 +1150,18 @@ fn generate_comet_paths(
         }
         let paths = vec![
             visible.iter().map(|&(x, y)| [y, x]).collect::<Vec<_>>(),
-            visible.iter().map(|&(x, y)| [BOARD_SIZE - x, y]).collect::<Vec<_>>(),
-            visible.iter().map(|&(x, y)| [x, BOARD_SIZE - y]).collect::<Vec<_>>(),
-            visible.iter().map(|&(x, y)| [BOARD_SIZE - y, BOARD_SIZE - x]).collect::<Vec<_>>(),
+            visible
+                .iter()
+                .map(|&(x, y)| [BOARD_SIZE - x, y])
+                .collect::<Vec<_>>(),
+            visible
+                .iter()
+                .map(|&(x, y)| [x, BOARD_SIZE - y])
+                .collect::<Vec<_>>(),
+            visible
+                .iter()
+                .map(|&(x, y)| [BOARD_SIZE - y, BOARD_SIZE - x])
+                .collect::<Vec<_>>(),
         ];
         let mut static_planets = Vec::new();
         let mut orbiting_planets: Vec<(f64, f64, f64)> = Vec::new();
@@ -1095,11 +1236,15 @@ fn generate_comet_paths(
 // ---- PyO3 parsing helpers -------------------------------------------------
 
 fn py_any_to_f64(value: &Bound<'_, PyAny>) -> PyResult<f64> {
-    value.extract::<f64>().or_else(|_| value.extract::<i64>().map(|v| v as f64))
+    value
+        .extract::<f64>()
+        .or_else(|_| value.extract::<i64>().map(|v| v as f64))
 }
 
 fn py_any_to_i64(value: &Bound<'_, PyAny>) -> PyResult<i64> {
-    value.extract::<i64>().or_else(|_| value.extract::<f64>().map(|v| v as i64))
+    value
+        .extract::<i64>()
+        .or_else(|_| value.extract::<f64>().map(|v| v as i64))
 }
 
 fn parse_configuration(value: Option<&Bound<'_, PyAny>>) -> PyResult<Configuration> {
@@ -1109,9 +1254,15 @@ fn parse_configuration(value: Option<&Bound<'_, PyAny>>) -> PyResult<Configurati
         return Ok(cfg);
     }
     let d = v.downcast::<PyDict>()?;
-    if let Some(x) = d.get_item("episodeSteps")? { cfg.episode_steps = x.extract()?; }
-    if let Some(x) = d.get_item("shipSpeed")? { cfg.ship_speed = x.extract()?; }
-    if let Some(x) = d.get_item("cometSpeed")? { cfg.comet_speed = x.extract()?; }
+    if let Some(x) = d.get_item("episodeSteps")? {
+        cfg.episode_steps = x.extract()?;
+    }
+    if let Some(x) = d.get_item("shipSpeed")? {
+        cfg.ship_speed = x.extract()?;
+    }
+    if let Some(x) = d.get_item("cometSpeed")? {
+        cfg.comet_speed = x.extract()?;
+    }
     Ok(cfg)
 }
 
@@ -1122,9 +1273,23 @@ fn parse_reward_weights(value: Option<&Bound<'_, PyAny>>) -> PyResult<RewardWeig
         return Ok(w);
     }
     let d = v.downcast::<PyDict>()?;
-    if let Some(x) = d.get_item("terminal")? { w.terminal = x.extract()?; }
-    if let Some(x) = d.get_item("terminal_time")? { w.terminal_time = x.extract()?; }
-    if let Some(x) = d.get_item("production_share")? { w.production_share = x.extract()?; }
+    if let Some(x) = d.get_item("terminal")? {
+        w.terminal = x.extract()?;
+    }
+    if let Some(x) = d.get_item("terminal_time")? {
+        w.terminal_time = x.extract()?;
+    }
+    if d.get_item("production_share")?.is_some() {
+        return Err(PyRuntimeError::new_err(
+            "reward weight 'production_share' was removed; use 'production_income'",
+        ));
+    }
+    if let Some(x) = d.get_item("production_income")? {
+        w.production_income = x.extract()?;
+    }
+    if let Some(x) = d.get_item("launch_penalty")? {
+        w.launch_penalty = x.extract()?;
+    }
     Ok(w)
 }
 
@@ -1144,12 +1309,20 @@ fn parse_actions(actions: &Bound<'_, PyAny>, num_players: usize) -> PyResult<Vec
         };
         let mut parsed = Vec::with_capacity(moves.len());
         for mv in moves.iter() {
-            let Ok(parts) = mv.downcast::<PyList>() else { continue };
-            if parts.len() != 3 { continue }
+            let Ok(parts) = mv.downcast::<PyList>() else {
+                continue;
+            };
+            if parts.len() != 3 {
+                continue;
+            }
             let from_id = py_any_to_i64(&parts.get_item(0)?)?;
             let angle = py_any_to_f64(&parts.get_item(1)?)?;
             let ships = py_any_to_i64(&parts.get_item(2)?)?;
-            parsed.push(MoveAction { from_id, angle, ships });
+            parsed.push(MoveAction {
+                from_id,
+                angle,
+                ships,
+            });
         }
         out.push(parsed);
     }
@@ -1177,9 +1350,14 @@ fn py_comets<'py>(py: Python<'py>, comets: &[CometGroup]) -> PyResult<Bound<'py,
     Ok(PyList::new(py, items?)?.into_any())
 }
 
-fn build_observation<'py>(py: Python<'py>, state: &EngineState, player: usize) -> PyResult<Py<PyAny>> {
+fn build_observation<'py>(
+    py: Python<'py>,
+    state: &EngineState,
+    player: usize,
+) -> PyResult<Py<PyAny>> {
     let planets_obj = PyList::new(py, state.planets.iter().map(Planet::as_tuple))?.into_any();
-    let initial_obj = PyList::new(py, state.initial_planets.iter().map(Planet::as_tuple))?.into_any();
+    let initial_obj =
+        PyList::new(py, state.initial_planets.iter().map(Planet::as_tuple))?.into_any();
     let fleets_obj = PyList::new(py, state.fleets.iter().map(Fleet::as_tuple))?.into_any();
     let comets_obj = py_comets(py, &state.comets)?;
     let comet_ids_obj = PyList::new(py, state.comet_planet_ids.iter().copied())?.into_any();
@@ -1200,7 +1378,8 @@ fn reward_components_to_py<'py>(py: Python<'py>, c: &RewardComponents) -> PyResu
     let d = PyDict::new(py);
     d.set_item("terminal", c.terminal.clone())?;
     d.set_item("terminal_time", c.terminal_time.clone())?;
-    d.set_item("production_share", c.production_share.clone())?;
+    d.set_item("production_income", c.production_income.clone())?;
+    d.set_item("launch_penalty", c.launch_penalty.clone())?;
     Ok(d.into_any().unbind())
 }
 
@@ -1265,7 +1444,8 @@ impl OrbitWarsEngine {
     ///     reward_components: {                 # for logging / debugging
     ///         terminal:           [f64; n],
     ///         terminal_time:      [f64; n],
-    ///         production_share:   [f64; n],
+    ///         production_income:  [f64; n],
+    ///         launch_penalty:     [f64; n],
     ///     },
     ///   }
     fn step(&mut self, py: Python<'_>, actions: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -1277,7 +1457,8 @@ impl OrbitWarsEngine {
         let parsed = parse_actions(actions, np)?;
         let done = {
             let s = self.state.as_mut().expect("state present");
-            s.step_with_actions(&parsed).map_err(PyRuntimeError::new_err)?
+            s.step_with_actions(&parsed)
+                .map_err(PyRuntimeError::new_err)?
         };
         let state = self.state.as_ref().expect("state present");
         let mut observations = Vec::with_capacity(np);
@@ -1288,7 +1469,10 @@ impl OrbitWarsEngine {
         d.set_item("observations", observations)?;
         d.set_item("done", done)?;
         d.set_item("reward", state.last_reward.clone())?;
-        d.set_item("reward_components", reward_components_to_py(py, &state.last_components)?)?;
+        d.set_item(
+            "reward_components",
+            reward_components_to_py(py, &state.last_components)?,
+        )?;
         Ok(d.into_any().unbind())
     }
 
@@ -1303,12 +1487,17 @@ impl OrbitWarsEngine {
             .num_players;
         let parsed = parse_actions(actions, np)?;
         let s = self.state.as_mut().expect("state present");
-        s.step_with_actions(&parsed).map_err(PyRuntimeError::new_err)
+        s.step_with_actions(&parsed)
+            .map_err(PyRuntimeError::new_err)
     }
 
     #[getter]
     fn last_reward(&self) -> PyResult<Vec<f64>> {
-        Ok(self.state.as_ref().map(|s| s.last_reward.clone()).unwrap_or_default())
+        Ok(self
+            .state
+            .as_ref()
+            .map(|s| s.last_reward.clone())
+            .unwrap_or_default())
     }
 
     /// Faster variant that skips per-player observation dicts.
@@ -1321,7 +1510,8 @@ impl OrbitWarsEngine {
         let parsed = parse_actions(actions, np)?;
         let done = {
             let s = self.state.as_mut().expect("state present");
-            s.step_with_actions(&parsed).map_err(PyRuntimeError::new_err)?
+            s.step_with_actions(&parsed)
+                .map_err(PyRuntimeError::new_err)?
         };
         let state = self.state.as_ref().expect("state present");
         let d = PyDict::new(py);
@@ -1339,9 +1529,21 @@ impl OrbitWarsEngine {
         let d = PyDict::new(py);
         d.set_item("step", s.step)?;
         d.set_item("angular_velocity", s.angular_velocity)?;
-        d.set_item("planets", s.planets.iter().map(Planet::as_tuple).collect::<Vec<_>>())?;
-        d.set_item("initial_planets", s.initial_planets.iter().map(Planet::as_tuple).collect::<Vec<_>>())?;
-        d.set_item("fleets", s.fleets.iter().map(Fleet::as_tuple).collect::<Vec<_>>())?;
+        d.set_item(
+            "planets",
+            s.planets.iter().map(Planet::as_tuple).collect::<Vec<_>>(),
+        )?;
+        d.set_item(
+            "initial_planets",
+            s.initial_planets
+                .iter()
+                .map(Planet::as_tuple)
+                .collect::<Vec<_>>(),
+        )?;
+        d.set_item(
+            "fleets",
+            s.fleets.iter().map(Fleet::as_tuple).collect::<Vec<_>>(),
+        )?;
         d.set_item("next_fleet_id", s.next_fleet_id)?;
         d.set_item("comet_planet_ids", s.comet_planet_ids.clone())?;
         d.set_item("comets", py_comets(py, &s.comets)?)?;

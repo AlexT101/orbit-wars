@@ -28,14 +28,12 @@ Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
   use a default seed and don't match reality. Impact is small (~12% of
   planet-checks see a ship-count diff with mean ~0.9 ships off, max 18)
   and only when crossing those boundaries.
-- **Noop + resolved+1 action bins** — action 0 is a per-source noop,
-  `SEND_FRACTIONS = (0.25, 0.5, 0.75, 1.0)` are actions 1-4, action 5
-  sends the constant `42`, and action 6 sends exactly
-  `target.ships_resolved + 1` — i.e. the minimum needed to capture the
-  target after the currently-flying fleets resolve against it. The per-source
-  action width is now 7. `encode_obs` also returns `ship_counts` and
-  `reachable_mask` so training code does not have to recompute ship amounts
-  or infer reachability from zero-valued travel times.
+- **Noop + all-in action bins** — encoder action bin 0 is noop metadata and
+  bin 1 sends 100% of the source planet's current ships to the selected target.
+  The policy sees 45 choices per source: choice 0 is noop, choices 1..44 are
+  all-in target slots. `encode_obs` also returns `ship_counts` and
+  `reachable_mask` so training code does not have to recompute ship amounts or
+  infer reachability from zero-valued travel times.
 - **Per-planet arrival bins.** Each planet gets `2 × 5 = 10` extra
   feature dims encoding log-normalized ship counts of incoming **mine**
   vs **enemy** fleets bucketed by arrival-delta-turn:
@@ -131,8 +129,7 @@ python pretrain_bc.py \
   --out checkpoints/bc_hellburner.pt
 ```
 
-BC labels only emit fraction bins (never the resolved+1 bin), since
-teacher bots don't know about that action.
+BC labels need re-checking against the current all-in action space.
 
 Then pass `--init-checkpoint checkpoints/bc_hellburner.pt`
 to `train.py`.
@@ -160,8 +157,7 @@ python export_submission.py \
 ```
 
 ⚠️ Export was inherited from the parent repo and has **not** been
-re-verified against the new action space (7 action bins, resolved+1
-bin, ships_resolved feature). The exported bot will likely need its
+re-verified against the new action space (2 action bins). The exported bot will likely need its
 inline `encode_obs` updated to compute `ships_resolved` before this
 works end-to-end.
 
@@ -174,7 +170,7 @@ works end-to-end.
 | `train/mean_return_25` | recent 25-episode return; should trend up |
 | `train/clip_frac`, `train/approx_kl`, `train/entropy` | PPO health; clip_frac > 0.3 = trouble |
 | `train/explained_var` | value head fit; should climb toward 1 |
-| `train/noop_rate`, `train/launch_rate`, `train/avg_send_bin` | action mix; avg_send_bin near 4 = resolved+1 chosen often |
+| `train/noop_rate`, `train/launch_rate` | action mix |
 | `train/train_win_rate_<opp>` | live win-rate vs each rotating opponent |
 | `train/reward_production_delta` etc. | per-component reward contributions; check that launch_penalty isn't dominating |
 | `eval/win_rate_<opp>`, `eval/eval_score` | logged every `--eval-every-updates` updates |

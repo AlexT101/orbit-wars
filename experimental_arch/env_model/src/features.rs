@@ -6,9 +6,7 @@
 //! Frames: `NUM_FRAMES` snapshots at `t`, `t+1`, `t+10`, `t_resolved` (first
 //! future turn with no fleets in flight). Each frame has `PLANET_SLOTS = 44`
 //! planet tokens. Action space is `(44, 44, ACTIONS_DIM)` = `(source, target,
-//! action)`: noop, send `{25%, 50%, 75%, 100%}` of the source's ships, a
-//! constant `42`, or `target_resolved + 1` (min ships to take the target after
-//! in-flight fleets resolve; invalid if it's ally-held then).
+//! action)`: noop or send 100% of the source's ships to the selected target.
 //!
 //! Outputs (dict keys / shapes in [`Features::into_py_dict`]):
 //!   - `tokens`   `(NUM_FRAMES, 44, TOKEN_DIM)`  per-planet features, all frames
@@ -48,7 +46,7 @@ thread_local! {
 }
 
 pub const PLANET_SLOTS: usize = 44;
-pub const ACTIONS_DIM: usize = 7;
+pub const ACTIONS_DIM: usize = 2;
 pub const NUM_FRAMES: usize = 4;
 /// Per-planet token width. See [`fill_token`] for the layout.
 pub const TOKEN_DIM: usize = 11;
@@ -67,14 +65,11 @@ const AIM_HORIZON: usize = 64;
 /// Cap on how far ahead we look for the "all fleets resolved" turn.
 const RESOLVE_CAP: usize = 96;
 
-const SEND_FRACTIONS: [f64; 4] = [0.25, 0.50, 0.75, 1.00];
 /// Per-source noop action. It is valid only at target slot 0, giving each
 /// source row one way to do nothing without duplicating noop across targets.
 const NOOP_ACTION: usize = 0;
-const CONST_SEND: i64 = 42;
-const CONST_SEND_ACTION: usize = 5;
-/// Index of the `target_resolved + 1` action.
-const RESOLVED_ACTION: usize = 6;
+/// Send every ship currently on the source planet.
+const SEND_ALL_ACTION: usize = 1;
 
 // ---- normalization -------------------------------------------------------
 /// `log1p(x) / log1p(full)`: 0 at x=0, ~1 at x=full. For non-negative inputs.
@@ -126,6 +121,7 @@ struct Seg {
     nx: f64,
     ny: f64,
     r: f64,
+    present_next: bool,
 }
 
 /// Planet positions over a horizon, forward-simulated once with empty actions
@@ -196,11 +192,8 @@ impl Trajectory {
         for t in 0..len.saturating_sub(1) {
             let mut segs = Vec::with_capacity(snapshots[t].len());
             for p in &snapshots[t] {
-                let (nx, ny) = by_id
-                    .get(&p.id)
-                    .and_then(|v| v[t + 1])
-                    .map(|g| (g.x, g.y))
-                    .unwrap_or((p.x, p.y));
+                let next_geom = by_id.get(&p.id).and_then(|v| v[t + 1]);
+                let (nx, ny) = next_geom.map(|g| (g.x, g.y)).unwrap_or((p.x, p.y));
                 segs.push(Seg {
                     id: p.id,
                     ox: p.x,
@@ -208,6 +201,7 @@ impl Trajectory {
                     nx,
                     ny,
                     r: p.radius,
+                    present_next: next_geom.is_some(),
                 });
             }
             segments.push(segs);
@@ -296,7 +290,11 @@ impl Trajectory {
                         continue;
                     }
                     if swept_pair_hit(pos, new, (s.ox, s.oy), (s.nx, s.ny), s.r) {
-                        return if s.id == dst_id { Some(k + 1) } else { None };
+                        return if s.id == dst_id && s.present_next {
+                            Some(k + 1)
+                        } else {
+                            None
+                        };
                     }
                 }
                 if !(0.0..=BOARD_SIZE).contains(&new.0) || !(0.0..=BOARD_SIZE).contains(&new.1) {
@@ -331,12 +329,17 @@ impl Trajectory {
             // `project` is the source of truth.
             if (speed * tau as f64 - d).abs() <= dst.r + speed + 1.0 {
                 let theta = (dst.y - src.y).atan2(dst.x - src.x);
+                // The action tensor exports angles as f32. Validate the exact
+                // angle Python/Kaggle will receive, not the pre-quantized f64;
+                // comet edge cases can otherwise turn a grazing hit into a
+                // miss or board exit.
+                let emitted_theta = (theta as f32) as f64;
                 let launch = (
-                    src.x + theta.cos() * (src.r + 0.1),
-                    src.y + theta.sin() * (src.r + 0.1),
+                    src.x + emitted_theta.cos() * (src.r + 0.1),
+                    src.y + emitted_theta.sin() * (src.r + 0.1),
                 );
-                if let Some(turn) = self.project(frame_off, launch, speed, theta, dst_id) {
-                    return Some((turn, theta));
+                if let Some(turn) = self.project(frame_off, launch, speed, emitted_theta, dst_id) {
+                    return Some((turn, emitted_theta));
                 }
             }
         }
@@ -344,29 +347,13 @@ impl Trajectory {
     }
 }
 
-/// Ship count for a launch action `a` from a source with `src_ships`, against a target
-/// whose post-resolution garrison is `resolved_ships` (owned by ally =
-/// `resolved_ally`, absent = `resolved_absent`). `None` if the action is
-/// structurally invalid (resolved+1 on an ally/absent target) or the count is
-/// not physically sendable (`< 1` or `> src_ships`). The noop action is not a
-/// launch and is handled directly by `encode`.
-fn action_count(
-    a: usize,
-    src_ships: i64,
-    resolved_ships: i64,
-    resolved_ally: bool,
-    resolved_absent: bool,
-) -> Option<i64> {
+/// Ship count for a launch action `a` from a source with `src_ships`. `None`
+/// if the action is structurally invalid or the count is not sendable. The noop
+/// action is not a launch and is handled directly by `encode`.
+fn action_count(a: usize, src_ships: i64) -> Option<i64> {
     let c = match a {
         NOOP_ACTION => return None,
-        1..=4 => (src_ships as f64 * SEND_FRACTIONS[a - 1]).floor() as i64,
-        CONST_SEND_ACTION => CONST_SEND,
-        RESOLVED_ACTION => {
-            if resolved_absent || resolved_ally {
-                return None;
-            }
-            resolved_ships + 1
-        }
+        SEND_ALL_ACTION => src_ships,
         _ => return None,
     };
     (c >= 1 && c <= src_ships).then_some(c)
@@ -552,7 +539,6 @@ fn compute_source_row(
     si: usize,
     slot_id: &[i64],
     by: &FxHashMap<i64, &Planet>,
-    resolved: &FxHashMap<i64, (i64, i64)>,
     player: i64,
     t_row: &mut [f32],
     r_row: &mut [u8],
@@ -571,14 +557,11 @@ fn compute_source_row(
         if id_j < 0 || !by.contains_key(&id_j) {
             continue;
         }
-        let (rj_owner, rj_ships) = resolved.get(&id_j).copied().unwrap_or((-2, 0));
         // Different actions that send the same count share one aim solve.
         let mut memo: [(i64, Option<(usize, f64)>); ACTIONS_DIM] = [(i64::MIN, None); ACTIONS_DIM];
         let mut memo_len = 0usize;
         for a in 0..ACTIONS_DIM {
-            let Some(count) =
-                action_count(a, pi.ships, rj_ships, rj_owner == player, rj_owner == -2)
-            else {
+            let Some(count) = action_count(a, pi.ships) else {
                 continue;
             };
             if let Some((_, _, c_row)) = extra.as_mut() {
@@ -619,13 +602,6 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
     for (s, p) in base.iter().take(PLANET_SLOTS).enumerate() {
         slot_id[s] = p.id;
     }
-
-    // Resolved garrisons (for the resolved+1 action) from the last frame.
-    let resolved: FxHashMap<i64, (i64, i64)> = traj
-        .frame_planets(NUM_FRAMES - 1)
-        .iter()
-        .map(|p| (p.id, (p.owner, p.ships)))
-        .collect();
 
     let globals = compute_globals(state, player);
 
@@ -688,16 +664,13 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
                     si,
                     &slot_id,
                     &by,
-                    &resolved,
                     player,
                     t_row,
                     r_row,
                     Some((a_row, m_row, c_row)),
                 );
             } else {
-                compute_source_row(
-                    &traj, off, si, &slot_id, &by, &resolved, player, t_row, r_row, None,
-                );
+                compute_source_row(&traj, off, si, &slot_id, &by, player, t_row, r_row, None);
             }
         }
     }
@@ -935,13 +908,7 @@ mod tests {
                         let pi = st.planets.iter().find(|p| p.id == id_i).unwrap();
                         assert_eq!(pi.owner, 0, "mask allowed a non-owned source");
                         // recompute count the same way encode did
-                        let resolved: FxHashMap<i64, (i64, i64)> = Trajectory::build(&st)
-                            .frame_planets(NUM_FRAMES - 1)
-                            .iter()
-                            .map(|p| (p.id, (p.owner, p.ships)))
-                            .collect();
-                        let (ro, rs) = resolved.get(&id_j).copied().unwrap_or((-2, 0));
-                        let count = action_count(a, pi.ships, rs, ro == 0, ro == -2).unwrap();
+                        let count = action_count(a, pi.ships).unwrap();
                         assert_eq!(
                             f.ship_counts[mi], count,
                             "ship_counts disagreed with action_count"

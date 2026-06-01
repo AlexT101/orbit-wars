@@ -20,8 +20,8 @@ from typing import Any
 from orbit_wars_model import encode_obs
 
 PLANET_SLOTS = 44
-ACTIONS_DIM = 7
-SEND_100_ACTION = 4
+ACTIONS_DIM = 2
+SEND_100_ACTION = 1
 
 
 def _planet_map(obs: dict[str, Any]) -> dict[int, tuple]:

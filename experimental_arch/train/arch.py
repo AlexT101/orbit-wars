@@ -13,6 +13,7 @@ from constants import (
     ACTIONS_DIM,
     ACTION_CHOICES_PER_SOURCE,
     GLOBAL_DIM,
+    LAUNCH_GATE_CHOICES,
     NUM_FRAMES,
     PLANET_SLOTS,
     TOKEN_DIM,
@@ -125,10 +126,11 @@ class PolicyHead(nn.Module):
             nn.SiLU(),
             nn.Linear(D_MODEL, D_MODEL),
         )
-        self.action_mlp = nn.Sequential(
+        self.launch_gate_mlp = nn.Linear(D_MODEL, LAUNCH_GATE_CHOICES)
+        self.send_mlp = nn.Sequential(
             nn.Linear(2 * D_MODEL, D_MODEL),
             nn.SiLU(),
-            nn.Linear(D_MODEL, ACTIONS_DIM),
+            nn.Linear(D_MODEL, 1),
         )
 
     def forward(self, fused_planets: th.Tensor, encoded_globals: th.Tensor, valid_actions_mask: th.Tensor) -> th.Tensor:
@@ -140,7 +142,9 @@ class PolicyHead(nn.Module):
 
         src = h_src.unsqueeze(2).expand(batch, PLANET_SLOTS, PLANET_SLOTS, -1)
         tgt = h_tgt.unsqueeze(1).expand(batch, PLANET_SLOTS, PLANET_SLOTS, -1)
-        logits = self.action_mlp(th.cat([src, tgt], dim=-1))
+        gate_logits = self.launch_gate_mlp(h_src)
+        send_logits = self.send_mlp(th.cat([src, tgt], dim=-1)).squeeze(-1)
+        logits = th.cat([gate_logits, send_logits], dim=-1)
         logits = logits.masked_fill(~valid_actions_mask.bool(), -1e8)
         return logits.reshape(batch, PLANET_SLOTS * ACTION_CHOICES_PER_SOURCE)
 

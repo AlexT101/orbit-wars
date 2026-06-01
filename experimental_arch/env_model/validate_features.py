@@ -32,9 +32,12 @@ SEEDS = [1, 2, 3, 4, 5]
 PLAYERS = 2
 WARMUP = 6            # empty steps before we encode, so planets have moved
 ACTIONS_PER_STATE = 12
+COMET_WARMUPS = [50, 75, 150, 250, 350, 450]
+COMET_ACTIONS_PER_STATE = 3
 POS_TOL = 1e-6
 PLANET_SLOTS = 44
-ACTIONS_DIM = 7
+ACTIONS_DIM = 2
+SEND_ALL_ACTION = 1
 
 
 def fresh_env(seed: int, warmup: int):
@@ -98,24 +101,29 @@ def check_frames(seed: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 # 2. Aim / arrival validation
 # --------------------------------------------------------------------------- #
-def kaggle_arrival(seed: int, src_id: int, angle: float, count: int, max_turns: int):
-    """Issue one launch in a fresh kaggle env (reached from `seed` + WARMUP empty
+def kaggle_arrival(seed: int, warmup: int, src_id: int, angle: float, count: int, max_turns: int):
+    """Issue one launch in a fresh kaggle env (reached from `seed` + warmup empty
     steps) and report (hit_planet_id | None, arrival_turn). The hit planet is the
     one whose ship count deviates from the production-only expectation when our
     (sole) fleet disappears."""
-    env = fresh_env(seed, WARMUP)
+    env = fresh_env(seed, warmup)
     if env.done:
         return (None, 0)
-    prev = planets_by_id(obs_of(env, 0))
+    obs0 = obs_of(env, 0)
+    new_fleet_id = obs0.get("next_fleet_id")
+    prev = planets_by_id(obs0)
     for turn in range(1, max_turns + 1):
         action0 = [[src_id, angle, count]] if turn == 1 else []
         env.step([action0, []])
         obs = obs_of(env, 0)
         cur = planets_by_id(obs)
-        fleets = obs.get("fleets", [])
+        fleets = [
+            f for f in obs.get("fleets", [])
+            if int(f[1]) == 0 and (new_fleet_id is None or int(f[0]) == int(new_fleet_id))
+        ]
         if not fleets:  # our (only) fleet has resolved
             for pid, pp in prev.items():
-                if pid not in cur:
+                if pid == src_id or pid not in cur:
                     continue
                 cp = cur[pid]
                 prev_owner, prev_ships, prod = int(pp[1]), int(pp[5]), int(pp[6])
@@ -135,11 +143,11 @@ def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
     obs0 = obs_of(env, 0)
     feat = encode_obs(obs0, 0)
     ids = feat["planet_ids"]
-    turns = feat["turns"]      # flat (4,44,44,7), first frame is decision frame
-    angles = feat["angles"]    # flat (44,44,7)
-    mask = feat["mask"]        # flat (44,44,7)
-    ship_counts = feat["ship_counts"]  # flat (44,44,7), integral ships sent
-    reachable = feat["reachable_mask"]  # flat (4,44,44,7), first frame starts at index 0
+    turns = feat["turns"]      # flat (4,44,44,2), first frame is decision frame
+    angles = feat["angles"]    # flat (44,44,2)
+    mask = feat["mask"]        # flat (44,44,2)
+    ship_counts = feat["ship_counts"]  # flat (44,44,2), integral ships sent
+    reachable = feat["reachable_mask"]  # flat (4,44,44,2), first frame starts at index 0
 
     valid = [
         (si, sj, a)
@@ -159,7 +167,7 @@ def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
             fails.append(f"seed {seed} {id_i}->{id_j} a{a}: mask set but reachable_mask=0")
             continue
         pred_turn = round(turns[mi] * 20.0)
-        hit, turn = kaggle_arrival(seed, id_i, angle, count, max_turns=80)
+        hit, turn = kaggle_arrival(seed, WARMUP, id_i, angle, count, max_turns=80)
         if hit != id_j:
             fails.append(f"seed {seed} {id_i}->{id_j} a{a} cnt{count}: kaggle hit {hit}, expected {id_j}")
         elif turn != pred_turn:
@@ -200,12 +208,12 @@ def check_mask_completeness(seed: int, rng: random.Random) -> tuple[int, list[st
             id_j = ids[sj]
             if sj == si or id_j < 0 or id_j not in pmap:
                 continue
-            for a in range(1, 5):  # fractions only (count is unambiguous here)
-                if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]:
-                    continue
-                count = int(ss * (0.25, 0.50, 0.75, 1.00)[a - 1])
-                if 1 <= count <= ss:
-                    cands.append((si, sj, a, id_i, id_j, count))
+            a = SEND_ALL_ACTION
+            if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]:
+                continue
+            count = ss
+            if 1 <= count <= ss:
+                cands.append((si, sj, a, id_i, id_j, count))
     rng.shuffle(cands)
 
     checked = 0
@@ -217,10 +225,68 @@ def check_mask_completeness(seed: int, rng: random.Random) -> tuple[int, list[st
         tx, ty = float(pmap[id_j][2]), float(pmap[id_j][3])
         sx, sy = float(pmap[id_i][2]), float(pmap[id_i][3])
         angle = math.atan2(ty - sy, tx - sx)
-        hit, turn = kaggle_arrival(seed, id_i, angle, count, max_turns=AIM_HORIZON)
+        hit, turn = kaggle_arrival(seed, WARMUP, id_i, angle, count, max_turns=AIM_HORIZON)
         if hit == id_j and turn <= AIM_HORIZON:
             fails.append(f"seed {seed} {id_i}->{id_j} a{a} cnt{count}: masked-out but direct shot reaches j at turn {turn}")
         checked += 1
+    return checked, fails
+
+
+def check_comet_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
+    """Soundness on observed comet targets. This catches wasted shots where the
+    projected hit is on the same tick the comet expires, leaving no target in
+    the next observation, plus any board/sun miss that removes the fleet."""
+    fails = []
+    checked = 0
+    for warmup in COMET_WARMUPS:
+        env = fresh_env(seed, warmup)
+        if env.done:
+            continue
+        obs0 = obs_of(env, 0)
+        comet_ids = {int(pid) for pid in obs0.get("comet_planet_ids", [])}
+        if not comet_ids:
+            continue
+        feat = encode_obs(obs0, 0)
+        ids = [int(x) for x in feat["planet_ids"]]
+        turns = feat["turns"]
+        angles = feat["angles"]
+        mask = feat["mask"]
+        ship_counts = feat["ship_counts"]
+
+        valid = [
+            (si, sj, a)
+            for si in range(PLANET_SLOTS)
+            for sj in range(PLANET_SLOTS)
+            for a in range(1, ACTIONS_DIM)
+            if ids[si] >= 0
+            and ids[sj] in comet_ids
+            and mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]
+        ]
+        rng.shuffle(valid)
+        for si, sj, a in valid[:COMET_ACTIONS_PER_STATE]:
+            mi = (si * PLANET_SLOTS + sj) * ACTIONS_DIM + a
+            id_i, id_j = ids[si], ids[sj]
+            count = int(ship_counts[mi])
+            pred_turn = round(turns[mi] * 20.0)
+            hit, turn = kaggle_arrival(
+                seed,
+                warmup,
+                id_i,
+                float(angles[mi]),
+                count,
+                max_turns=80,
+            )
+            if hit != id_j:
+                fails.append(
+                    f"seed {seed} warmup {warmup} {id_i}->{id_j} a{a} cnt{count}: "
+                    f"kaggle hit {hit}, expected comet {id_j}"
+                )
+            elif turn != pred_turn:
+                fails.append(
+                    f"seed {seed} warmup {warmup} {id_i}->{id_j} a{a} cnt{count}: "
+                    f"arrival turn {turn} != predicted {pred_turn}"
+                )
+            checked += 1
     return checked, fails
 
 
@@ -231,6 +297,8 @@ def main() -> int:
     aim_checked = 0
     mask_fails = []
     mask_checked = 0
+    comet_fails = []
+    comet_checked = 0
     for seed in SEEDS:
         frame_fails += check_frames(seed)
         c, f = check_aim(seed, rng)
@@ -239,14 +307,18 @@ def main() -> int:
         mc, mf = check_mask_completeness(seed, rng)
         mask_checked += mc
         mask_fails += mf
+        cc, cf = check_comet_aim(seed, rng)
+        comet_checked += cc
+        comet_fails += cf
 
-    for m in (frame_fails + aim_fails + mask_fails)[:20]:
+    for m in (frame_fails + aim_fails + mask_fails + comet_fails)[:20]:
         print("  FAIL:", m)
 
     print(f"frame caches:      {'OK' if not frame_fails else f'{len(frame_fails)} MISMATCHES'} ({len(SEEDS)} seeds)")
     print(f"aim arrivals:      {aim_checked - len(aim_fails)} / {aim_checked} land on target at predicted turn")
     print(f"mask completeness: {mask_checked - len(mask_fails)} / {mask_checked} masked-out actions confirmed unreachable")
-    return 1 if (frame_fails or aim_fails or mask_fails) else 0
+    print(f"comet aim:         {comet_checked - len(comet_fails)} / {comet_checked} observed-comet actions land cleanly")
+    return 1 if (frame_fails or aim_fails or mask_fails or comet_fails) else 0
 
 
 if __name__ == "__main__":

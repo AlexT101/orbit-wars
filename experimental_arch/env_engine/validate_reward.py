@@ -1,19 +1,21 @@
 """Validate env_engine's reward shaping.
 
-Three terms (see RewardWeights in src/lib.rs):
-  - terminal         = ships_share = own_ships / all_players_ships, in [0, 1]
-  - terminal_time    = ±remaining/episode_steps (+ winner, − loser); max ~1 for
-                       a turn-1 finish.
-  - production_share = SHARE_W × (own_production / Σ all players' production),
-                       a per-step dense term (0 if no player has production).
+Three zero-sum terms (see RewardWeights in src/lib.rs):
+  - terminal         = ships_share - 1 / num_players
+  - terminal_time    = zero-sum outcome × remaining/episode_steps
+  - production_income = INCOME_W × (own_production - mean_player_production),
+                        a small per-step dense term.
+One non-zero-sum term:
+  - launch_penalty   = LAUNCH_W × successful_launch_count
 
 We drive games to termination with an aggressive self-play policy (so games end
 both by elimination and by the step cap). The terminal terms are recomputed from
 the final state (env_engine's own get_state) and checked against the engine's
-reported reward_components; the per-step production_share term is recomputed from
-each step's post-step observation and checked every step. Also asserts the time
-bonus has the right sign and the fast-win magnitude bound (winner's bonus ==
-remaining fraction).
+reported reward_components; the per-step production_income term is recomputed from
+each step's post-step observation and checked every step. The launch penalty is
+recomputed from pre-step planet ownership/ship counts and the submitted actions.
+Also asserts the time bonus has the right sign and the fast-win magnitude bound
+(winner's bonus == remaining fraction).
 
 Run (from experimental_arch/):
     python env_engine/validate_reward.py
@@ -31,20 +33,46 @@ PLAYERS = 2
 EPISODE_STEPS = 500
 TERM_W = 1.0
 TIME_W = 1.0
-SHARE_W = 0.001
+INCOME_W = 0.0002
+LAUNCH_W = -0.00004
 TOL = 1e-9
 
 
-def production_share(obs: dict, n: int) -> list[float]:
-    """Per-player own/Σ-player production from a post-step obs (neutral excluded),
-    matching the engine's production_share term. Player obs[0] carries planets."""
+def production_income(obs: dict, n: int) -> list[float]:
+    """Centered per-player absolute production from a post-step obs."""
     prod = [0] * n
     for p in obs.get("planets", []):
         owner = int(p[1])
         if 0 <= owner < n:
             prod[owner] += int(p[6])
-    total = sum(prod)
-    return [(prod[i] / total) if total > 0 else 0.0 for i in range(n)]
+    mean_prod = sum(prod) / n
+    return [prod[i] - mean_prod for i in range(n)]
+
+
+def launch_counts(pre_obs: dict, actions: list, n: int) -> list[int]:
+    """Successful launches using the same basic legality checks as the engine."""
+    planets = {}
+    for p in pre_obs.get("planets", []):
+        pid = int(p[0])
+        planets[pid] = {"owner": int(p[1]), "ships": int(p[5])}
+
+    counts = [0] * n
+    for actor, moves in enumerate(actions):
+        if actor >= n or not isinstance(moves, list):
+            continue
+        for mv in moves:
+            if not isinstance(mv, list) or len(mv) != 3:
+                continue
+            pid = int(mv[0])
+            ships = int(mv[2])
+            p = planets.get(pid)
+            if p is None or p["owner"] != actor:
+                continue
+            if ships <= 0 or p["ships"] < ships:
+                continue
+            p["ships"] -= ships
+            counts[actor] += 1
+    return counts
 
 
 def aggressive(obs: dict, n: int, rng: random.Random, only_player: int | None = None) -> list:
@@ -93,6 +121,24 @@ def final_scores(state: dict, n: int) -> list[int]:
     return scores
 
 
+def terminal_outcomes(scores: list[int]) -> list[float]:
+    n = len(scores)
+    max_s = max(scores)
+    outcomes = [0.0] * n
+    if max_s <= 0:
+        return outcomes
+    winners = [i for i, score in enumerate(scores) if score == max_s]
+    losers = n - len(winners)
+    if losers == 0:
+        return outcomes
+    for i in winners:
+        outcomes[i] = 1.0 / len(winners)
+    for i in range(n):
+        if i not in winners:
+            outcomes[i] = -1.0 / losers
+    return outcomes
+
+
 def main() -> int:
     fails: list[str] = []
     checked = 0
@@ -111,18 +157,27 @@ def main() -> int:
                 acts = [aggressive(obs[pl], PLAYERS, rng) for pl in range(PLAYERS)]
             else:
                 acts = targeted(obs[0], PLAYERS)
+            exp_launches = launch_counts(obs[0], acts, PLAYERS)
             out = engine.step(acts)
             obs = out["observations"]
             comp = out["reward_components"]
 
-            # production_share is a per-step term: check it every step.
-            exp_share = production_share(obs[0], PLAYERS)
+            # production_income is a per-step term: check it every step.
+            exp_income = production_income(obs[0], PLAYERS)
             for i in range(PLAYERS):
-                checked += 1
-                got = comp["production_share"][i]
-                want = SHARE_W * exp_share[i]
+                checked += 2
+                got = comp["production_income"][i]
+                want = INCOME_W * exp_income[i]
                 if abs(got - want) > TOL:
-                    fails.append(f"seed {seed} p{i} production_share {got:.9f} vs {want:.9f}")
+                    fails.append(f"seed {seed} p{i} production_income {got:.9f} vs {want:.9f}")
+                got_launch = comp["launch_penalty"][i]
+                want_launch = LAUNCH_W * exp_launches[i]
+                if abs(got_launch - want_launch) > TOL:
+                    fails.append(f"seed {seed} p{i} launch_penalty {got_launch:.9f} vs {want_launch:.9f}")
+            rsum = sum(out["reward"])
+            exp_rsum = LAUNCH_W * sum(exp_launches)
+            if abs(rsum - exp_rsum) > 1e-6:
+                fails.append(f"seed {seed}: reward sum {rsum:.6f} != launch penalties {exp_rsum:.6f}")
 
             if not out["done"]:
                 continue
@@ -139,21 +194,22 @@ def main() -> int:
                 by_elim += 1
 
             for i in range(PLAYERS):
-                exp_share = (scores[i] / total) if total > 0 else 0.0
-                won = scores[i] == max_s and max_s > 0
+                baseline = 1.0 / PLAYERS
+                exp_share = ((scores[i] / total) - baseline) if total > 0 else 0.0
+                outcomes = terminal_outcomes(scores)
                 exp_term = TERM_W * exp_share
-                exp_time = TIME_W * (1.0 if won else -1.0) * frac
+                exp_time = TIME_W * outcomes[i] * frac
                 checked += 2
                 if abs(comp["terminal"][i] - exp_term) > TOL:
                     fails.append(f"seed {seed} p{i} terminal {comp['terminal'][i]:.6f} vs {exp_term:.6f}")
                 if abs(comp["terminal_time"][i] - exp_time) > TOL:
                     fails.append(f"seed {seed} p{i} terminal_time {comp['terminal_time'][i]:.6f} vs {exp_time:.6f}")
-                if won:
+                if outcomes[i] > 0:
                     max_winner_bonus = max(max_winner_bonus, comp["terminal_time"][i])
-            # Shares across players sum to 1 (or all-zero if board wiped).
+            # Centered terminal shares across players sum to 0.
             tsum = sum(comp["terminal"])
-            if total > 0 and abs(tsum - TERM_W) > 1e-6:
-                fails.append(f"seed {seed}: shares sum {tsum:.6f} != {TERM_W}")
+            if abs(tsum) > 1e-6:
+                fails.append(f"seed {seed}: centered shares sum {tsum:.6f} != 0")
             break
 
     for m in fails[:20]:

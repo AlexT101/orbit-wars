@@ -1,30 +1,5 @@
-"""Render a trained SB3 checkpoint game to Kaggle's HTML visualizer.
-
-Run from repo root or `experimental_arch/`:
-
-    python experimental_arch/viz/play_checkpoint.py
-    python experimental_arch/viz/play_checkpoint.py --opponent random --seed 7
-    python experimental_arch/viz/play_checkpoint.py --hero-agent experimental_arch/heuristic/closest_all.py
-    python experimental_arch/viz/play_checkpoint.py --checkpoint train/checkpoints/galaxy_selfplay/final.zip
-    python experimental_arch/viz/play_checkpoint.py --opponent-checkpoint train/checkpoints/galaxy_selfplay/self_play_opponent.zip
-
-Default behavior is stochastic self-play: the hero model plays as player 0,
-the opponent is `self` (the same checkpoint as player 1), and both checkpoint
-agents sample from their policy distributions. Pass `--hero-deterministic`
-and/or `--opponent-deterministic` to use argmax/eval-mode actions instead.
-
-The opponent can also be a bot name under `bots/` or another checkpoint. We
-drive `env_engine` and the Kaggle env with the same actions, then render the
-Kaggle env so the animation matches the real rollout.
-
-For feature-debugging, the script prints the encoder's `t` and `t_resolved`
-values before every action. `t_resolved` is shown as an absolute turn:
-`obs["step"] + frame_offsets[-1]`.
-"""
-
 from __future__ import annotations
 
-import argparse
 import contextlib
 import importlib.util
 import io
@@ -37,15 +12,29 @@ from typing import Protocol
 import numpy as np
 from sb3_contrib import MaskablePPO
 
+# ==== HARDCODED CONFIG ====
+HERO = "/home/sunrise/orbitwars/pantheow/experimental_arch/train/checkpoints/galaxy_selfplay_a2_g2_t44/learner/learner_step_000000004096.zip"
+OPPONENT = "self"  # "self", .zip, .py, or bot name
+
+HERO_DETERMINISTIC = False
+HERO_DETERMINISTIC = True
+OPPONENT_DETERMINISTIC = False
+OPPONENT_DETERMINISTIC = True
+
+SEED = 1
+OUT_PATH = None  # e.g. "viz/game.html"
+DEVICE = "auto"
+# =========================
+
 EXPERIMENTAL_ARCH_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train"
 DEFAULT_OUT = EXPERIMENTAL_ARCH_DIR / "viz" / "orbit_wars_game.html"
-DEFAULT_CHECKPOINT_DIR = TRAIN_DIR / "checkpoints" / "galaxy_selfplay"
+DEFAULT_CHECKPOINT_DIR = TRAIN_DIR / "checkpoints" / "galaxy_selfplay_a2_g2_t44"
 
 sys.path.insert(0, str(TRAIN_DIR))
 
-from arch import GalaxyMaskablePolicy  # noqa: F401 - needed by MaskablePPO.load
+from arch import GalaxyMaskablePolicy  # noqa: F401
 from env import scores_from_obs
 from features import decode_action, encode_features, flat_action_mask
 from opponents import BotOpponent
@@ -131,7 +120,7 @@ def default_checkpoint() -> Path:
         if path.exists():
             return path
     raise FileNotFoundError(
-        f"no checkpoint found in {DEFAULT_CHECKPOINT_DIR}; pass --checkpoint explicitly"
+        f"no checkpoint found in {DEFAULT_CHECKPOINT_DIR}"
     )
 
 
@@ -159,22 +148,6 @@ def policy_label(agent: Agent) -> str:
     if isinstance(agent, PythonAgent):
         return "python"
     return "bot"
-
-
-def frame_timing(obs: dict, player: int = 0) -> tuple[int, int, int, list[int]]:
-    _model_obs, feat = encode_features(obs, player=player)
-    offsets = [int(x) for x in feat["frame_offsets"]]
-    t = int(obs.get("step", 0))
-    t_resolved_offset = offsets[-1]
-    return t, t_resolved_offset, t + t_resolved_offset, offsets
-
-
-def print_frame_timing(label: str, obs: dict, player: int = 0) -> None:
-    t, t_resolved_offset, t_resolved, offsets = frame_timing(obs, player=player)
-    print(
-        f"{label}: t={t} t_resolved={t_resolved} "
-        f"(resolved_offset={t_resolved_offset}, frame_offsets={offsets})"
-    )
 
 
 def windows_link(path: Path) -> str | None:
@@ -206,13 +179,16 @@ def play_and_render(
     kenv.reset(PLAYERS)
 
     steps = 0
+    final_reward = 0.0
+    total_reward = 0.0
     for _ in range(max_steps):
         if kenv.done:
             break
-        print_frame_timing(f"step {steps} frames", eng_obs[0], player=0)
         actions = [hero.act(eng_obs[0]), opponent.act(eng_obs[1])]
         kenv.step(actions)
         out_step = engine.step(actions)
+        final_reward = float(out_step["reward"][0])
+        total_reward += final_reward
         eng_obs = out_step["observations"]
         steps += 1
         if out_step["done"]:
@@ -222,7 +198,7 @@ def play_and_render(
     total = sum(scores)
     share0 = scores[0] / total if total else 0.0
     if scores[0] > scores[1]:
-        verdict = "checkpoint wins"
+        verdict = "hero wins"
     elif scores[1] > scores[0]:
         verdict = f"{opponent.name} wins"
     else:
@@ -238,6 +214,7 @@ def play_and_render(
     print(f"opponent policy: {policy_label(opponent)}")
     print(f"result:          {verdict} after {steps} steps")
     print(f"ships:           p0={scores[0]} p1={scores[1]} p0_share={share0:.3f}")
+    print(f"reward:          final={final_reward:.6g} total={total_reward:.6g}")
     print(f"html:            {out}")
     link = windows_link(out)
     if link:
@@ -245,65 +222,45 @@ def play_and_render(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=Path, default=None)
-    parser.add_argument("--hero-agent", type=Path, default=None, help="Python agent file with agent(obs)")
-    parser.add_argument(
-        "--opponent",
-        default="self",
-        help="'self' by default, meaning the same checkpoint as player 1; can also be a bot name or checkpoint path",
-    )
-    parser.add_argument("--opponent-checkpoint", type=Path, default=None)
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument(
-        "--hero-deterministic",
-        action="store_true",
-        help="use deterministic argmax/eval-mode actions for the hero; default is stochastic sampling",
-    )
-    parser.add_argument(
-        "--opponent-deterministic",
-        action="store_true",
-        help="use deterministic argmax/eval-mode actions for checkpoint opponents; default is stochastic sampling",
-    )
-    parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
-    args = parser.parse_args()
+    # --- hero ---
+    hero_path = resolve_path(HERO)
 
-    if args.hero_agent is not None:
-        hero_path = resolve_path(args.hero_agent)
-        if not hero_path.exists():
-            raise FileNotFoundError(f"hero agent does not exist: {hero_path}")
-        hero = PythonAgent(hero_path)
-        self_checkpoint = resolve_path(args.checkpoint) if args.checkpoint is not None else hero_path
-    else:
-        checkpoint = resolve_path(args.checkpoint) if args.checkpoint is not None else default_checkpoint()
-        if not checkpoint.exists():
-            raise FileNotFoundError(f"checkpoint does not exist: {checkpoint}")
+    if hero_path.exists() and hero_path.suffix == ".zip":
         hero = CheckpointAgent(
-            checkpoint,
+            hero_path,
             player=0,
-            deterministic=args.hero_deterministic,
-            device=args.device,
+            deterministic=HERO_DETERMINISTIC,
+            device=DEVICE,
         )
-        self_checkpoint = checkpoint
+        self_checkpoint = hero_path
+    elif hero_path.exists() and hero_path.suffix == ".py":
+        hero = PythonAgent(hero_path)
+        self_checkpoint = hero_path
+    else:
+        raise FileNotFoundError(f"invalid HERO: {HERO}")
 
-    opponent_ref = str(args.opponent_checkpoint) if args.opponent_checkpoint is not None else args.opponent
-    if opponent_ref == "self" and args.hero_agent is not None:
-        opponent_ref = str(resolve_path(args.hero_agent))
+    # --- opponent ---
+    opponent_ref = OPPONENT
+    if opponent_ref == "self":
+        opponent_ref = str(self_checkpoint)
+
     opponent = make_opponent(
         opponent_ref,
         player=1,
         self_checkpoint=self_checkpoint,
-        deterministic=args.opponent_deterministic,
-        device=args.device,
+        deterministic=OPPONENT_DETERMINISTIC,
+        device=DEVICE,
     )
+
+    # --- run ---
+    out_path = resolve_path(OUT_PATH) if OUT_PATH else DEFAULT_OUT
+
     play_and_render(
         hero=hero,
         opponent=opponent,
-        seed=args.seed,
-        out=resolve_path(args.out),
-        max_steps=args.max_steps,
+        seed=SEED,
+        out=out_path,
+        max_steps=MAX_STEPS,
     )
     return 0
 

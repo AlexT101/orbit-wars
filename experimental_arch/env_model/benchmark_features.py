@@ -1,7 +1,7 @@
 """Benchmark `encode_obs` (the full 4-frame feature build incl. the aim solver).
 
 Generates realistic mid-game states with env_engine (fleets in flight, so the
-t_resolved frame and the resolved+1 action are exercised), then times encoding.
+t_resolved frame and all-in action projection are exercised), then times encoding.
 
 Run (from experimental_arch/):
     python env_model/benchmark_features.py

@@ -40,8 +40,12 @@ def hellburner_opponent() -> BotOpponent:
     return BotOpponent("hellburner")
 
 
-def model_opponent(checkpoint: str | Path | None, device: str = "auto") -> ModelOpponent:
-    return ModelOpponent(checkpoint, device=device, fallback="hellburner")
+def model_opponent(
+    checkpoint: str | Path | None,
+    device: str = "auto",
+    deterministic: bool = False,
+) -> ModelOpponent:
+    return ModelOpponent(checkpoint, device=device, fallback="hellburner", deterministic=deterministic)
 
 
 def evaluate_model(
@@ -51,13 +55,18 @@ def evaluate_model(
     games: int,
     seed: int,
     deterministic: bool = True,
+    randomize_sides: bool = True,
 ) -> EvalResult:
     wins = ties = losses = 0
     rewards: list[float] = []
     score_diffs: list[int] = []
 
     for i in range(games):
-        env = OrbitWarsEnv(opponent=opponent_factory(), seed=seed + i)
+        env = OrbitWarsEnv(
+            opponent=opponent_factory(),
+            seed=seed + i,
+            randomize_sides=randomize_sides,
+        )
         obs, _ = env.reset(seed=seed + i)
         done = False
         total_reward = 0.0
@@ -72,8 +81,7 @@ def evaluate_model(
             total_reward += float(reward)
             done = terminated or truncated
 
-        scores = info.get("scores", [0, 0])
-        diff = int(scores[0]) - int(scores[1])
+        diff = int(info.get("score_diff", 0))
         score_diffs.append(diff)
         rewards.append(total_reward)
         if info.get("tie"):

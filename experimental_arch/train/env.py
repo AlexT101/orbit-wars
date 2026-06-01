@@ -28,12 +28,27 @@ def scores_from_obs(obs: dict[str, Any], num_players: int = 2) -> list[int]:
 class OrbitWarsEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, opponent: str | Opponent = "hellburner", seed: int = 0):
+    def __init__(
+        self,
+        opponent: str | Opponent = "hellburner",
+        seed: int = 0,
+        randomize_sides: bool = False,
+        side_mode: str | None = None,
+        reward_weights: dict[str, float] | None = None,
+    ):
         super().__init__()
         self.base_seed = seed
         self.next_seed = seed
-        self.engine = OrbitWarsEngine(num_players=2)
+        self.reward_weights = reward_weights
+        self.engine = OrbitWarsEngine(num_players=2, reward_weights=reward_weights)
         self.opponent = BotOpponent(opponent) if isinstance(opponent, str) else opponent
+        self.side_mode = side_mode or ("random" if randomize_sides else "fixed")
+        if self.side_mode not in {"fixed", "random", "alternate"}:
+            raise ValueError(f"unknown side_mode {self.side_mode!r}")
+        self.randomize_sides = self.side_mode == "random"
+        self.reset_count = 0
+        self.learner_player = 0
+        self.opponent_player = 1
         self.obs_pair = None
         self.feat = None
         self.turn = 0
@@ -50,7 +65,10 @@ class OrbitWarsEnv(gym.Env):
 
     def _encode_current(self) -> dict[str, np.ndarray]:
         assert self.obs_pair is not None
-        model_obs, self.feat = encode_features(self.obs_pair[0], player=0)
+        model_obs, self.feat = encode_features(
+            self.obs_pair[self.learner_player],
+            player=self.learner_player,
+        )
         return model_obs
 
     def action_masks(self) -> np.ndarray:
@@ -58,14 +76,26 @@ class OrbitWarsEnv(gym.Env):
         return flat_action_mask(self.feat)
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
-        super().reset(seed=seed)
         if seed is None:
             seed = self.next_seed
             self.next_seed += 1
+        super().reset(seed=int(seed))
         self.opponent.reset()
         self.obs_pair = self.engine.reset(int(seed))["observations"]
+        if self.side_mode == "random":
+            self.learner_player = int(self.np_random.integers(0, 2))
+        elif self.side_mode == "alternate":
+            self.learner_player = self.reset_count % 2
+        else:
+            self.learner_player = 0
+        self.reset_count += 1
+        self.opponent_player = 1 - self.learner_player
         self.turn = 0
-        return self._encode_current(), {"seed": int(seed)}
+        return self._encode_current(), {
+            "seed": int(seed),
+            "learner_player": self.learner_player,
+            "opponent_player": self.opponent_player,
+        }
 
     def _decode_action(self, action: np.ndarray) -> list[list[float]]:
         assert self.feat is not None
@@ -74,22 +104,36 @@ class OrbitWarsEnv(gym.Env):
     def step(self, action: np.ndarray):
         assert self.obs_pair is not None
         learner_moves = self._decode_action(action)
-        opponent_moves = self.opponent.act(self.obs_pair[1])
-        out = self.engine.step([learner_moves, opponent_moves])
+        opponent_moves = self.opponent.act(self.obs_pair[self.opponent_player])
+        actions = [[] for _ in range(2)]
+        actions[self.learner_player] = learner_moves
+        actions[self.opponent_player] = opponent_moves
+        out = self.engine.step(actions)
         self.obs_pair = out["observations"]
         self.turn += 1
         terminated = bool(out["done"])
-        reward = float(out["reward"][0])
+        reward = float(out["reward"][self.learner_player])
         obs = self._encode_current()
         info = {
             "turn": self.turn,
             "learner_moves": len(learner_moves),
             "opponent_moves": len(opponent_moves),
+            "learner_player": self.learner_player,
+            "opponent_player": self.opponent_player,
             "reward_components": out.get("reward_components"),
         }
         if terminated:
-            scores = scores_from_obs(self.obs_pair[0], num_players=2)
+            scores = scores_from_obs(self.obs_pair[self.learner_player], num_players=2)
+            learner_score = int(scores[self.learner_player])
+            opponent_score = int(scores[self.opponent_player])
             info["scores"] = scores
-            info["winner"] = int(scores[1] > scores[0])
-            info["tie"] = bool(scores[0] == scores[1])
+            info["learner_score"] = learner_score
+            info["opponent_score"] = opponent_score
+            info["score_diff"] = learner_score - opponent_score
+            if learner_score == opponent_score:
+                info["winner"] = None
+            else:
+                info["winner"] = self.learner_player if learner_score > opponent_score else self.opponent_player
+            info["learner_won"] = bool(learner_score > opponent_score)
+            info["tie"] = bool(learner_score == opponent_score)
         return obs, reward, terminated, False, info

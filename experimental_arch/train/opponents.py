@@ -64,9 +64,16 @@ class BotOpponent:
 
 
 class ModelOpponent:
-    def __init__(self, checkpoint: str | Path | None, device: str = "auto", fallback: str = "hellburner"):
+    def __init__(
+        self,
+        checkpoint: str | Path | None,
+        device: str = "auto",
+        fallback: str = "hellburner",
+        deterministic: bool = False,
+    ):
         self.name = "self_play"
         self.device = device
+        self.deterministic = deterministic
         self.fallback = BotOpponent(fallback)
         self.model: MaskablePPO | None = None
         self.checkpoint: Path | None = None
@@ -92,10 +99,11 @@ class ModelOpponent:
     def act(self, obs: dict) -> list[list[float]]:
         if self.model is None:
             return self.fallback.act(obs)
-        model_obs, feat = encode_features(obs, player=1)
+        player = int(obs.get("player", 1))
+        model_obs, feat = encode_features(obs, player=player)
         action, _ = self.model.predict(
             model_obs,
-            deterministic=True,
+            deterministic=self.deterministic,
             action_masks=flat_action_mask(feat),
         )
         return decode_action(feat, action)
