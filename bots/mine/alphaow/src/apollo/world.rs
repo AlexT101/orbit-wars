@@ -12,11 +12,25 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use crate::apollo::blockers::AimResult;
 use crate::apollo::constants::{EPISODE_STEPS, HORIZON};
 use crate::apollo::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 use crate::apollo::entity_cache::EntityCache;
+
+/// Step-scoped, lock-free L1 aim cache shared across every [`WorldState`] and
+/// `HellburnerModel` built during one `Bot::compute_moves` call. Keyed by the
+/// **absolute** launch turn (`current_turn + launch_turn_offset`) so it stays
+/// correct as the rollout walks `current_turn` forward; aim is player- and
+/// view-agnostic, so the same key resolves to the same shot for every model.
+///
+/// Lives on the `compute_moves` stack (one OS thread for the whole step) and is
+/// threaded in by reference — never stored in the `Bot` pyclass and never shared
+/// across threads — so a bare `RefCell` is sound here without any `Sync` shim.
+pub type ShotL1 = RefCell<HashMap<(i64, i64, i64, i64), Option<AimResult>>>;
 use crate::apollo::helpers::{
     count_players, simulate_planet_timeline, state_at_timeline, ArrivalEvent, ArrivalLedger,
     PlanetTimeline, TimelineCache,
@@ -28,6 +42,10 @@ pub struct WorldState<'a> {
     pub step: i64,
     pub angular_velocity: f64,
     pub entity_cache: &'a EntityCache,
+    /// Optional step-scoped L1 aim cache (see [`ShotL1`]). `None` for tests and
+    /// ad-hoc worlds, which fall back to each `HellburnerModel`'s own per-model
+    /// cache. Set by the live `Bot` paths so all models in a step share hits.
+    pub shot_l1: Option<&'a ShotL1>,
     pub timeline_cache: TimelineCache,
 
     pub planets: Vec<Planet>,
@@ -76,7 +94,12 @@ impl<'a> WorldState<'a> {
         entity_cache: &'a EntityCache,
     ) -> Self {
         let num_players = count_players(&planets, &fleets);
-        let next_fleet_id = fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
+        let next_fleet_id = fleets
+            .iter()
+            .map(|f| f.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let engine = EngineState::from_observation_parts(
             step,
             angular_velocity,
@@ -96,11 +119,7 @@ impl<'a> WorldState<'a> {
     /// the `HORIZON`-turn arrival ledger, and snapshot. The rollout/search loop
     /// instead calls [`Self::from_simulator_with_ledger`] directly so the
     /// player-agnostic ledger can be shared across players.
-    pub fn from_engine(
-        player: i64,
-        engine: &EngineState,
-        entity_cache: &'a EntityCache,
-    ) -> Self {
+    pub fn from_engine(player: i64, engine: &EngineState, entity_cache: &'a EntityCache) -> Self {
         let sim = Simulator::new(engine);
         let ledger = ArrivalLedger::build(&sim, HORIZON, entity_cache);
         Self::from_simulator_with_ledger(player, &sim, &ledger, entity_cache)
@@ -126,7 +145,8 @@ impl<'a> WorldState<'a> {
         let fleets: Vec<Fleet> = sim.fleets().to_vec();
         let comet_planet_ids: Vec<i64> = sim.comet_planet_ids().to_vec();
 
-        let mut planet_by_id: HashMap<i64, usize> = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        let mut planet_by_id: HashMap<i64, usize> =
+            HashMap::with_capacity_and_hasher(planets.len(), Default::default());
         for (idx, planet) in planets.iter().enumerate() {
             planet_by_id.insert(planet.id, idx);
         }
@@ -187,6 +207,7 @@ impl<'a> WorldState<'a> {
             step,
             angular_velocity,
             entity_cache,
+            shot_l1: None,
             timeline_cache,
             planets,
             fleets,
@@ -256,7 +277,12 @@ impl<'a> WorldState<'a> {
                 return state_at_timeline(baseline, cutoff);
             }
         }
-        let merged = merge_arrivals(self.timeline_cache.arrivals(target_id), planned, extra, cutoff);
+        let merged = merge_arrivals(
+            self.timeline_cache.arrivals(target_id),
+            planned,
+            extra,
+            cutoff,
+        );
         let target = self.planet(target_id);
         let expiry = self.timeline_cache.expiry(target_id);
         let tl = simulate_planet_timeline(target, &merged, self.player, cutoff, expiry);
@@ -271,13 +297,23 @@ impl<'a> WorldState<'a> {
         extra: &[ArrivalEvent],
     ) -> PlanetTimeline {
         let horizon = horizon.max(1);
-        let merged = merge_arrivals(self.timeline_cache.arrivals(target_id), planned, extra, horizon);
+        let merged = merge_arrivals(
+            self.timeline_cache.arrivals(target_id),
+            planned,
+            extra,
+            horizon,
+        );
         let target = self.planet(target_id);
         let expiry = self.timeline_cache.expiry(target_id);
         simulate_planet_timeline(target, &merged, self.player, horizon, expiry)
     }
 
-    pub fn hold_status(&self, target_id: i64, planned: &[ArrivalEvent], horizon: i64) -> HoldStatus {
+    pub fn hold_status(
+        &self,
+        target_id: i64,
+        planned: &[ArrivalEvent],
+        horizon: i64,
+    ) -> HoldStatus {
         if !planned.is_empty() {
             let tl = self.projected_timeline(target_id, horizon, planned, &[]);
             HoldStatus {
@@ -319,8 +355,7 @@ pub fn merge_arrivals(
     extra: &[ArrivalEvent],
     cutoff: i64,
 ) -> Vec<ArrivalEvent> {
-    let mut out: Vec<ArrivalEvent> =
-        Vec::with_capacity(base.len() + planned.len() + extra.len());
+    let mut out: Vec<ArrivalEvent> = Vec::with_capacity(base.len() + planned.len() + extra.len());
     for ev in base {
         if ev.turns <= cutoff {
             out.push(*ev);

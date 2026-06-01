@@ -56,6 +56,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rustc-hash = "1.1"
 sha2 = "0.10"
+# Faster uncontended Mutex than std (no poisoning, lighter fast path) for the
+# hot aim caches.
+parking_lot = "0.12"
 
 [profile.release]
 opt-level = 3
