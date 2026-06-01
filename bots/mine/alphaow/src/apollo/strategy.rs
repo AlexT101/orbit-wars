@@ -1066,7 +1066,9 @@ fn collect_source_candidates(
                 }
                 // Knowingly sacrificing source: send all.
             } else {
-                ships_to_send = (available - half_pressure).max(0);
+                // Ignore defender reservation - increases win rate
+                // ships_to_send = (available - half_pressure).max(0);
+                ships_to_send = (available).max(0);
                 if ships_to_send == 0 {
                     continue;
                 }
