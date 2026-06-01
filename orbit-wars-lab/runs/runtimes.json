@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-31T17:27:54.143196+00:00",
+  "last_updated": "2026-06-01T15:47:25.073717+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 22735,
@@ -159,10 +159,10 @@
       "last_updated": "2026-05-29T07:14:29.840421+00:00"
     },
     "mine/apollo": {
-      "total_turns": 33542,
-      "total_seconds": 363.77452100000016,
-      "avg_ms": 10.845343777950038,
-      "last_updated": "2026-05-31T17:27:54.132641+00:00"
+      "total_turns": 37177,
+      "total_seconds": 382.0969800000002,
+      "avg_ms": 10.2777787341636,
+      "last_updated": "2026-06-01T14:30:39.420661+00:00"
     },
     "external/evogen": {
       "total_turns": 67174,
@@ -183,10 +183,16 @@
       "last_updated": "2026-05-29T16:49:35.924638+00:00"
     },
     "mine/alphaow_newest": {
-      "total_turns": 3427,
-      "total_seconds": 1734.4452540000002,
-      "avg_ms": 506.1118336737672,
-      "last_updated": "2026-05-31T17:27:54.132626+00:00"
+      "total_turns": 11208,
+      "total_seconds": 5699.126018000001,
+      "avg_ms": 508.4873320842256,
+      "last_updated": "2026-06-01T15:47:25.060760+00:00"
+    },
+    "mine/alphaow_temp": {
+      "total_turns": 11208,
+      "total_seconds": 5667.822091,
+      "avg_ms": 505.69433360099924,
+      "last_updated": "2026-06-01T15:47:25.060792+00:00"
     }
   }
 }
