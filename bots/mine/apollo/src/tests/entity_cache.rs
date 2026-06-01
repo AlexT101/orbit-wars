@@ -22,7 +22,7 @@ fn static_planet_positions_dont_change() {
     let cache = cache_for(&state);
     let static_ent = cache
         .entities
-        .values()
+        .iter()
         .find(|e| e.is_static())
         .expect("seed 42 should have at least one static planet");
     let first = static_ent.positions[0];
@@ -37,13 +37,12 @@ fn orbiting_planet_matches_engine_after_n_turns() {
     let cache = cache_for(&state);
     let orb_id = cache
         .entities
-        .values()
+        .iter()
         .find(|e| matches!(e.kind, EntityKind::OrbitingPlanet))
         .map(|e| e.id)
         .expect("seed 42 should have at least one orbiting planet");
 
-    let noop: Vec<Vec<crate::engine::MoveAction>> =
-        vec![Vec::new(), Vec::new()];
+    let noop: Vec<Vec<crate::engine::MoveAction>> = vec![Vec::new(), Vec::new()];
     for _ in 0..25 {
         state.step_with_actions(&noop).unwrap();
     }
@@ -94,21 +93,27 @@ fn comet_remaining_life_matches_linear_scan() {
         state.step_with_actions(&noop).unwrap();
         guard += 1;
     }
-    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+    assert!(
+        !state.comet_planet_ids.is_empty(),
+        "expected comets to spawn"
+    );
 
     let mut cache = cache_for(&state);
     let comet_ids: Vec<i64> = cache
         .entities
-        .values()
+        .iter()
         .filter(|e| e.is_comet())
         .map(|e| e.id)
         .collect();
-    assert!(!comet_ids.is_empty(), "cache should hold the spawned comets");
+    assert!(
+        !comet_ids.is_empty(),
+        "cache should hold the spawned comets"
+    );
 
     for current in 0..EPISODE_STEPS {
         cache.set_current_turn(current);
         for &id in &comet_ids {
-            let want = reference(&cache.entities[&id].positions, current);
+            let want = reference(&cache.get(id).unwrap().positions, current);
             let got = cache.remaining_life(id);
             assert_eq!(got, want, "comet {id} at current_turn {current}");
         }
@@ -202,7 +207,10 @@ fn assert_sibling_aim_matches(cache: &EntityCache, ids: &[i64], ships_grid: &[i6
             }
         }
     }
-    assert!(checked > 0, "expected at least one sibling pair to be checked");
+    assert!(
+        checked > 0,
+        "expected at least one sibling pair to be checked"
+    );
 }
 
 /// Planet quartets: the rotated sibling stored on `aim_cache_store` matches a
@@ -216,8 +224,8 @@ fn quartet_aim_siblings_match_direct_solve() {
         let cache = cache_for(&state);
         let mut ids: Vec<i64> = cache
             .entities
-            .keys()
-            .copied()
+            .iter()
+            .map(|e| e.id)
             .filter(|&id| cache.position(id, 0).is_some())
             .collect();
         ids.sort();
@@ -239,22 +247,29 @@ fn quartet_aim_siblings_match_direct_solve_with_comets() {
         state.step_with_actions(&noop).unwrap();
         guard += 1;
     }
-    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+    assert!(
+        !state.comet_planet_ids.is_empty(),
+        "expected comets to spawn"
+    );
 
     let cache = cache_for(&state);
     let comet_ids: std::collections::HashSet<i64> =
         state.comet_planet_ids.iter().copied().collect();
     let mut ids: Vec<i64> = cache
         .entities
-        .keys()
-        .copied()
+        .iter()
+        .map(|e| e.id)
         .filter(|&id| cache.position(id, 0).is_some())
         .collect();
     ids.sort();
 
     // Keep the case set focused on comet-involving pairs (comet ↔ comet and
     // comet ↔ planet) while still exercising the shared rotation machinery.
-    let comet_list: Vec<i64> = ids.iter().copied().filter(|id| comet_ids.contains(id)).collect();
+    let comet_list: Vec<i64> = ids
+        .iter()
+        .copied()
+        .filter(|id| comet_ids.contains(id))
+        .collect();
     assert!(!comet_list.is_empty(), "cache should hold spawned comets");
 
     let mut checked = 0usize;
@@ -281,12 +296,18 @@ fn quartet_aim_siblings_match_direct_solve_with_comets() {
                         (None, None) => {}
                         (Some(c), Some(f)) => {
                             assert_eq!(c.1, f.1, "turns for comet sibling k={k}");
-                            assert!(wrap_pi(c.0 - f.0).abs() < 1e-6, "angle for comet sibling k={k}");
+                            assert!(
+                                wrap_pi(c.0 - f.0).abs() < 1e-6,
+                                "angle for comet sibling k={k}"
+                            );
                             assert!(
                                 (c.2 - f.2).abs() < 1e-6 && (c.3 - f.3).abs() < 1e-6,
                                 "point for comet sibling k={k}"
                             );
-                            assert!((c.4 - f.4).abs() < 1e-6, "flight_time for comet sibling k={k}");
+                            assert!(
+                                (c.4 - f.4).abs() < 1e-6,
+                                "flight_time for comet sibling k={k}"
+                            );
                         }
                         (c, f) => panic!(
                             "feasibility mismatch comet sibling ({sib_src},{sib_target}) k={k}: \
@@ -306,11 +327,19 @@ fn quartet_aim_siblings_match_direct_solve_with_comets() {
 /// Compare two aim results to floating tolerance (bearing wrapped).
 fn assert_aim_eq(a: crate::entity_cache::AimResult, b: crate::entity_cache::AimResult, ctx: &str) {
     assert_eq!(a.1, b.1, "turns mismatch ({ctx})");
-    assert!(wrap_pi(a.0 - b.0).abs() < 1e-6, "angle mismatch ({ctx}): {} vs {}", a.0, b.0);
+    assert!(
+        wrap_pi(a.0 - b.0).abs() < 1e-6,
+        "angle mismatch ({ctx}): {} vs {}",
+        a.0,
+        b.0
+    );
     assert!(
         (a.2 - b.2).abs() < 1e-6 && (a.3 - b.3).abs() < 1e-6,
         "point mismatch ({ctx}): ({},{}) vs ({},{})",
-        a.2, a.3, b.2, b.3
+        a.2,
+        a.3,
+        b.2,
+        b.3
     );
     assert!((a.4 - b.4).abs() < 1e-6, "flight_time mismatch ({ctx})");
 }
@@ -323,7 +352,7 @@ fn aim_ignoring_comets_matches_full_solve_without_comets() {
     let state = RefEngine::new(42, 2, Configuration::default());
     let mut cache = cache_for(&state);
     assert!(cache.comet_ids.is_empty(), "seed 42 starts with no comets");
-    let mut ids: Vec<i64> = cache.entities.keys().copied().collect();
+    let mut ids: Vec<i64> = cache.entities.iter().map(|e| e.id).collect();
     ids.sort();
     let ships_grid = [5i64, 50, 500];
 
@@ -373,7 +402,7 @@ fn invariant_aim_matches_direct_solve_across_turns() {
         let mut cache = cache_for(&state);
         let mut ids: Vec<i64> = cache
             .entities
-            .values()
+            .iter()
             .filter(|e| !e.is_comet())
             .map(|e| e.id)
             .collect();
@@ -413,7 +442,11 @@ fn invariant_aim_matches_direct_solve_across_turns() {
                         let fresh = aim_with_prediction(&cache, src, target, ships, 0).expect(
                             "invariant returned Use but fresh solve says None — feasibility drift",
                         );
-                        assert_aim_eq(inv, fresh, &format!("seed={seed} t={t} {src}->{target} s={ships}"));
+                        assert_aim_eq(
+                            inv,
+                            fresh,
+                            &format!("seed={seed} t={t} {src}->{target} s={ships}"),
+                        );
                         checked += 1;
                         // Detect a cone-scanned (nudged) carry: bearing no longer
                         // points straight at the intercept point. With no comets,
@@ -429,7 +462,10 @@ fn invariant_aim_matches_direct_solve_across_turns() {
                 }
             }
         }
-        assert!(checked > 0, "seed {seed}: expected at least one invariant hit");
+        assert!(
+            checked > 0,
+            "seed {seed}: expected at least one invariant hit"
+        );
     }
     assert!(
         nudged_carries > 0,
@@ -450,14 +486,17 @@ fn invariant_aim_sound_with_comets_present() {
         state.step_with_actions(&noop).unwrap();
         guard += 1;
     }
-    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+    assert!(
+        !state.comet_planet_ids.is_empty(),
+        "expected comets to spawn"
+    );
 
     let mut cache = cache_for(&state);
     let comet_ids: std::collections::HashSet<i64> =
         state.comet_planet_ids.iter().copied().collect();
     let mut ids: Vec<i64> = cache
         .entities
-        .values()
+        .iter()
         .filter(|e| !e.is_comet())
         .map(|e| e.id)
         .collect();
@@ -495,7 +534,11 @@ fn invariant_aim_sound_with_comets_present() {
                     // full solve (sun+planets+comets) must agree.
                     let fresh = aim_with_prediction(&cache, src, target, ships, 0)
                         .expect("invariant Use but fresh None with comets present");
-                    assert_aim_eq(inv, fresh, &format!("comets t={} {src}->{target} s={ships}", base_turn + dt));
+                    assert_aim_eq(
+                        inv,
+                        fresh,
+                        &format!("comets t={} {src}->{target} s={ships}", base_turn + dt),
+                    );
                 }
             }
         }

@@ -5,7 +5,8 @@
 #![allow(dead_code)]
 
 use std::f64::consts::FRAC_PI_2;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -80,8 +81,8 @@ pub enum InvariantVerdict {
     /// Not invariant-cacheable this turn (mixed kinds, disqualified, or a comet
     /// gates the carried base): solve normally with [`crate::blockers::aim_with_prediction`].
     SingleSolve,
-    /// Unknown (cache miss) and potentially cacheable: solve with
-    /// [`crate::blockers::aim_solve`] and feed `comet_free` to
+    /// Unknown (cache miss) and potentially cacheable: solve the comet-free base
+    /// with [`crate::blockers::aim_ignoring_comets`] and feed it to
     /// [`EntityCache::invariant_aim_store`] to populate the entry.
     DualSolve,
 }
@@ -107,19 +108,13 @@ pub struct Entity {
     pub id: i64,
     pub kind: EntityKind,
     pub radius: f64,
-    pub orbital_radius: f64,                // 0.0 for comets since they don't orbit sun
-    pub positions: Vec<Option<[f64; 2]>>,   // Pre-computed positions, or None if not on board (comets)
+    pub orbital_radius: f64, // 0.0 for comets since they don't orbit sun
+    pub positions: Vec<Option<[f64; 2]>>, // Pre-computed positions, or None if not on board (comets)
     /// First absolute turn at which the entity is off the board, precomputed at
     /// build time so [`EntityCache::remaining_life`] is O(1). Comet paths are a
     /// single contiguous on-board window, so this is `last_on_board + 1`
     /// (clamped to `EPISODE_STEPS`). Planets never leave: `EPISODE_STEPS`.
     pub(crate) off_board_turn: i64,
-    /// First absolute turn at which the entity is on the board. For comets this
-    /// is the start of the single contiguous on-board window; planets are on
-    /// board from turn 0. Lets [`crate::blockers::comet_blocks_path`] clamp its
-    /// per-turn sweep to exactly the comet's live turns instead of scanning the
-    /// whole flight window (mostly `None` for a 5–40-turn comet).
-    pub(crate) on_board_turn: i64,
     /// Capsule approximation of the on-board arc as `[ax, ay, bx, by]`: the chord
     /// from the first to the last on-board position. Together with [`Self::bulge`]
     /// it lets [`crate::blockers::comet_blocks_path`] reject, in O(1) with no
@@ -163,7 +158,14 @@ impl Entity {
 pub struct EntityCache {
     pub current_turn: i64,
     pub angular_velocity: f64,
-    pub entities: HashMap<i64, Entity>,
+    /// Obstacles in a contiguous `Vec` so the hot per-obstacle scans
+    /// ([`crate::blockers::blocked_on_path`] / `cone_clear_impossible`) iterate
+    /// cache-locally over the inline scalar fields instead of chasing `HashMap`
+    /// buckets. Id lookups go through [`Self::id_to_idx`].
+    pub(crate) entities: Vec<Entity>,
+    /// `entity id → index into [`Self::entities`]`. Rebuilt on build /
+    /// [`Self::refresh_comets`] (≤44 entries, so rebuilding is trivial).
+    id_to_idx: HashMap<i64, usize>,
     /// Per-turn aim cache. `aim_cache[abs_launch_turn]` maps
     /// `(src, target, ships)` to a cached aim result. Indexed by the
     /// **absolute launch turn** (= `current_turn + launch_turn_offset` at
@@ -198,20 +200,19 @@ impl EntityCache {
         angular_velocity: f64,
         current_step: i64,
     ) -> Self {
-        let comet_ids: HashSet<i64> = comet_planet_ids.iter().copied().collect();
-        let mut entities =
-            HashMap::with_capacity_and_hasher(initial_planets.len(), Default::default());
+        let comet_set: HashSet<i64> = comet_planet_ids.iter().copied().collect();
+        let mut entities: Vec<Entity> = Vec::with_capacity(initial_planets.len());
 
         for ip in initial_planets {
-            if comet_ids.contains(&ip.id) {
+            if comet_set.contains(&ip.id) {
                 continue;
             }
-            entities.insert(ip.id, build_planet_entity(ip, angular_velocity));
+            entities.push(build_planet_entity(ip, angular_velocity));
         }
 
         for group in comets {
             for (idx, &pid) in group.planet_ids.iter().enumerate() {
-                entities.insert(pid, build_comet_entity(pid, group, idx, current_step));
+                entities.push(build_comet_entity(pid, group, idx, current_step));
             }
         }
 
@@ -220,21 +221,27 @@ impl EntityCache {
         // Tightest inner reach of any static planet body. Static planets never
         // move, so this is fixed for the whole game (comets are never static).
         let static_inner_limit = entities
-            .values()
+            .iter()
             .filter(|e| e.is_static())
             .map(|e| e.orbital_radius - e.radius)
             .fold(f64::INFINITY, f64::min);
 
         let comet_ids = entities
-            .values()
+            .iter()
             .filter(|e| e.is_comet())
             .map(|e| e.id)
+            .collect();
+        let id_to_idx = entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.id, i))
             .collect();
 
         Self {
             current_turn: current_step,
             angular_velocity,
             entities,
+            id_to_idx,
             aim_cache: Mutex::new(aim_cache),
             invariant_aim: Mutex::new(HashMap::default()),
             static_inner_limit,
@@ -249,22 +256,33 @@ impl EntityCache {
         comet_planet_ids: &[i64],
         current_step: i64,
     ) {
-        let comet_ids: HashSet<i64> = comet_planet_ids.iter().copied().collect();
+        let comet_set: HashSet<i64> = comet_planet_ids.iter().copied().collect();
 
+        // Drop expired comets (preserves order, keeps planets and live comets).
         self.entities
-            .retain(|id, ent| !ent.is_comet() || comet_ids.contains(id));
+            .retain(|ent| !ent.is_comet() || comet_set.contains(&ent.id));
 
+        // Append newly-spawned comets not already present. Existing comets keep
+        // their precomputed positions (they were retained, not rebuilt).
+        let mut present: HashSet<i64> = self.entities.iter().map(|e| e.id).collect();
         for group in comets {
             for (idx, &pid) in group.planet_ids.iter().enumerate() {
-                self.entities
-                    .entry(pid)
-                    .or_insert_with(|| build_comet_entity(pid, group, idx, current_step));
+                if present.insert(pid) {
+                    self.entities
+                        .push(build_comet_entity(pid, group, idx, current_step));
+                }
             }
         }
 
+        self.id_to_idx = self
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.id, i))
+            .collect();
         self.comet_ids = self
             .entities
-            .values()
+            .iter()
             .filter(|e| e.is_comet())
             .map(|e| e.id)
             .collect();
@@ -277,7 +295,7 @@ impl EntityCache {
 
     #[inline]
     pub fn get(&self, id: i64) -> Option<&Entity> {
-        self.entities.get(&id)
+        self.entities.get(*self.id_to_idx.get(&id)?)
     }
 
     /// Look up a cached aim result for a shot launching at
@@ -304,7 +322,7 @@ impl EntityCache {
         let key = (src, target, ships);
 
         let entry = {
-            let map = self.aim_cache.lock().unwrap();
+            let map = self.aim_cache.lock();
             match map[slot].get(&key) {
                 None => return AimCacheVerdict::Miss,
                 Some(e) => *e,
@@ -327,7 +345,7 @@ impl EntityCache {
                     flight_time,
                     launch_turn_offset,
                 ) {
-                    self.aim_cache.lock().unwrap()[slot].insert(
+                    self.aim_cache.lock()[slot].insert(
                         key,
                         CachedAim {
                             result: Some(result),
@@ -336,7 +354,7 @@ impl EntityCache {
                     );
                     AimCacheVerdict::Hit(Some(result))
                 } else {
-                    self.aim_cache.lock().unwrap()[slot].remove(&key);
+                    self.aim_cache.lock()[slot].remove(&key);
                     AimCacheVerdict::Stale
                 }
             }
@@ -371,7 +389,7 @@ impl EntityCache {
             return;
         }
         let slot = abs_launch as usize;
-        let mut map = self.aim_cache.lock().unwrap();
+        let mut map = self.aim_cache.lock();
 
         // Original entry (always stored, preserving prior behavior).
         map[slot].insert(
@@ -387,9 +405,7 @@ impl EntityCache {
         for k in 1..=3 {
             let sib_src = rot_sibling(src, k);
             let sib_target = rot_sibling(target, k);
-            if !self.entities.contains_key(&sib_src)
-                || !self.entities.contains_key(&sib_target)
-            {
+            if !self.id_to_idx.contains_key(&sib_src) || !self.id_to_idx.contains_key(&sib_target) {
                 continue;
             }
             map[slot].insert(
@@ -412,8 +428,8 @@ impl EntityCache {
     ///     kinds, a recorded disqualification, or a comet gates the base): solve
     ///     once with `aim_with_prediction`.
     ///   * [`InvariantVerdict::DualSolve`] — cache miss for a potentially
-    ///     cacheable pair: solve with `aim_solve` and feed `comet_free` to
-    ///     [`Self::invariant_aim_store`].
+    ///     cacheable pair: solve the comet-free base with `aim_ignoring_comets`
+    ///     and feed it to [`Self::invariant_aim_store`].
     ///
     /// See [`InvariantMode`] for the carry rules. Composes with the per-turn
     /// `aim_cache`: callers consult that first and only reach here on a miss.
@@ -439,7 +455,7 @@ impl EntityCache {
         }
 
         let entry = {
-            let map = self.invariant_aim.lock().unwrap();
+            let map = self.invariant_aim.lock();
             match map.get(&(src, target, ships)) {
                 None => return InvariantVerdict::DualSolve,
                 Some(e) => *e,
@@ -470,7 +486,7 @@ impl EntityCache {
     }
 
     /// Populate the invariant entry for `(src, target, ships)` from a
-    /// [`crate::blockers::aim_solve`] result's `comet_free` base (the shot clear
+    /// [`crate::blockers::aim_ignoring_comets`] `comet_free` base (the shot clear
     /// of sun + planets only). A comet-dodging nudge is turn-specific and would
     /// not reproduce, so the comet-free base — not the with-comet `actual` — is
     /// what carries: a nudge around the sun / a fixed (static) or rigidly
@@ -496,7 +512,10 @@ impl EntityCache {
         if abs_launch < 1 || abs_launch >= EPISODE_STEPS {
             return;
         }
-        let mode = match (self.get(src).map(|e| e.kind), self.get(target).map(|e| e.kind)) {
+        let mode = match (
+            self.get(src).map(|e| e.kind),
+            self.get(target).map(|e| e.kind),
+        ) {
             (Some(EntityKind::StaticPlanet), Some(EntityKind::StaticPlanet)) => {
                 InvariantMode::StaticFixed
             }
@@ -506,7 +525,7 @@ impl EntityCache {
             _ => return,
         };
 
-        let mut map = self.invariant_aim.lock().unwrap();
+        let mut map = self.invariant_aim.lock();
         // No comet-free shot, or out of disc ⇒ permanent disqualification.
         let res = match comet_free {
             Some(r) if self.path_disc_qualified(src, ships, launch_turn_offset, &r, mode) => r,
@@ -519,7 +538,7 @@ impl EntityCache {
         for k in 0..=3 {
             let sib_src = rot_sibling(src, k);
             let sib_target = rot_sibling(target, k);
-            if !self.entities.contains_key(&sib_src) || !self.entities.contains_key(&sib_target) {
+            if !self.id_to_idx.contains_key(&sib_src) || !self.id_to_idx.contains_key(&sib_target) {
                 continue;
             }
             let Some(base) = rotate_aim_result(Some(res), k) else {
@@ -540,9 +559,17 @@ impl EntityCache {
     /// (static→static or orbiting→orbiting). Comets and mixed pairs are not.
     fn same_invariant_kind(&self, src: i64, target: i64) -> bool {
         matches!(
-            (self.get(src).map(|e| e.kind), self.get(target).map(|e| e.kind)),
-            (Some(EntityKind::StaticPlanet), Some(EntityKind::StaticPlanet))
-                | (Some(EntityKind::OrbitingPlanet), Some(EntityKind::OrbitingPlanet))
+            (
+                self.get(src).map(|e| e.kind),
+                self.get(target).map(|e| e.kind)
+            ),
+            (
+                Some(EntityKind::StaticPlanet),
+                Some(EntityKind::StaticPlanet)
+            ) | (
+                Some(EntityKind::OrbitingPlanet),
+                Some(EntityKind::OrbitingPlanet)
+            )
         )
     }
 
@@ -592,14 +619,14 @@ impl EntityCache {
         if turn < 0 || (turn as usize) >= EPISODE_STEPS as usize {
             return;
         }
-        if let Some(slot) = self.aim_cache.get_mut().unwrap().get_mut(turn as usize) {
+        if let Some(slot) = self.aim_cache.get_mut().get_mut(turn as usize) {
             slot.clear();
         }
     }
 
     #[inline]
     pub fn position(&self, id: i64, turns_ahead: i64) -> Option<[f64; 2]> {
-        let entity = self.entities.get(&id)?;
+        let entity = self.get(id)?;
         let abs = self.current_turn + turns_ahead;
         if abs < 0 || abs >= EPISODE_STEPS {
             return None;
@@ -618,7 +645,7 @@ impl EntityCache {
         if abs_step < 0 || abs_step >= EPISODE_STEPS {
             return None;
         }
-        self.entities.get(&id)?.positions[abs_step as usize]
+        self.get(id)?.positions[abs_step as usize]
     }
 
     /// Turns remaining until `id` leaves the board (for comets) or game end (for
@@ -626,7 +653,7 @@ impl EntityCache {
     /// `off_board_turn`; returns 0 for a comet not currently on the board
     /// (already gone, or not yet spawned).
     pub fn remaining_life(&self, id: i64) -> i64 {
-        let Some(entity) = self.entities.get(&id) else {
+        let Some(entity) = self.get(id) else {
             return 0;
         };
         if !entity.is_comet() {
@@ -695,7 +722,13 @@ fn rot_point(x: f64, y: f64, k: i64) -> (f64, f64) {
 fn rotate_aim_result(result: Option<AimResult>, k: i64) -> Option<AimResult> {
     result.map(|(angle, turns, tx, ty, flight_time)| {
         let (rx, ry) = rot_point(tx, ty, k);
-        (angle + (k & 3) as f64 * FRAC_PI_2, turns, rx, ry, flight_time)
+        (
+            angle + (k & 3) as f64 * FRAC_PI_2,
+            turns,
+            rx,
+            ry,
+            flight_time,
+        )
     })
 }
 
@@ -771,21 +804,19 @@ fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {
         orbital_radius,
         positions,
         off_board_turn: EPISODE_STEPS, // planets stay on the board all game
-        on_board_turn: 0,
         // Planets never feed the comet gate; `INFINITY` bulge never rejects.
         chord: [0.0; 4],
         bulge: f64::INFINITY,
         // Static: fixed. Orbiter: per-turn chord 2·R·sin(ω/2) ≤ R·ω.
-        max_step: if is_static { 0.0 } else { angular_velocity * orbital_radius },
+        max_step: if is_static {
+            0.0
+        } else {
+            angular_velocity * orbital_radius
+        },
     }
 }
 
-fn build_comet_entity(
-    pid: i64,
-    group: &CometGroup,
-    idx: usize,
-    current_step: i64,
-) -> Entity {
+fn build_comet_entity(pid: i64, group: &CometGroup, idx: usize, current_step: i64) -> Entity {
     let cap = EPISODE_STEPS as usize;
     let mut positions = vec![None; cap];
 
@@ -812,7 +843,6 @@ fn build_comet_entity(
     } else {
         (last_on_board + 1).min(EPISODE_STEPS)
     };
-    let on_board_turn = first_on_board.max(0);
 
     // Capsule bound: chord from the first to last on-board point, plus the max
     // perpendicular deviation of the arc from it. Tight even for a long diagonal
@@ -860,7 +890,6 @@ fn build_comet_entity(
         orbital_radius: 0.0,
         positions,
         off_board_turn,
-        on_board_turn,
         chord,
         bulge,
         max_step,

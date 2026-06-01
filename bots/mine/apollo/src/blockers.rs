@@ -13,8 +13,47 @@
 
 use std::f64::consts::FRAC_PI_2;
 
+/// TEMP instrumentation: counts how often each aim hot-path stage runs.
+pub mod counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static AIM_SOLVE: AtomicU64 = AtomicU64::new(0);
+    pub static CONE_SCAN: AtomicU64 = AtomicU64::new(0);
+    pub static BLOCKED_ON_PATH: AtomicU64 = AtomicU64::new(0);
+    pub static L1_HIT: AtomicU64 = AtomicU64::new(0);
+    pub static L2_HIT: AtomicU64 = AtomicU64::new(0);
+    pub static L2_MISS: AtomicU64 = AtomicU64::new(0);
+    pub static L2_STALE: AtomicU64 = AtomicU64::new(0);
+    pub static L3_USE: AtomicU64 = AtomicU64::new(0);
+    pub static L3_SINGLE: AtomicU64 = AtomicU64::new(0);
+    pub static L3_DUAL: AtomicU64 = AtomicU64::new(0);
+    #[inline]
+    pub fn bump(c: &AtomicU64) {
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn add(c: &AtomicU64, n: u64) {
+        c.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn reset() {
+        for c in [
+            &AIM_SOLVE, &CONE_SCAN, &BLOCKED_ON_PATH, &L1_HIT, &L2_HIT, &L2_MISS, &L2_STALE,
+            &L3_USE, &L3_SINGLE, &L3_DUAL,
+        ] {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+    pub fn report() -> String {
+        let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        format!(
+            "AIM_SOLVE={} CONE_SCAN={} BLOCKED_ON_PATH={} | L1_HIT={} L2_HIT={} L2_MISS={} L2_STALE={} | L3_USE={} L3_SINGLE={} L3_DUAL={}",
+            g(&AIM_SOLVE), g(&CONE_SCAN), g(&BLOCKED_ON_PATH), g(&L1_HIT),
+            g(&L2_HIT), g(&L2_MISS), g(&L2_STALE), g(&L3_USE), g(&L3_SINGLE), g(&L3_DUAL),
+        )
+    }
+}
+
 use crate::constants::{
-    CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, SUN_RADIUS, NUDGE_SCAN
+    CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, NUDGE_SCAN, SUN_RADIUS,
 };
 use crate::engine::fleet_speed;
 use crate::entity_cache::{Entity, EntityCache};
@@ -186,17 +225,22 @@ pub fn lead_target(
         return None;
     }
 
-    // Seed: lower bound on the earliest feasible arrival turn. The stationary
-    // assumption (`seed_d / v`) is only valid if the target isn't *closing* on
-    // the shooter — but an orbiting target at ROTATION_LIMIT (~50) with max
-    // ω (0.05) can approach at up to ω·r ≈ 2.5 units/turn, on top of the
-    // fleet's own outward speed. Using just `v` as the closing rate skips
-    // past the actual intercept turn for slow fleets vs approaching orbiters
-    // — a real bug that caused valid shots to be silently rejected (None
-    // returned, no fleet fired). max_lookahead is bounded by HORIZON=30, so
-    // it's cheap to just start at turn 1.
-    let start: i64 = 1;
-    let [_seed_x, _seed_y] = cache.position(target_id, launch_turn_offset)?;
+    // Sound lower bound on the earliest feasible arrival turn. The fleet's far
+    // radius at turn `t` is `launch_offset + t·v`, and the target's distance from
+    // launch is always ≥ `k_min` — the closest any point of its circular orbit
+    // gets to `L` (`|dist(L, center) − orbital_radius|`). A comet's path is not a
+    // fixed-radius circle, so it gets `k_min = 0` (no skip). Intercept needs
+    // `launch_offset + t·v + tr ≥ k_min`, so earlier turns are provably out of
+    // reach — start the (identical) scan there. This *under*-skips, the safe
+    // direction: unlike the old `seed_d / v` guess it can never step past a
+    // closing orbiter's true intercept turn (the bug that silently dropped shots).
+    let dlc = ((lx - CENTER).powi(2) + (ly - CENTER).powi(2)).sqrt();
+    let k_min = if target.is_comet() {
+        0.0
+    } else {
+        (dlc - target.orbital_radius).abs()
+    };
+    let start = (((k_min - tr - launch_offset) / v).ceil() as i64).max(1);
 
     for t in start..=max_lookahead {
         let [q0x, q0y] = cache.position(target_id, launch_turn_offset + t - 1)?;
@@ -240,8 +284,14 @@ pub fn lead_target(
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn segment_contact_s(
-    ax: f64, ay: f64, bx: f64, by: f64,
-    p0x: f64, p0y: f64, p1x: f64, p1y: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    p0x: f64,
+    p0y: f64,
+    p1x: f64,
+    p1y: f64,
     r: f64,
 ) -> Option<f64> {
     let d0x = ax - p0x;
@@ -275,8 +325,14 @@ fn segment_contact_s(
 /// result an exact lower bound on the true segment separation.
 #[allow(clippy::too_many_arguments)]
 fn segment_segment_dist_sq(
-    p1x: f64, p1y: f64, q1x: f64, q1y: f64,
-    p2x: f64, p2y: f64, q2x: f64, q2y: f64,
+    p1x: f64,
+    p1y: f64,
+    q1x: f64,
+    q1y: f64,
+    p2x: f64,
+    p2y: f64,
+    q2x: f64,
+    q2y: f64,
 ) -> f64 {
     let d1x = q1x - p1x;
     let d1y = q1y - p1y;
@@ -349,25 +405,15 @@ pub fn shot_blocked_exact(
     launch_turn_offset: i64,
 ) -> bool {
     blocked_on_path(
-        cache, shooter_id, target_id, angle, flight_time, v, launch_turn_offset, true, |_| true,
-    )
-}
-
-/// Comet-free variant of [`shot_blocked_exact`]: tests the sun and every planet
-/// but **no comets**. Used to compute the turn-invariant aim base (see
-/// [`aim_ignoring_comets`]).
-fn shot_blocked_no_comets(
-    cache: &EntityCache,
-    shooter_id: i64,
-    target_id: i64,
-    angle: f64,
-    flight_time: f64,
-    v: f64,
-    launch_turn_offset: i64,
-) -> bool {
-    blocked_on_path(
-        cache, shooter_id, target_id, angle, flight_time, v, launch_turn_offset, true,
-        |ent| !ent.is_comet(),
+        cache,
+        shooter_id,
+        target_id,
+        angle,
+        flight_time,
+        v,
+        launch_turn_offset,
+        true,
+        |_| true,
     )
 }
 
@@ -427,17 +473,19 @@ pub fn comet_blocks_path(
             continue;
         }
 
-        // Clamp the sweep to the comet's contiguous on-board window: both
-        // endpoints (`abs1-1`, `abs1`) must be live, so `abs1` ranges over
-        // `[on_board+1, off_board-1]`. Empty range ⇒ no overlap ⇒ comet skipped.
+        // Sweep from the launch turn (`t = 1`) up to the comet's last on-board
+        // turn. The lower end needs no `on_board` clamp: a comet is only ever in
+        // the cache once it is on the board, and launches are never in the past,
+        // so the comet is always present from the launch turn onward — only its
+        // `off_board_turn` edge can fall inside the flight. Empty range (already
+        // expired) ⇒ comet skipped.
         let positions = &ent.positions;
-        let lo = (ent.on_board_turn + 1 - abs_base).max(1);
         let hi = (ent.off_board_turn - 1 - abs_base).min(max_turn);
-        for t in lo..=hi {
-            // `lo`/`hi` bracket `t` so both endpoints land inside the comet's
-            // contiguous on-board span `[on_board_turn, off_board_turn - 1]`, so
-            // both indices are in range and `Some` — unwrap encodes that, and a
-            // future regression panics here instead of silently missing a block.
+        for t in 1..=hi {
+            // `t ≥ 1` ⇒ slot ≥ `abs_base` ≥ on-board; `hi` caps the far end at
+            // `off_board_turn - 1`. Both endpoints are thus inside the comet's
+            // on-board span and `Some` — unwrap encodes that, and a future
+            // regression panics here instead of silently missing a block.
             let p0 = positions[(abs_base + t - 1) as usize].expect("on-board by clamp");
             let p1 = positions[(abs_base + t) as usize].expect("on-board by clamp");
             let d_start = launch_offset + (t as f64 - 1.0) * v;
@@ -456,8 +504,8 @@ pub fn comet_blocks_path(
     false
 }
 
-/// Shared swept-path obstacle test backing [`shot_blocked_exact`] and
-/// [`shot_blocked_no_comets`]. `include_sun` toggles the board-center sun test;
+/// Shared swept-path obstacle test backing [`shot_blocked_exact`] and the
+/// [`aim_with_blocker`] scans. `include_sun` toggles the board-center sun test;
 /// `consider` selects which entities participate (the target is always skipped).
 /// Returns `true` iff a selected obstacle is struck at or before `flight_time`.
 #[allow(clippy::too_many_arguments)]
@@ -472,6 +520,7 @@ fn blocked_on_path(
     include_sun: bool,
     mut consider: impl FnMut(&Entity) -> bool,
 ) -> bool {
+    // counters::bump(&counters::BLOCKED_ON_PATH);
     let Some([lx, ly]) = cache.position(shooter_id, launch_turn_offset) else {
         return false;
     };
@@ -542,29 +591,16 @@ fn blocked_on_path(
         }
     };
 
-    // Sun: static disk at board center.
-    if include_sun && static_hit(CENTER, CENTER, SUN_RADIUS) {
-        return true;
-    }
-
-    // Planets and comets (including the source — see above).
+    // Per-obstacle swept test. Returns `true` iff `ent` is struck by arrival.
     let abs_base = cache.current_turn + launch_turn_offset;
-    for (&bid, ent) in cache.entities.iter() {
-        if bid == target_id || !consider(ent) {
-            continue;
-        }
+    let entity_blocks = |ent: &Entity| -> bool {
         let r = ent.radius;
 
         // Static planets don't move: their disk is fixed across the whole flight
         // window, so one segment test suffices instead of the per-turn loop.
         if ent.is_static() {
             let idx = abs_base.clamp(0, EPISODE_STEPS - 1) as usize;
-            if let Some(Some(p)) = ent.positions.get(idx) {
-                if static_hit(p[0], p[1], r) {
-                    return true;
-                }
-            }
-            continue;
+            return matches!(ent.positions.get(idx), Some(Some(p)) if static_hit(p[0], p[1], r));
         }
 
         // Orbiting planet: annulus reject. Its center is always `orbital_radius`
@@ -575,19 +611,21 @@ fn blocked_on_path(
         if !ent.is_comet() {
             let orb = ent.orbital_radius;
             if orb + r < ray_d_min || orb - r > ray_d_max {
-                continue;
+                return false;
             }
         }
 
-        // Moving obstacle (orbiter or comet). Clamp to the contiguous on-board
-        // window so both endpoints are `Some` (orbiters: the whole flight;
-        // comets: only their live turns) — `on_board_turn`/`off_board_turn`
-        // bracket it, and also subsume the old `abs0 ≥ 0` / in-bounds guards.
+        // Moving obstacle (orbiter or comet). Sweep from the launch turn up to
+        // `off_board_turn`, so both endpoints are `Some` (orbiters are on the
+        // whole game; a comet is only ever cached once on board, and launches
+        // are never in the past, so it's present from `t = 1` onward — only its
+        // `off_board_turn` edge can fall inside the flight). This also subsumes
+        // the old `abs0 ≥ 0` / in-bounds guards.
         let positions = &ent.positions;
-        let lo_t = (ent.on_board_turn + 1 - abs_base).max(1);
+        let lo_t = 1;
         let hi_t = (ent.off_board_turn - 1 - abs_base).min(max_turn);
         if lo_t > hi_t {
-            continue;
+            return false;
         }
 
         // Distance from launch to the obstacle at the *start* of turn `t` (its
@@ -646,8 +684,19 @@ fn blocked_on_path(
                 }
             }
         }
+        false
+    };
+
+    // Sun: static disk at board center.
+    if include_sun && static_hit(CENTER, CENTER, SUN_RADIUS) {
+        return true;
     }
-    false
+
+    // Planets and comets (including the source — see above).
+    cache
+        .entities
+        .iter()
+        .any(|ent| ent.id != target_id && consider(ent) && entity_blocks(ent))
 }
 
 /// Wrap `a` into `(-π, π]`.
@@ -703,8 +752,8 @@ fn cone_clear_impossible(
     add(CENTER, CENTER, SUN_RADIUS);
     let abs = cache.current_turn + launch_turn_offset;
     if abs >= 0 {
-        for (&bid, ent) in cache.entities.iter() {
-            if bid == target_id || !ent.is_static() {
+        for ent in cache.entities.iter() {
+            if ent.id == target_id || !ent.is_static() {
                 continue;
             }
             if let Some(Some(p)) = ent.positions.get(abs as usize) {
@@ -747,9 +796,7 @@ pub fn aim_with_prediction(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    aim_with_blocker(
-        cache, shooter_id, target_id, ships, launch_turn_offset, shot_blocked_exact,
-    )
+    aim_with_blocker(cache, shooter_id, target_id, ships, launch_turn_offset, true)
 }
 
 /// Comet-free aim: identical to [`aim_with_prediction`] but treats the board as
@@ -767,33 +814,38 @@ pub fn aim_ignoring_comets(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    aim_with_blocker(
-        cache, shooter_id, target_id, ships, launch_turn_offset, shot_blocked_no_comets,
-    )
+    aim_with_blocker(cache, shooter_id, target_id, ships, launch_turn_offset, false)
 }
 
-/// Shared aim core, generic over the per-angle blocker test `blocked` so each
-/// caller is monomorphized to a tight loop (no closure/branch overhead on the
-/// hot `aim_with_prediction` path). `blocked(cache, src, target, angle,
-/// flight_time, v, offset) -> bool`.
-fn aim_with_blocker<B>(
+/// Shared aim core. `include_comets` selects the obstacle set (sun + planets +
+/// comets for [`aim_with_prediction`], sun + planets only for
+/// [`aim_ignoring_comets`]).
+fn aim_with_blocker(
     cache: &EntityCache,
     shooter_id: i64,
     target_id: i64,
     ships: i64,
     launch_turn_offset: i64,
-    blocked: B,
-) -> Option<AimResult>
-where
-    B: Fn(&EntityCache, i64, i64, f64, f64, f64, i64) -> bool,
-{
+    include_comets: bool,
+) -> Option<AimResult> {
+    // counters::bump(&counters::AIM_SOLVE);
     // Lead the target at the exact engine speed so (angle, turns) land on the
     // actual orbital intercept point.
     let v_true = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
     let (angle, turns, tx, ty, flight_time) =
         lead_target(cache, shooter_id, target_id, launch_turn_offset, v_true)?;
 
-    if !blocked(cache, shooter_id, target_id, angle, flight_time, v_true, launch_turn_offset) {
+    if !blocked_on_path(
+        cache,
+        shooter_id,
+        target_id,
+        angle,
+        flight_time,
+        v_true,
+        launch_turn_offset,
+        true,
+        |e| include_comets || !e.is_comet(),
+    ) {
         return Some((angle, turns, tx, ty, flight_time));
     }
 
@@ -823,11 +875,20 @@ where
     // Closed-form early-out: if the sun + static planets already cover the whole
     // cone, no scan can find an opening — skip the 2·NUDGE_SCAN probes.
     if cone_clear_impossible(
-        cache, target_id, lx, ly, launch_offset, beta, phi_max, ring_d, launch_turn_offset,
+        cache,
+        target_id,
+        lx,
+        ly,
+        launch_offset,
+        beta,
+        phi_max,
+        ring_d,
+        launch_turn_offset,
     ) {
         return None;
     }
 
+    // counters::bump(&counters::CONE_SCAN);
     let step = phi_max / NUDGE_SCAN as f64;
     for k in 1..=NUDGE_SCAN {
         let d = k as f64 * step;
@@ -839,8 +900,17 @@ where
             if dx * dx + dy * dy > r_sq {
                 continue; // outside the target's valid arc at this turn
             }
-            if !blocked(cache, shooter_id, target_id, theta_try, flight_time, v_true, launch_turn_offset)
-            {
+            if !blocked_on_path(
+                cache,
+                shooter_id,
+                target_id,
+                theta_try,
+                flight_time,
+                v_true,
+                launch_turn_offset,
+                true,
+                |e| include_comets || !e.is_comet(),
+            ) {
                 return Some((theta_try, turns, tx, ty, flight_time));
             }
         }
@@ -867,5 +937,13 @@ pub fn shot_still_clear(
     launch_turn_offset: i64,
 ) -> bool {
     let v = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
-    !shot_blocked_exact(cache, shooter_id, target_id, angle, flight_time, v, launch_turn_offset)
+    !shot_blocked_exact(
+        cache,
+        shooter_id,
+        target_id,
+        angle,
+        flight_time,
+        v,
+        launch_turn_offset,
+    )
 }

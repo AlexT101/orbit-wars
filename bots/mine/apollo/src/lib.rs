@@ -5,8 +5,8 @@ mod blockers;
 mod constants;
 mod engine;
 mod entity_cache;
-mod helpers;
 mod hellburner;
+mod helpers;
 mod rollout;
 mod world;
 
@@ -139,8 +139,7 @@ impl Observation {
         let fleets = parse_fleets(&get_item(obs, "fleets")?)?;
         let initial_planets = parse_planets(&get_item(obs, "initial_planets")?)?;
         let comets = parse_comets(&get_item(obs, "comets")?)?;
-        let comet_planet_ids: Vec<i64> =
-            get_item(obs, "comet_planet_ids")?.extract()?;
+        let comet_planet_ids: Vec<i64> = get_item(obs, "comet_planet_ids")?.extract()?;
         let angular_velocity: f64 = get_item(obs, "angular_velocity")?.extract()?;
         let remaining_overage_time: f64 = match obs.get_item("remainingOverageTime")? {
             Some(v) => v.extract().unwrap_or(TOTAL_OVERAGE_TIME),
@@ -180,12 +179,12 @@ impl Bot {
         self.current_turn
     }
 
-    fn compute_moves(
-        &mut self,
-        obs: &Bound<'_, PyDict>,
-    ) -> PyResult<Vec<(i64, f64, i64)>> {
+    fn compute_moves(&mut self, obs: &Bound<'_, PyDict>) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
+        // Step-scoped L1 aim cache, shared across every model built this step.
+        // Declared before `world` so it outlives the borrow `world` takes on it.
+        let shot_l1 = crate::world::ShotL1::default();
         let cache = self.cache.as_ref().expect("entity cache populated above");
 
         let mut world = WorldState::build(
@@ -200,10 +199,14 @@ impl Bot {
             cache,
         );
         world.remaining_overage_time = obs.remaining_overage_time;
+        world.shot_l1 = Some(&shot_l1);
 
         let moves = crate::hellburner::plan(&world);
         self.current_turn += 1;
-        Ok(moves.into_iter().map(|m| (m.from_id, m.angle, m.ships)).collect())
+        Ok(moves
+            .into_iter()
+            .map(|m| (m.from_id, m.angle, m.ships))
+            .collect())
     }
 
     /// Plan with rollout-based multi-candidate selection. Costs ~5-10x more
@@ -214,12 +217,21 @@ impl Bot {
     ) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
+        // Step-scoped L1 aim cache shared across candidate generation and every
+        // model built inside the rollout. Declared before any borrow of it.
+        let shot_l1 = crate::world::ShotL1::default();
 
         // Build engine state once; reused for candidate WorldState and rollout seed.
         // NOTE: next_fleet_id may recycle destroyed fleets' IDs since we only
         // see currently-visible fleets. Safe while no consumer keys on fleet
         // ID across turns; revisit if any cache/hash ever does.
-        let next_fleet_id = obs.fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
+        let next_fleet_id = obs
+            .fleets
+            .iter()
+            .map(|f| f.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
         let player = obs.player;
         let initial_state = EngineState::from_observation_parts(
@@ -246,6 +258,7 @@ impl Bot {
             let mut world =
                 WorldState::from_simulator_with_ledger(player, &initial_sim, &ledger, cache_ref);
             world.remaining_overage_time = obs.remaining_overage_time;
+            world.shot_l1 = Some(&shot_l1);
             (crate::hellburner::search_candidates(&world), ledger)
         };
 
@@ -259,9 +272,13 @@ impl Bot {
             cache_mut,
             obs.remaining_overage_time,
             Some(&initial_ledger),
+            Some(&shot_l1),
         );
         self.current_turn += 1;
-        Ok(moves.into_iter().map(|m| (m.from_id, m.angle, m.ships)).collect())
+        Ok(moves
+            .into_iter()
+            .map(|m| (m.from_id, m.angle, m.ships))
+            .collect())
     }
 }
 
@@ -291,8 +308,22 @@ impl Bot {
     }
 }
 
+/// TEMP instrumentation: read the aim hot-path stage counters as a string.
+#[pyfunction]
+fn aim_counters_report() -> String {
+    crate::blockers::counters::report()
+}
+
+/// TEMP instrumentation: zero the aim hot-path stage counters.
+#[pyfunction]
+fn aim_counters_reset() {
+    crate::blockers::counters::reset();
+}
+
 #[pymodule]
 fn apollo_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bot>()?;
+    m.add_function(wrap_pyfunction!(aim_counters_report, m)?)?;
+    m.add_function(wrap_pyfunction!(aim_counters_reset, m)?)?;
     Ok(())
 }

@@ -78,7 +78,8 @@ fn ground_truth_collision(
             return Some((t, -1));
         }
 
-        for (&bid, ent) in &cache.entities {
+        for ent in &cache.entities {
+            let bid = ent.id;
             // Skip only the target (reaching it is success). The source is
             // *not* skipped: the engine checks the fleet against its own source
             // planet every turn, so an orbiting source that sweeps back into a
@@ -109,8 +110,8 @@ fn entity_ids_at_t0(cache: &EntityCache) -> Vec<i64> {
     let mut ids: Vec<i64> = cache
         .entities
         .iter()
-        .filter(|(_, e)| e.positions[0].is_some())
-        .map(|(&id, _)| id)
+        .filter(|e| e.positions[0].is_some())
+        .map(|e| e.id)
         .collect();
     ids.sort();
     ids
@@ -203,9 +204,8 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
                     // HORIZON turns of launch by design — past that the
                     // aimer is silent, not wrong.
                     let sim_time = flight_time.min(HORIZON as f64);
-                    let collision = ground_truth_collision(
-                        &cache, shooter, target, angle, ships, sim_time,
-                    );
+                    let collision =
+                        ground_truth_collision(&cache, shooter, target, angle, ships, sim_time);
                     if let Some((t, bid)) = collision {
                         panic!(
                             "seed={seed} ships={ships} shooter={shooter} target={target} \
@@ -263,9 +263,8 @@ fn blocked_verdicts_correspond_to_real_collisions() {
                         continue;
                     }
 
-                    let collision = ground_truth_collision(
-                        &cache, shooter, target, angle, ships, flight_time,
-                    );
+                    let collision =
+                        ground_truth_collision(&cache, shooter, target, angle, ships, flight_time);
                     if collision.is_none() {
                         missing.push(format!(
                             "seed={seed} ships={ships} shooter={shooter} target={target} \
@@ -304,7 +303,7 @@ fn sun_blocks_chords_passing_through_center() {
 
     let statics: Vec<(i64, f64, f64, f64)> = cache
         .entities
-        .values()
+        .iter()
         .filter(|e| e.is_static())
         .filter_map(|e| e.positions[0].map(|p| (e.id, p[0], p[1], e.radius)))
         .collect();
@@ -454,8 +453,8 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
             let mut ids: Vec<i64> = cache
                 .entities
                 .iter()
-                .filter(|(_, e)| e.positions[state.step as usize].is_some())
-                .map(|(&id, _)| id)
+                .filter(|e| e.positions[state.step as usize].is_some())
+                .map(|e| e.id)
                 .collect();
             ids.sort_unstable();
 
@@ -542,8 +541,8 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
             let mut ids: Vec<i64> = cache
                 .entities
                 .iter()
-                .filter(|(_, e)| e.positions[state.step as usize].is_some())
-                .map(|(&id, _)| id)
+                .filter(|e| e.positions[state.step as usize].is_some())
+                .map(|e| e.id)
                 .collect();
             ids.sort_unstable();
 
@@ -623,7 +622,10 @@ fn h_reduction_matches_exhaustive_scan_with_comets() {
         state.step_with_actions(&noop).unwrap();
         guard += 1;
     }
-    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+    assert!(
+        !state.comet_planet_ids.is_empty(),
+        "expected comets to spawn"
+    );
 
     let cache = cache_for(&state);
     let now = cache.current_turn as usize;
@@ -632,8 +634,8 @@ fn h_reduction_matches_exhaustive_scan_with_comets() {
     let mut on_board: Vec<i64> = cache
         .entities
         .iter()
-        .filter(|(_, e)| e.positions.get(now).map(|p| p.is_some()).unwrap_or(false))
-        .map(|(&id, _)| id)
+        .filter(|e| e.positions.get(now).map(|p| p.is_some()).unwrap_or(false))
+        .map(|e| e.id)
         .collect();
     on_board.sort();
     let launchers: Vec<i64> = on_board
@@ -658,11 +660,11 @@ fn h_reduction_matches_exhaustive_scan_with_comets() {
                 let flight_time = HORIZON as f64;
                 for k in 0..steps {
                     let angle = std::f64::consts::TAU * k as f64 / steps as f64;
-                    let band = shot_blocked_exact(&cache, shooter, target, angle, flight_time, v, 0);
-                    let brute = ground_truth_collision(
-                        &cache, shooter, target, angle, ships, flight_time,
-                    )
-                    .is_some();
+                    let band =
+                        shot_blocked_exact(&cache, shooter, target, angle, flight_time, v, 0);
+                    let brute =
+                        ground_truth_collision(&cache, shooter, target, angle, ships, flight_time)
+                            .is_some();
                     assert_eq!(
                         band, brute,
                         "verdict mismatch: shooter={shooter} target={target} ships={ships} \
@@ -673,5 +675,72 @@ fn h_reduction_matches_exhaustive_scan_with_comets() {
             }
         }
     }
-    assert!(compared > 1000, "expected a broad sweep, only {compared} comparisons");
+    assert!(
+        compared > 1000,
+        "expected a broad sweep, only {compared} comparisons"
+    );
+}
+
+/// Soundness guard for the cone-scan with comets present.
+///
+/// `clear_verdicts_survive_swept_pair_resimulation` already checks this for the
+/// comet-free board; this extends it to a comet-spawned cache, requiring every
+/// CLEAR verdict from `aim_with_prediction` to survive the exhaustive resim.
+#[test]
+fn cone_cull_clear_verdicts_sound_with_comets() {
+    let mut state = RefEngine::new(42, 2, Configuration::default());
+    let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
+    let mut guard = 0;
+    while state.comet_planet_ids.is_empty() && guard < EPISODE_STEPS {
+        state.step_with_actions(&noop).unwrap();
+        guard += 1;
+    }
+    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+
+    let cache = cache_for(&state);
+    let now = cache.current_turn as usize;
+    let mut ids: Vec<i64> = cache
+        .entities
+        .iter()
+        .filter(|e| e.positions.get(now).map(|p| p.is_some()).unwrap_or(false))
+        .map(|e| e.id)
+        .collect();
+    ids.sort();
+
+    let ships_grid = [5i64, 50, 500];
+    let mut clear_cases = 0usize;
+    for &shooter in &ids {
+        if cache.get(shooter).map(|e| e.is_comet()).unwrap_or(true) {
+            continue; // launch from planets
+        }
+        for &target in &ids {
+            if shooter == target {
+                continue;
+            }
+            for &ships in &ships_grid {
+                let Some((angle, _, _, _, _)) =
+                    aim_with_prediction(&cache, shooter, target, ships, 0)
+                else {
+                    continue;
+                };
+                let v = fleet_speed(ships.max(1), 6.0);
+                let Some((_, _, _, _, flight_time)) = lead_target(&cache, shooter, target, 0, v)
+                else {
+                    continue;
+                };
+                let sim_time = flight_time.min(HORIZON as f64);
+                if let Some((t, bid)) =
+                    ground_truth_collision(&cache, shooter, target, angle, ships, sim_time)
+                {
+                    panic!(
+                        "shooter={shooter} target={target} ships={ships} angle={angle:.6}: \
+                         aimer says CLEAR but engine reports collision with {bid} on turn {t} \
+                         (cone cull dropped a real blocker?)"
+                    );
+                }
+                clear_cases += 1;
+            }
+        }
+    }
+    assert!(clear_cases > 50, "expected many clear verdicts, saw {clear_cases}");
 }

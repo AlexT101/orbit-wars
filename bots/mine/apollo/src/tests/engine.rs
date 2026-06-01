@@ -1,10 +1,10 @@
 use std::time::Instant;
 
+#[cfg(feature = "profile")]
+use super::reference_engine::prof;
 use super::reference_engine::{PyRandom, RefEngine};
 use crate::constants::CENTER;
 use crate::engine::{Configuration, MoveAction};
-#[cfg(feature = "profile")]
-use super::reference_engine::prof;
 
 #[test]
 #[ignore] // run with: cargo test --release pure_sim_throughput -- --ignored --nocapture
