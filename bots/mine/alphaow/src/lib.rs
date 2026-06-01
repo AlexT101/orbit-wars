@@ -122,6 +122,19 @@ pub fn as_f64(v: &Value) -> f64 {
     v.as_f64().unwrap_or_else(|| v.as_i64().unwrap_or(0) as f64)
 }
 
+/// Parse an integer field, tolerating whole-number floats. Mirrors [`as_f64`].
+///
+/// The Kaggle engine sanitizes a move's `ships` to `int(...)` but stores the
+/// move's `from_id` verbatim into the resulting fleet's `from_planet_id`
+/// (`orbit_wars.py`). An opponent who submits a move with a float planet id
+/// (e.g. `33.0`) therefore produces a fleet whose `from_planet_id` serializes
+/// to JSON as `33.0`, for which serde_json's `as_i64()` returns `None`. With
+/// the `as_i64()?` pattern inside a `filter_map` that would silently drop the
+/// whole fleet, blinding us to it; rounding the float keeps the fleet visible.
+pub fn as_i64(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64))
+}
+
 pub fn parse_state(v: &Value) -> GameState {
     let player = v["player"].as_i64().unwrap_or(0) as i32;
     let step = v["step"].as_i64().unwrap_or(0);
@@ -153,13 +166,13 @@ pub fn parse_state(v: &Value) -> GameState {
             a.iter()
                 .filter_map(|p| {
                     let arr = p.as_array()?;
-                    let id = arr.get(0)?.as_i64()?;
-                    let owner = arr.get(1)?.as_i64()? as i32;
+                    let id = as_i64(arr.get(0)?)?;
+                    let owner = as_i64(arr.get(1)?)? as i32;
                     let x = as_f64(arr.get(2)?);
                     let y = as_f64(arr.get(3)?);
                     let radius = as_f64(arr.get(4)?);
-                    let ships = arr.get(5)?.as_i64().unwrap_or(0);
-                    let production = arr.get(6)?.as_i64().unwrap_or(0);
+                    let ships = as_i64(arr.get(5)?).unwrap_or(0);
+                    let production = as_i64(arr.get(6)?).unwrap_or(0);
                     let is_comet = comet_ids.contains(&id);
                     let (ix, iy) = *initial_pos.get(&id).unwrap_or(&(x, y));
                     let dx = ix - CENTER_X;
@@ -192,13 +205,13 @@ pub fn parse_state(v: &Value) -> GameState {
                 .filter_map(|f| {
                     let arr = f.as_array()?;
                     Some(Fleet {
-                        id: arr.get(0)?.as_i64()?,
-                        owner: arr.get(1)?.as_i64()? as i32,
+                        id: as_i64(arr.get(0)?)?,
+                        owner: as_i64(arr.get(1)?)? as i32,
                         x: as_f64(arr.get(2)?),
                         y: as_f64(arr.get(3)?),
                         angle: as_f64(arr.get(4)?),
-                        from_planet_id: arr.get(5)?.as_i64()?,
-                        ships: arr.get(6)?.as_i64().unwrap_or(0),
+                        from_planet_id: as_i64(arr.get(5)?)?,
+                        ships: as_i64(arr.get(6)?).unwrap_or(0),
                     })
                 })
                 .collect()

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-05-29T16:49:35.933279+00:00",
+  "last_updated": "2026-06-01T21:05:32.643892+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -11,9 +11,9 @@
     },
     "baselines/random": {
       "2p": {
-        "mu": 203.64526523469823,
-        "sigma": 34.98424566453147,
-        "games_played": 108
+        "mu": 203.64495167516856,
+        "sigma": 35.21201045947676,
+        "games_played": 112
       }
     },
     "external/ykhnkf-distance-prioritized": {
@@ -81,9 +81,9 @@
     },
     "mine/apollo": {
       "2p": {
-        "mu": 893.1483845409582,
-        "sigma": 19.55076333060246,
-        "games_played": 666
+        "mu": 869.9556949111555,
+        "sigma": 20.934760444003366,
+        "games_played": 712
       }
     },
     "mine/bruteforcer": {
@@ -200,9 +200,9 @@
     },
     "external/owheuristic": {
       "2p": {
-        "mu": 810.027184075075,
-        "sigma": 19.018250295774074,
-        "games_played": 319
+        "mu": 809.9371353275627,
+        "sigma": 19.02253358025669,
+        "games_played": 322
       }
     },
     "mine/rl_ppo": {
@@ -210,6 +210,20 @@
         "mu": 533.1812088072551,
         "sigma": 45.682503874309376,
         "games_played": 25
+      }
+    },
+    "mine/alphaow_newest": {
+      "2p": {
+        "mu": 1043.6899573832816,
+        "sigma": 21.403162061145224,
+        "games_played": 124
+      }
+    },
+    "mine/alphaow_temp": {
+      "2p": {
+        "mu": 1043.0041744715347,
+        "sigma": 22.56591001983834,
+        "games_played": 81
       }
     }
   }

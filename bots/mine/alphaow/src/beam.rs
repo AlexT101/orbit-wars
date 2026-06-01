@@ -30,7 +30,6 @@
 use std::time::{Duration, Instant};
 
 use crate::duct;
-use crate::policy::XorRng;
 use crate::sim::{alive_players, apply_launches, tick, Action};
 use crate::GameState;
 
@@ -74,8 +73,6 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
 
     let n_my = my_root.len();
     let n_opp = opp_root.len();
-    let seed = (state.step as u64).wrapping_mul(0x9e3779b97f4a7c15) ^ 0xbeefcafe;
-    let mut rng = XorRng(seed | 1);
 
     // Per-root-pair best-reachable score. Defaults to -inf so an
     // unreachable pair acts like "opp gets a free win" under MIN backup.
@@ -95,7 +92,7 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
             let mut s = state.clone();
             apply_launches(&mut s, my_a);
             apply_launches(&mut s, opp_a);
-            tick(&mut s, &mut rng);
+            tick(&mut s);
             let score = duct::evaluate(&s, me);
             if score > pair_best[my_i][opp_i] {
                 pair_best[my_i][opp_i] = score;
@@ -132,7 +129,7 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
                     let mut s = node.state.clone();
                     apply_launches(&mut s, my_a);
                     apply_launches(&mut s, opp_a);
-                    tick(&mut s, &mut rng);
+                    tick(&mut s);
                     let score = duct::evaluate(&s, me);
                     if score > pair_best[node.root_my_idx][node.root_opp_idx] {
                         pair_best[node.root_my_idx][node.root_opp_idx] = score;

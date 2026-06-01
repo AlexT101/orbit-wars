@@ -1,0 +1,10 @@
+name: "Synthesized Heuristic"
+description: "Autonomous AI Research Loop for Orbit Wars iterated on hellburner."
+author: "Pham Kim Hoan"
+kernel_slug: "pham0030/autonomous-ai-research-loop-for-orbit-wars"
+kernel_version: 2
+date_fetched: 2026-05-31
+license: "unknown"
+tags: [heuristic]
+author_claimed_lb_score: 1043
+disabled: false

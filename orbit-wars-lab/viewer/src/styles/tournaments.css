@@ -185,6 +185,16 @@
   width: 110px;
 }
 
+.seed-file-name {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
 .create-config input:disabled {
   opacity: 0.55;
   cursor: not-allowed;

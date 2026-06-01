@@ -20,7 +20,16 @@ fn reference_timeline(
     player: i64,
     horizon: i64,
     expiry_turn: Option<i64>,
-) -> (Vec<i64>, Vec<i64>, i64, i64, Option<i64>, Option<i64>, bool, i64) {
+) -> (
+    Vec<i64>,
+    Vec<i64>,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    bool,
+    i64,
+) {
     let horizon = horizon.max(0);
     let effective_horizon = match expiry_turn {
         Some(exp) => horizon.min((exp - 1).max(0)),
@@ -118,7 +127,11 @@ fn reference_timeline(
         owner_at,
         ships_at,
         keep_needed,
-        if planet.owner == player { min_owned.max(0) } else { 0 },
+        if planet.owner == player {
+            min_owned.max(0)
+        } else {
+            0
+        },
         first_enemy,
         fall_turn,
         holds_full,
@@ -142,7 +155,10 @@ fn planet(owner: i64, ships: i64, production: i64) -> Planet {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 16
     }
     fn range(&mut self, lo: i64, hi: i64) -> i64 {
@@ -180,9 +196,8 @@ fn split_timeline_matches_reference() {
                                 let got = simulate_planet_timeline(
                                     &pl, &arrivals, player, horizon, expiry,
                                 );
-                                let want = reference_timeline(
-                                    &pl, &arrivals, player, horizon, expiry,
-                                );
+                                let want =
+                                    reference_timeline(&pl, &arrivals, player, horizon, expiry);
 
                                 let ctx = format!(
                                     "owner={p_owner} ships={ships} prod={production} \
@@ -253,8 +268,14 @@ fn checkpoint_resim_matches_full_resim() {
                             let expected =
                                 simulate_planet_timeline(&pl, &full, p_owner, horizon, expiry);
                             simulate_checkpoint_into(
-                                &pl, &baseline, start_turn, &full, expiry,
-                                &mut owner_buf, &mut ships_buf, &mut by_turn_buf,
+                                &pl,
+                                &baseline,
+                                start_turn,
+                                &full,
+                                expiry,
+                                &mut owner_buf,
+                                &mut ships_buf,
+                                &mut by_turn_buf,
                             );
 
                             let ctx = format!(

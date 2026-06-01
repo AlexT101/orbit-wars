@@ -1,0 +1,113 @@
+A frame is a snapshot of game state with features at some time t.
+Let NUM_FRAMES = 4.
+I wanna have NUM_FRAMES: t, t+1, t+10, t_resolved,
+where t_resolved is the time in the future when all moving ships have resolved (landed).
+
+Let ACTIONS_DIM = 2 for encoder geometry tensors:
+    action bin 0 is noop metadata.
+    action bin 1 is 100%, sending every ship currently on the source planet to
+    the selected target.
+
+The policy action space is separate and smaller. For each source row it emits
+one of 45 choices:
+    choice 0: noop.
+    choice 1..44: send 100% of ships to target slot choice - 1.
+
+Launch actions are invalid if there are insufficient ships at the source planet.
+Launch actions are invalid if the source planet is not under ally control.
+The noop action remains valid so each source row can choose to do nothing.
+
+An action (i, j, count) is invalid if the trajectory caused from sending `count` ships from i to j, 
+is not "clean" - i.e. the ships don't arrive at the destination in the future - this could be
+because they intersect with another planet or intersect the sun.
+(I don't see any other reason for obstruction.)
+
+The output action space is therefore (44, 45), one categorical distribution per
+source slot. The policy valid action mask is also (44, 45).
+
+A planet token (TOKEN_DIM = 11, see features.rs::fill_token):
+    * is_mine          (0/1)
+    * is_enemy         (0/1)
+    * is_neutral       (0/1)
+    * is_comet         (0/1)
+    * is_orbiting      (0/1)
+    * production       (log-normalized)
+    * ships            (log-normalized)
+    * x                (/100)
+    * y                (/100)
+    * dist_to_sun      (/100)
+    * angular_velocity (board orbital rate /0.05 for orbiting planets, else 0;
+                        comets get 0 — they ride comet paths, not orbits)
+
+Global features (GLOBAL_DIM = 16, see features.rs::compute_globals). All floats,
+no one-hot. "enemy" aggregates every non-self player (works for 2p and 4p).
+score = planet_ships + fleet_ships. Shares are own/(own+enemy), 0.5 when both 0.
+Diffs are own − enemy (signed-log); counts are /44; ship/production totals are
+log-normalized.
+    remaining          (turns left / episode_steps)
+    own_score
+    enemy_score
+    neutral_ships
+    own_planets
+    enemy_planets
+    neutral_planets
+    own_production
+    enemy_production
+    own_fleet_ships
+    enemy_fleet_ships
+    score_share
+    production_share
+    planet_share
+    score_diff         (named "diff", not "margin")
+    production_diff
+(kept own_score over own_ships since kaggle decides the winner by total ships =
+"score"; own_ships would be just as clear.)
+
+Each frame consists of 44 planet tokens.
+Each frame also contains an asymmetric distances matrix D of dims (44, 44, ACTIONS_DIM)
+where D[i][j][action_idx] is the number of turns required to send the ships from i to j, 
+starting at this frame. Probably we keep this number as a float instead of one hot.
+
+For invalid actions probably just leave this at 0 and let valid action mask handle it.
+So this is looking like (NUM_FRAMES, 44, 44, ACTIONS_DIM).
+
+I also think normalising stuff would be good.
+    * distances: 1/100
+    * turns: 1/20
+    * ships: log or something else
+    * production: log or something else
+
+Always validate / test to make ensure correctness.
+
+encode_obs(obs, player) output dict (see features.rs::Features::into_py_dict).
+Numeric tensors are flat 1-D numpy buffers (zero-copy, torch.from_numpy-ready);
+reshape each with its paired `*_shape`. The rest are plain Python objects.
+
+    planet_ids     list[int], len 44   slot -> planet id, -1 for empty slots
+    num_planets    int                 count of real planets at frame t
+    frame_offsets  list[int], len 4     turn offsets of the frames: [0, 1, 10, resolved]
+    frame_planets  list[list[tuple]]   per-frame [(id, owner, x, y, ships), ...],
+                                        present planets only. NOT a model input —
+                                        raw state for validation/debugging.
+    tokens         float32, flat        reshape (4, 44, 11)  = (NUM_FRAMES, slot, TOKEN_DIM)
+    tokens_shape   tuple (4, 44, 11)
+    globals        float32, flat        reshape (16,)       board-level summary at frame t
+    globals_shape  tuple (16,)
+    presence       float32, flat        reshape (4, 44)     1.0 where a slot holds a planet
+    presence_shape tuple (4, 44)
+    turns          float32, flat        reshape (4, 44, 44, 2) = (frame, src, tgt, action);
+                                        turns-to-arrive /20, 0 if invalid
+    turns_shape    tuple (4, 44, 44, 2)
+    angles         float32, flat        reshape (44, 44, 2) launch angle (radians) to issue
+                                        the move; 0 if invalid
+    angles_shape   tuple (44, 44, 2)
+    mask           uint8, flat          reshape (44, 44, 2) 1 = legal action now, else 0
+    mask_shape     tuple (44, 44, 2)
+    ship_counts    int64, flat          reshape (44, 44, 2) integer ships sent; 0 for noop/invalid
+    ship_counts_shape tuple (44, 44, 2)
+    reachable_mask uint8, flat          reshape (4, 44, 44, 2) 1 = clean launch reaches target
+    reachable_mask_shape tuple (4, 44, 44, 2)
+
+Python training converts `mask` into `valid_actions_mask` with shape (44, 45):
+    valid_actions_mask[:, 0]    is the per-source noop.
+    valid_actions_mask[:, 1:]   is the all-in target legality matrix.

@@ -17,7 +17,7 @@ use crate::apollo::constants::{
     BOARD_SIZE, CENTER, COMET_SPEED, EPISODE_STEPS, MAX_PLAYERS, MAX_SHIP_SPEED, ROTATION_LIMIT,
     SUN_RADIUS,
 };
-use crate::apollo::entity_cache::EntityCache;
+use crate::apollo::cache::EntityCache;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Planet {
@@ -71,7 +71,7 @@ impl Default for Configuration {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MoveAction {
     pub from_id: i64,
     pub angle: f64,
@@ -167,8 +167,16 @@ pub fn point_to_segment_distance_sq(p: (f64, f64), v: (f64, f64), w: (f64, f64))
 /// Axis-aligned bounds `(x_min, x_max, y_min, y_max)` of the segment `old→new`.
 #[inline]
 pub fn swept_bounds(old: (f64, f64), new: (f64, f64)) -> (f64, f64, f64, f64) {
-    let (x_min, x_max) = if old.0 <= new.0 { (old.0, new.0) } else { (new.0, old.0) };
-    let (y_min, y_max) = if old.1 <= new.1 { (old.1, new.1) } else { (new.1, old.1) };
+    let (x_min, x_max) = if old.0 <= new.0 {
+        (old.0, new.0)
+    } else {
+        (new.0, old.0)
+    };
+    let (y_min, y_max) = if old.1 <= new.1 {
+        (old.1, new.1)
+    } else {
+        (new.1, old.1)
+    };
     (x_min, x_max, y_min, y_max)
 }
 
@@ -200,8 +208,24 @@ pub fn swept_pair_hit(
 }
 
 pub fn fleet_speed(ships: i64, max_speed: f64) -> f64 {
-    let speed = 1.0 + (max_speed - 1.0) * ((ships as f64).ln() / 1000.0f64.ln()).powf(1.5);
-    speed.min(max_speed)
+    // `ln` + `powf(1.5)` costs tens of ns, and `fleet_speed` is called per aim
+    // and per fleet per simulated turn — almost always with the same handful of
+    // ship counts. Memoize on the exact `(ships, max_speed)` bits so the cached
+    // value is bit-identical to the closed form (the engine parity tests require
+    // it). Keying on `max_speed` keeps the test oracle's configurable speed
+    // correct alongside the production `MAX_SHIP_SPEED`.
+    thread_local! {
+        static MEMO: std::cell::RefCell<HashMap<(i64, u64), f64>> =
+            std::cell::RefCell::new(HashMap::default());
+    }
+    let key = (ships, max_speed.to_bits());
+    if let Some(v) = MEMO.with(|m| m.borrow().get(&key).copied()) {
+        return v;
+    }
+    let speed =
+        (1.0 + (max_speed - 1.0) * ((ships as f64).ln() / 1000.0f64.ln()).powf(1.5)).min(max_speed);
+    MEMO.with(|m| m.borrow_mut().insert(key, speed));
+    speed
 }
 
 /// Single definition of same-turn planet combat, shared by the forward
@@ -234,11 +258,7 @@ pub fn resolve_combat(owner: i64, garrison: i64, incoming: &[i64; MAX_PLAYERS]) 
     }
 
     let (survivor_owner, survivor_ships) = if entry_count > 1 {
-        let s = if top_ships == second_ships {
-            0
-        } else {
-            top_ships - second_ships
-        };
+        let s = top_ships - second_ships;
         let o = if s > 0 { top_player } else { -1 };
         (o, s)
     } else if entry_count == 1 {
@@ -352,11 +372,8 @@ impl<'a> Simulator<'a> {
         let planet_count = state.planets.len();
         let fleet_count = state.fleets.len();
 
-        let initial_by_id: HashMap<i64, &'a Planet> = state
-            .initial_planets
-            .iter()
-            .map(|p| (p.id, p))
-            .collect();
+        let initial_by_id: HashMap<i64, &'a Planet> =
+            state.initial_planets.iter().map(|p| (p.id, p)).collect();
 
         let comet_groups: Vec<SimCometGroup<'a>> = state
             .comets
@@ -404,25 +421,43 @@ impl<'a> Simulator<'a> {
     }
 
     #[inline]
-    pub fn planets(&self) -> &[Planet] { &self.planets }
+    pub fn planets(&self) -> &[Planet] {
+        &self.planets
+    }
     #[inline]
-    pub fn fleets(&self) -> &[Fleet] { &self.fleets }
+    pub fn fleets(&self) -> &[Fleet] {
+        &self.fleets
+    }
     #[inline]
-    pub fn events(&self) -> &[StepEvent] { &self.events }
+    pub fn events(&self) -> &[StepEvent] {
+        &self.events
+    }
     #[inline]
-    pub fn angular_velocity(&self) -> f64 { self.angular_velocity }
+    pub fn angular_velocity(&self) -> f64 {
+        self.angular_velocity
+    }
     #[inline]
-    pub fn num_players(&self) -> usize { self.num_players }
+    pub fn num_players(&self) -> usize {
+        self.num_players
+    }
     #[inline]
-    pub fn comet_planet_ids(&self) -> &[i64] { &self.comet_planet_ids }
+    pub fn comet_planet_ids(&self) -> &[i64] {
+        &self.comet_planet_ids
+    }
     /// Engine step number after the most recent `step()`.
     #[inline]
-    pub fn step_count(&self) -> i64 { self.step }
+    pub fn step_count(&self) -> i64 {
+        self.step
+    }
     /// Turns elapsed since `new`.
     #[inline]
-    pub fn turns_elapsed(&self) -> i64 { self.step - self.initial_step }
+    pub fn turns_elapsed(&self) -> i64 {
+        self.step - self.initial_step
+    }
 
-    pub fn clear_events(&mut self) { self.events.clear(); }
+    pub fn clear_events(&mut self) {
+        self.events.clear();
+    }
 
     /// Fork a sub-simulator that shares the parent's borrowed comet path tables
     /// and initial-planet table, but owns an independent copy of the mutable
@@ -563,7 +598,8 @@ impl<'a> Simulator<'a> {
                     let orbital_r = (dx * dx + dy * dy).sqrt();
                     if orbital_r + planet.radius < ROTATION_LIMIT {
                         let initial_angle = dy.atan2(dx);
-                        let current_angle = initial_angle + self.angular_velocity * turn_step as f64;
+                        let current_angle =
+                            initial_angle + self.angular_velocity * turn_step as f64;
                         (
                             CENTER + orbital_r * current_angle.cos(),
                             CENTER + orbital_r * current_angle.sin(),
@@ -885,6 +921,7 @@ impl<'a> Simulator<'a> {
         }
 
         self.comet_id_set.clear();
-        self.comet_id_set.extend(self.comet_planet_ids.iter().copied());
+        self.comet_id_set
+            .extend(self.comet_planet_ids.iter().copied());
     }
 }

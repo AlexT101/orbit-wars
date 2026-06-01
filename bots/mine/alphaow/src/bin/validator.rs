@@ -11,12 +11,11 @@
 //! For each step K from 1..N:
 //!   1. parse states[K-1] -> state
 //!   2. apply actions[K] for each agent
-//!   3. tick_no_spawn (engine's RNG-spawned comets are injected manually below
-//!      if K is a spawn-result step)
+//!   3. tick (comet-free; engine's RNG-spawned comets are injected manually
+//!      below if K is a spawn-result step)
 //!   4. compare to parse_state(states[K])
 
-use alphaow_bot::policy::XorRng;
-use alphaow_bot::sim::{tick_no_spawn, Action};
+use alphaow_bot::sim::{tick, Action};
 use alphaow_bot::{parse_state, Fleet, GameState, Planet};
 use serde_json::Value;
 use std::env;
@@ -190,8 +189,6 @@ fn main() {
     let mut diverged_steps: Vec<i64> = Vec::new();
     let mut diverge_breakdown: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
 
-    let mut rng = XorRng(0xdeadbeef);
-
     for k in 1..n {
         let step_k = k as i64;
         if step_k < from || step_k > to {
@@ -218,7 +215,7 @@ fn main() {
         }
         // Skip comet diff on spawn-result steps; engine spawns via RNG we don't have.
         let skip_comets = SPAWN_STEPS.contains(&step_k);
-        tick_no_spawn(&mut state, &mut rng);
+        tick(&mut state);
 
         let diffs = diff_states(&state, &want_state, skip_comets);
         if !diffs.is_empty() {

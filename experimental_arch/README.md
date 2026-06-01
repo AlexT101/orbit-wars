@@ -1,9 +1,12 @@
+# THIS README IS COMPLETE OUT OF DATE!!
+
 # experimental_arch
 
 Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
 
 - **Planet ID feature removed** — the per-planet token no longer leaks
-  the slot ordering via `pid/100.0`. That slot now carries
+  the slot ordering via `pid/100.0`, but it does include normalized `x`/`y`
+  board position. That slot now carries
   `ships_resolved` (see below). `PLANET_FEATURES` grows from 19 → 29
   because of the new arrival-bin features (see further below).
 - **Ground-truth ships-resolved.** For each planet we forward-sim the
@@ -25,11 +28,12 @@ Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
   use a default seed and don't match reality. Impact is small (~12% of
   planet-checks see a ship-count diff with mean ~0.9 ships off, max 18)
   and only when crossing those boundaries.
-- **New "resolved+1" send action** — `SEND_FRACTIONS = (0.25, 0.5, 0.75, 1.0)`
-  is unchanged, but there is now a 5th send bin that sends exactly
-  `target.ships_resolved + 1` — i.e. the minimum needed to capture the
-  target after the currently-flying fleets resolve against it. The action
-  space grows from 16385 → 20481.
+- **Noop + all-in action bins** — encoder action bin 0 is noop metadata and
+  bin 1 sends 100% of the source planet's current ships to the selected target.
+  The policy sees 45 choices per source: choice 0 is noop, choices 1..44 are
+  all-in target slots. `encode_obs` also returns `ship_counts` and
+  `reachable_mask` so training code does not have to recompute ship amounts or
+  infer reachability from zero-valued travel times.
 - **Per-planet arrival bins.** Each planet gets `2 × 5 = 10` extra
   feature dims encoding log-normalized ship counts of incoming **mine**
   vs **enemy** fleets bucketed by arrival-delta-turn:
@@ -37,10 +41,12 @@ Fork of `rl_orbit_wars/` with the following deltas from the parent repo:
   Right-inclusive bins, delta = arrival_turn − current_turn.
   Per-planet feature count grows from 19 → 29.
 - **Reward shaping rewritten from scratch.** No more reward modes. The
-  only reward terms now are:
-  - `terminal` (±1) on game end
-  - `terminal_time` — small ±0.10 bonus scaled by remaining turns
-  - `production_delta` — `0.05 × (Δown_production − Δenemy_production)` per step
+  only reward terms now are (see `arch_notes` + `env_engine/validate_reward.py`):
+  - `terminal` — ships-share at game end: `own_ships / all_players_ships`
+    (∈ [0,1]); rewards how much of the board's ships we end with, not who wins
+  - `terminal_time` — `± remaining_turns / episode_steps`; `+` for the winner,
+    `−` for losers, so a turn-1 finish is worth ~±1.0 (fast wins / fast losses)
+  - `production_delta` — `0.05 × (Δown_production − Δothers_production)` per step
   - `launch_penalty` — `-0.001 × num_fleets_sent_this_step`
 - **Wandb instead of HTML reports.** The HTML report generator (and
   `monitor.py`) is removed. Metrics go to wandb plus the existing JSONL
@@ -123,8 +129,7 @@ python pretrain_bc.py \
   --out checkpoints/bc_hellburner.pt
 ```
 
-BC labels only emit fraction bins (never the resolved+1 bin), since
-teacher bots don't know about that action.
+BC labels need re-checking against the current all-in action space.
 
 Then pass `--init-checkpoint checkpoints/bc_hellburner.pt`
 to `train.py`.
@@ -152,8 +157,7 @@ python export_submission.py \
 ```
 
 ⚠️ Export was inherited from the parent repo and has **not** been
-re-verified against the new action space (20481 actions, resolved+1
-bin, ships_resolved feature). The exported bot will likely need its
+re-verified against the new action space (2 action bins). The exported bot will likely need its
 inline `encode_obs` updated to compute `ships_resolved` before this
 works end-to-end.
 
@@ -166,7 +170,7 @@ works end-to-end.
 | `train/mean_return_25` | recent 25-episode return; should trend up |
 | `train/clip_frac`, `train/approx_kl`, `train/entropy` | PPO health; clip_frac > 0.3 = trouble |
 | `train/explained_var` | value head fit; should climb toward 1 |
-| `train/noop_rate`, `train/launch_rate`, `train/avg_send_bin` | action mix; avg_send_bin near 4 = resolved+1 chosen often |
+| `train/noop_rate`, `train/launch_rate` | action mix |
 | `train/train_win_rate_<opp>` | live win-rate vs each rotating opponent |
 | `train/reward_production_delta` etc. | per-component reward contributions; check that launch_penalty isn't dominating |
 | `eval/win_rate_<opp>`, `eval/eval_score` | logged every `--eval-every-updates` updates |
@@ -175,27 +179,8 @@ works end-to-end.
 
 ## File map
 
-```
-experimental_arch/
-├── README.md                       ← this file
-├── requirements.txt                ← adds wandb
-├── train.py                        ← --no-wandb / --wandb-mode flags
-├── pretrain_bc.py                  ← BC pretraining
-├── evaluate.py                     ← unchanged from parent
-├── export_submission.py            ← inherited; needs patching for new schema
-├── validate_resolver.py            ← runs cached vs interpreter resolver checks
-└── orbit_wars_rl/
-    ├── env.py                      ← rewritten compute_reward + RewardWeights;
-    │                                 per-step env-rollout cache injected into obs
-    ├── features.py                 ← +resolve_via_env_rollout (truth),
-    │                                 +_resolve_via_interpreter (obs-only fallback),
-    │                                 +arrival bins, +RESOLVED_BIN; pid removed
-    ├── heuristics.py               ← unchanged
-    ├── model.py                    ← NUM_SEND_OPTIONS instead of len(SEND_FRACTIONS)
-    ├── opponents.py                ← unchanged
-    ├── ppo.py                      ← wandb logging, HTML report removed
-    └── visualization.py            ← trimmed to just append_jsonl
-```
+run tree to see
+
 
 ## Resolver dispatch
 

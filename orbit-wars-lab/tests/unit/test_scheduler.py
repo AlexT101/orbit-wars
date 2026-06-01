@@ -6,12 +6,18 @@ never runs — these exercise the scheduling/lifecycle machinery, not matches.
 from __future__ import annotations
 
 import json
+import random
 import time
 from pathlib import Path
 
 import pytest
 
-from orbit_wars_app.scheduler import QueuedMatch, Scheduler, match_timeout_for
+from orbit_wars_app.scheduler import (
+    QueuedMatch,
+    Scheduler,
+    match_timeout_for,
+    side_order_for_seed,
+)
 from orbit_wars_app.schemas import TournamentConfig
 from tests.scheduler_fakes import crash_job, ok_job, slow_job
 
@@ -21,6 +27,11 @@ def test_match_timeout_formula():
     assert match_timeout_for(2) == 1140
     assert match_timeout_for(4) == 2260
     assert match_timeout_for(1) == 580  # floor at 1 player
+
+
+def test_side_order_for_seed_two_player_parity():
+    assert side_order_for_seed(2, 2) == [0, 1]
+    assert side_order_for_seed(3, 2) == [1, 0]
 
 
 def _make_zoo(tmp_path: Path, names: list[str]) -> Path:
@@ -76,6 +87,174 @@ def test_fair_round_robin_interleaves_tournaments(tmp_path: Path, zoo: Path):
 
     # One match from each tournament in turn, FIFO within each.
     assert picked == [(a, 1), (b, 1), (a, 2), (b, 2)]
+
+
+def test_tournament_queue_shuffles_sides_from_match_seed(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)  # pool NOT started -> inspect queue
+    run_id = sched.submit(
+        TournamentConfig(
+            agents=["baselines/a", "baselines/b"],
+            games_per_pair=2,
+            mode="fast",
+            seed_base=42,
+        )
+    )
+
+    jobs = list(sched._tournaments[run_id].pending)
+    base = ["baselines/a", "baselines/b"]
+    for job in jobs:
+        expected = [base[i] for i in side_order_for_seed(job.seed, len(base))]
+        assert job.agent_ids == expected
+
+
+def test_quick_match_queue_keeps_requested_side_order(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    # Pick a seed base whose first generated match seed would flip a 2p match.
+    seed_base = next(
+        base
+        for base in range(100)
+        if side_order_for_seed(random.Random(base).randrange(10**9), 2) == [1, 0]
+    )
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)  # pool NOT started -> inspect queue
+    run_id = sched.submit(
+        TournamentConfig(
+            agents=["baselines/a", "baselines/b"],
+            games_per_pair=1,
+            mode="fast",
+            seed_base=seed_base,
+            is_quick_match=True,
+        )
+    )
+
+    job = sched._tournaments[run_id].pending[0]
+    assert side_order_for_seed(job.seed, len(job.agent_ids)) == [1, 0]
+    assert job.agent_ids == ["baselines/a", "baselines/b"]
+
+
+def _replay_map(num_players: int = 2) -> dict:
+    return {
+        "planets": [[0, -1, 10, 10, 1, 5, 1]],
+        "initial_planets": [[0, -1, 10, 10, 1, 5, 1]],
+        "angular_velocity": 0.03,
+        "source_seed": 123,
+        "source_name": "sample.json",
+        "num_players": num_players,
+    }
+
+
+def _comet_schedule(spawn_step: int = 50) -> list[dict]:
+    return [
+        {
+            "spawn_step": spawn_step,
+            "paths": [
+                [[1, 2], [3, 4]],
+                [[5, 6], [7, 8]],
+                [[9, 10], [11, 12]],
+                [[13, 14], [15, 16]],
+            ],
+            "ships": 13,
+        }
+    ]
+
+
+def test_tournament_queue_carries_replay_map(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    replay_map = _replay_map()
+    replay_map["comet_schedule"] = _comet_schedule()
+    run_id = sched.submit(
+        TournamentConfig(
+            agents=["baselines/a", "baselines/b"],
+            games_per_pair=1,
+            mode="fast",
+            seed_mode="replay",
+            replay_map=replay_map,
+        )
+    )
+
+    job = sched._tournaments[run_id].pending[0]
+    assert job.replay_map is not None
+    assert job.replay_map["source_name"] == "sample.json"
+    assert job.replay_map["comet_schedule"][0]["spawn_step"] == 50
+
+    data = json.loads((runs / run_id / "config.json").read_text())
+    assert data["seed_mode"] == "replay"
+    assert data["replay_map"]["source_seed"] == 123
+    assert data["replay_map"]["comet_schedule"][0]["ships"] == 13
+
+
+def test_replay_map_rejects_ultrafast(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    with pytest.raises(ValueError, match="fast and faithful"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b"],
+                games_per_pair=1,
+                mode="ultrafast",
+                seed_mode="replay",
+                replay_map=_replay_map(),
+            )
+        )
+
+
+def test_replay_map_rejects_format_mismatch(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    with pytest.raises(ValueError, match="Replay has 2 players"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b", "baselines/c", "baselines/d"],
+                games_per_pair=1,
+                mode="fast",
+                format="4p",
+                seed_mode="replay",
+                replay_map=_replay_map(num_players=2),
+            )
+        )
+
+
+def test_replay_map_rejects_invalid_comet_spawn_step(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    replay_map = _replay_map()
+    replay_map["comet_schedule"] = _comet_schedule(spawn_step=51)
+    with pytest.raises(ValueError, match="spawn steps"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b"],
+                games_per_pair=1,
+                mode="fast",
+                seed_mode="replay",
+                replay_map=replay_map,
+            )
+        )
+
+
+def test_replay_map_rejects_malformed_comet_paths(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    replay_map = _replay_map()
+    replay_map["comet_schedule"] = _comet_schedule()
+    replay_map["comet_schedule"][0]["paths"] = [[[1, 2]]]
+    with pytest.raises(ValueError, match="4 paths"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b"],
+                games_per_pair=1,
+                mode="fast",
+                seed_mode="replay",
+                replay_map=replay_map,
+            )
+        )
 
 
 # --------------------------------------------------------------------------
