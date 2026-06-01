@@ -1,11 +1,12 @@
 //! Smoke tests for the hellburner port.
 
-use crate::engine::{Configuration, EngineState};
+use super::reference_engine::RefEngine;
+use crate::engine::Configuration;
 use crate::entity_cache::EntityCache;
 use crate::hellburner;
 use crate::world::WorldState;
 
-fn cache_for(state: &EngineState) -> EntityCache {
+fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(
         &state.initial_planets,
         &state.comets,
@@ -15,7 +16,7 @@ fn cache_for(state: &EngineState) -> EntityCache {
     )
 }
 
-fn build_world<'a>(state: &EngineState, cache: &'a EntityCache, player: i64) -> WorldState<'a> {
+fn build_world<'a>(state: &RefEngine, cache: &'a EntityCache, player: i64) -> WorldState<'a> {
     WorldState::build(
         player,
         state.step,
@@ -31,21 +32,22 @@ fn build_world<'a>(state: &EngineState, cache: &'a EntityCache, player: i64) -> 
 
 /// Plan must not oversubscribe any source planet or emit launches from planets
 /// we don't own.
-fn assert_plan_is_legal(world: &WorldState, moves: &[(i64, f64, i64)]) {
+fn assert_plan_is_legal(world: &WorldState, moves: &[crate::engine::MoveAction]) {
     let mut spent: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    for (src_id, _angle, ships) in moves {
-        assert!(*ships >= 1, "move with non-positive ships");
+    for m in moves {
+        assert!(m.ships >= 1, "move with non-positive ships");
         let src = world
             .planets
             .iter()
-            .find(|p| p.id == *src_id)
+            .find(|p| p.id == m.from_id)
             .expect("move from unknown planet id");
         assert_eq!(src.owner, world.player, "move from non-owned planet");
-        *spent.entry(*src_id).or_insert(0) += *ships;
+        *spent.entry(m.from_id).or_insert(0) += m.ships;
         assert!(
-            spent[src_id] <= src.ships,
-            "move oversubscribed planet {src_id}: {} > {}",
-            spent[src_id],
+            spent[&m.from_id] <= src.ships,
+            "move oversubscribed planet {}: {} > {}",
+            m.from_id,
+            spent[&m.from_id],
             src.ships
         );
     }
@@ -53,7 +55,7 @@ fn assert_plan_is_legal(world: &WorldState, moves: &[(i64, f64, i64)]) {
 
 #[test]
 fn plan_runs_on_initial_state() {
-    let state = EngineState::new(42, 2, Configuration::default());
+    let state = RefEngine::new(42, 2, Configuration::default());
     let cache = cache_for(&state);
     let world = build_world(&state, &cache, 0);
     let moves = hellburner::plan(&world);
@@ -63,7 +65,7 @@ fn plan_runs_on_initial_state() {
 #[test]
 fn plan_after_early_game_phase() {
     // Step past EARLY_ROUNDS so the main loop (not the DFS) is exercised.
-    let mut state = EngineState::new(42, 2, Configuration::default());
+    let mut state = RefEngine::new(42, 2, Configuration::default());
     let mut cache = cache_for(&state);
     let noop: Vec<Vec<crate::engine::MoveAction>> = vec![Vec::new(), Vec::new()];
     for _ in 0..5 {
@@ -77,7 +79,7 @@ fn plan_after_early_game_phase() {
 
 #[test]
 fn search_candidates_includes_greedy_plan() {
-    let state = EngineState::new(42, 2, Configuration::default());
+    let state = RefEngine::new(42, 2, Configuration::default());
     let cache = cache_for(&state);
     let world = build_world(&state, &cache, 0);
     let greedy = hellburner::plan(&world);
@@ -90,7 +92,7 @@ fn search_candidates_includes_greedy_plan() {
 fn plan_returns_empty_when_no_enemies() {
     // Build a 4-player state, then give player 0 ownership of every planet so
     // they have no enemy planets. plan() must short-circuit to empty.
-    let mut state = EngineState::new(7, 4, Configuration::default());
+    let mut state = RefEngine::new(7, 4, Configuration::default());
     for p in state.planets.iter_mut() {
         p.owner = 0;
     }

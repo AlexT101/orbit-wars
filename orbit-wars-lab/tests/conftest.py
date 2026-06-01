@@ -33,3 +33,16 @@ def copy_fixture_agent(fixture_name: str, dest: Path) -> Path:
     target = dest / fixture_name
     shutil.copytree(src, target)
     return target
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _shutdown_api_scheduler_at_session_end():
+    """Tear down any process-wide scheduler the API built so its pebble worker
+    pool doesn't outlive the test session."""
+    yield
+    try:
+        from orbit_wars_app import api
+
+        api._shutdown_scheduler()
+    except Exception:
+        pass

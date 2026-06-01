@@ -12,16 +12,29 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use crate::blockers::AimResult;
 use crate::constants::{EPISODE_STEPS, HORIZON};
-use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
+use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 use crate::entity_cache::EntityCache;
+
+/// Step-scoped, lock-free L1 aim cache shared across every [`WorldState`] and
+/// `HellburnerModel` built during one `Bot::compute_moves` call. Keyed by the
+/// **absolute** launch turn (`current_turn + launch_turn_offset`) so it stays
+/// correct as the rollout walks `current_turn` forward; aim is player- and
+/// view-agnostic, so the same key resolves to the same shot for every model.
+///
+/// Lives on the `compute_moves` stack (one OS thread for the whole step) and is
+/// threaded in by reference — never stored in the `Bot` pyclass and never shared
+/// across threads — so a bare `RefCell` is sound here without any `Sync` shim.
+pub type ShotL1 = RefCell<HashMap<(i64, i64, i64, i64), Option<AimResult>>>;
 use crate::helpers::{
     count_players, simulate_planet_timeline, state_at_timeline, ArrivalEvent, ArrivalLedger,
     PlanetTimeline, TimelineCache,
 };
-use crate::sim_probe::SimProbe;
 
 /// Per-turn world snapshot. Strategy code borrows this and never mutates it.
 pub struct WorldState<'a> {
@@ -29,17 +42,22 @@ pub struct WorldState<'a> {
     pub step: i64,
     pub angular_velocity: f64,
     pub entity_cache: &'a EntityCache,
+    /// Optional step-scoped L1 aim cache (see [`ShotL1`]). `None` for tests and
+    /// ad-hoc worlds, which fall back to each `HellburnerModel`'s own per-model
+    /// cache. Set by the live `Bot` paths so all models in a step share hits.
+    pub shot_l1: Option<&'a ShotL1>,
     pub timeline_cache: TimelineCache,
 
     pub planets: Vec<Planet>,
     pub fleets: Vec<Fleet>,
-    pub planet_by_id: HashMap<i64, Planet>,
+    /// `planet_id → index into `planets`. Avoids a second full copy of every
+    /// planet; look up positional data via [`Self::planet`].
+    pub planet_by_id: HashMap<i64, usize>,
     pub comet_ids: HashSet<i64>,
 
     pub my_planets: Vec<Planet>,
     pub enemy_planets: Vec<Planet>,
     pub neutral_planets: Vec<Planet>,
-    pub static_neutral_planets: Vec<Planet>,
 
     pub num_players: usize,
     pub is_four_player: bool,
@@ -76,7 +94,12 @@ impl<'a> WorldState<'a> {
         entity_cache: &'a EntityCache,
     ) -> Self {
         let num_players = count_players(&planets, &fleets);
-        let next_fleet_id = fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
+        let next_fleet_id = fleets
+            .iter()
+            .map(|f| f.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let engine = EngineState::from_observation_parts(
             step,
             angular_velocity,
@@ -87,79 +110,58 @@ impl<'a> WorldState<'a> {
             comet_planet_ids,
             comets,
             num_players,
-            Configuration::default(),
         );
         Self::from_engine(player, &engine, entity_cache)
     }
 
-    /// Fast-path constructor for callers (rollout / search loop) that already
-    /// hold an `EngineState`, skipping the reconstruction + Vec clones `build` does.
-    pub fn from_engine(
-        player: i64,
-        engine: &EngineState,
-        entity_cache: &'a EntityCache,
-    ) -> Self {
-        let probe = SimProbe::from_engine(engine);
-        Self::from_simprobe(player, &probe, entity_cache)
+    /// Constructor for callers that hold an `EngineState` (the non-search
+    /// `compute_moves` path and tests): spin up a forward [`Simulator`], walk
+    /// the `HORIZON`-turn arrival ledger, and snapshot. The rollout/search loop
+    /// instead calls [`Self::from_simulator_with_ledger`] directly so the
+    /// player-agnostic ledger can be shared across players.
+    pub fn from_engine(player: i64, engine: &EngineState, entity_cache: &'a EntityCache) -> Self {
+        let sim = Simulator::new(engine);
+        let ledger = ArrivalLedger::build(&sim, HORIZON, entity_cache);
+        Self::from_simulator_with_ledger(player, &sim, &ledger, entity_cache)
     }
 
-    /// Canonical constructor used during rollout: builds the snapshot directly
-    /// from a [`SimProbe`] without ever materializing a full `EngineState`.
-    /// `TimelineCache::build` internally forks the probe to walk forward
-    /// `HORIZON` turns for the arrival ledger.
-    pub fn from_simprobe(
-        player: i64,
-        probe: &SimProbe,
-        entity_cache: &'a EntityCache,
-    ) -> Self {
-        let ledger = ArrivalLedger::build(probe, HORIZON, entity_cache);
-        Self::from_simprobe_with_ledger(player, probe, &ledger, entity_cache)
-    }
-
-    /// Shared-ledger variant of [`Self::from_simprobe`]. Skips the probe walk
+    /// Shared-ledger constructor used during rollout. Skips the sim walk
     /// in favor of reusing `ledger` — caller is responsible for ensuring the
-    /// ledger was built from the same probe snapshot. Used by `rollout` to
+    /// ledger was built from the same sim snapshot. Used by `rollout` to
     /// share the player-agnostic forward sim across every player's WorldState
     /// in a reactive turn.
-    pub fn from_simprobe_with_ledger(
+    pub fn from_simulator_with_ledger(
         player: i64,
-        probe: &SimProbe,
+        sim: &Simulator,
         ledger: &ArrivalLedger,
         entity_cache: &'a EntityCache,
     ) -> Self {
-        let step = probe.step_count();
-        let angular_velocity = probe.angular_velocity();
-        let num_players = probe.num_players();
-        let timeline_cache = TimelineCache::from_ledger(probe.planets(), player, ledger);
+        let step = sim.step_count();
+        let angular_velocity = sim.angular_velocity();
+        let num_players = sim.num_players();
+        let timeline_cache = TimelineCache::from_ledger(sim.planets(), player, ledger);
 
-        let planets: Vec<Planet> = probe.planets().to_vec();
-        let fleets: Vec<Fleet> = probe.fleets().to_vec();
-        let comet_planet_ids: Vec<i64> = probe.comet_planet_ids().to_vec();
+        let planets: Vec<Planet> = sim.planets().to_vec();
+        let fleets: Vec<Fleet> = sim.fleets().to_vec();
+        let comet_planet_ids: Vec<i64> = sim.comet_planet_ids().to_vec();
 
-        let mut planet_by_id: HashMap<i64, Planet> = HashMap::with_capacity_and_hasher(planets.len(), Default::default());
-        for planet in &planets {
-            planet_by_id.insert(planet.id, planet.clone());
+        let mut planet_by_id: HashMap<i64, usize> =
+            HashMap::with_capacity_and_hasher(planets.len(), Default::default());
+        for (idx, planet) in planets.iter().enumerate() {
+            planet_by_id.insert(planet.id, idx);
         }
         let comet_ids: HashSet<i64> = comet_planet_ids.iter().copied().collect();
 
         let mut my_planets = Vec::new();
         let mut enemy_planets = Vec::new();
         let mut neutral_planets = Vec::new();
-        let mut static_neutral_planets = Vec::new();
         for planet in &planets {
             if planet.owner == player {
-                my_planets.push(planet.clone());
+                my_planets.push(*planet);
             } else if planet.owner == -1 {
-                neutral_planets.push(planet.clone());
-                if entity_cache
-                    .get(planet.id)
-                    .map(|e| e.is_static())
-                    .unwrap_or(false)
-                {
-                    static_neutral_planets.push(planet.clone());
-                }
+                neutral_planets.push(*planet);
             } else {
-                enemy_planets.push(planet.clone());
+                enemy_planets.push(*planet);
             }
         }
 
@@ -205,6 +207,7 @@ impl<'a> WorldState<'a> {
             step,
             angular_velocity,
             entity_cache,
+            shot_l1: None,
             timeline_cache,
             planets,
             fleets,
@@ -213,7 +216,6 @@ impl<'a> WorldState<'a> {
             my_planets,
             enemy_planets,
             neutral_planets,
-            static_neutral_planets,
             num_players,
             is_four_player,
             remaining_steps,
@@ -232,7 +234,7 @@ impl<'a> WorldState<'a> {
 
     #[inline]
     pub fn planet(&self, id: i64) -> &Planet {
-        &self.planet_by_id[&id]
+        &self.planets[self.planet_by_id[&id]]
     }
 
     pub fn is_static(&self, planet_id: i64) -> bool {
@@ -275,7 +277,12 @@ impl<'a> WorldState<'a> {
                 return state_at_timeline(baseline, cutoff);
             }
         }
-        let merged = merge_arrivals(self.timeline_cache.arrivals(target_id), planned, extra, cutoff);
+        let merged = merge_arrivals(
+            self.timeline_cache.arrivals(target_id),
+            planned,
+            extra,
+            cutoff,
+        );
         let target = self.planet(target_id);
         let expiry = self.timeline_cache.expiry(target_id);
         let tl = simulate_planet_timeline(target, &merged, self.player, cutoff, expiry);
@@ -290,13 +297,23 @@ impl<'a> WorldState<'a> {
         extra: &[ArrivalEvent],
     ) -> PlanetTimeline {
         let horizon = horizon.max(1);
-        let merged = merge_arrivals(self.timeline_cache.arrivals(target_id), planned, extra, horizon);
+        let merged = merge_arrivals(
+            self.timeline_cache.arrivals(target_id),
+            planned,
+            extra,
+            horizon,
+        );
         let target = self.planet(target_id);
         let expiry = self.timeline_cache.expiry(target_id);
         simulate_planet_timeline(target, &merged, self.player, horizon, expiry)
     }
 
-    pub fn hold_status(&self, target_id: i64, planned: &[ArrivalEvent], horizon: i64) -> HoldStatus {
+    pub fn hold_status(
+        &self,
+        target_id: i64,
+        planned: &[ArrivalEvent],
+        horizon: i64,
+    ) -> HoldStatus {
         if !planned.is_empty() {
             let tl = self.projected_timeline(target_id, horizon, planned, &[]);
             HoldStatus {
@@ -338,8 +355,7 @@ pub fn merge_arrivals(
     extra: &[ArrivalEvent],
     cutoff: i64,
 ) -> Vec<ArrivalEvent> {
-    let mut out: Vec<ArrivalEvent> =
-        Vec::with_capacity(base.len() + planned.len() + extra.len());
+    let mut out: Vec<ArrivalEvent> = Vec::with_capacity(base.len() + planned.len() + extra.len());
     for ev in base {
         if ev.turns <= cutoff {
             out.push(*ev);

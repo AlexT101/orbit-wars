@@ -86,7 +86,7 @@ export async function renderTournamentDetail(
     stopBtn.disabled = true;
     stopBtn.textContent = "Stopping...";
     try {
-      await api.cancelTournament(runId);
+      await api.stopTournament(runId);
     } catch (e) {
       stopBtn.disabled = false;
       stopBtn.textContent = "Stop";
@@ -103,7 +103,6 @@ export async function renderTournamentDetail(
         games_per_pair: config.games_per_pair ?? 1,
         mode: config.mode || "fast",
         format: config.format || "2p",
-        parallel: config.parallel ?? 1,
         save_replays: config.save_replays ?? true,
         seed_base: useRandomSeed ? randomSeedBase() : (config.seed_base ?? 42),
         seed_mode: useRandomSeed ? "random" : "fixed",

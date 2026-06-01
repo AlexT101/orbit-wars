@@ -36,12 +36,99 @@ export async function renderSettings(root: HTMLElement): Promise<void> {
             bots in <code>agents/external/</code> can't read them.
           </p>
         </div>
+
+        <div class="settings-group">
+          <div class="settings-group-head">
+            <h3>Match Settings</h3>
+            <div id="sched-settings-status" class="kauth-status">Loading…</div>
+          </div>
+          <div class="create-config">
+            <div class="cfg-row">
+              <span>Workers</span>
+              <div class="seg-group" id="set-workers">
+                <button class="config-pill" data-v="1">1</button>
+                <button class="config-pill" data-v="2">2</button>
+                <button class="config-pill" data-v="4">4</button>
+                <button class="config-pill" data-v="6">6</button>
+                <button class="config-pill" data-v="8">8</button>
+                <button class="config-pill" data-v="12">12</button>
+                <button class="config-pill" data-v="16">16</button>
+              </div>
+            </div>
+            <div class="cfg-row">
+              <span>Reload bots</span>
+              <div class="create-seed-controls">
+                <button class="scrape-btn" id="sched-restart" style="margin-left: 0">Restart workers</button>
+                <span id="sched-restart-status" class="scrape-status" hidden></span>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
   `;
   installHeaderNav(root, "settings");
 
-  await renderAuthSection();
+  await Promise.all([renderAuthSection(), renderSchedulerSection()]);
+}
+
+async function renderSchedulerSection(): Promise<void> {
+  const statusEl = document.getElementById("sched-settings-status")!;
+  const workersGroup = document.getElementById("set-workers")!;
+  const restartBtn = document.getElementById("sched-restart") as HTMLButtonElement;
+  const restartStatus = document.getElementById("sched-restart-status")!;
+
+  function selectPill(value: number): void {
+    workersGroup.querySelectorAll<HTMLButtonElement>(".config-pill").forEach((b) =>
+      b.classList.toggle("on", b.dataset.v === String(value)),
+    );
+  }
+
+  let runningCount = 0;
+  try {
+    const s = await api.getScheduler();
+    selectPill(s.concurrency);
+    runningCount = s.running_count;
+    statusEl.textContent = `${s.running_count} running · ${s.queued_total} queued`;
+  } catch {
+    statusEl.textContent = "Unavailable";
+    statusEl.classList.add("err");
+    return;
+  }
+
+  // Worker count applies immediately on click (like the tournament config pills).
+  workersGroup.querySelectorAll<HTMLButtonElement>(".config-pill").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const value = parseInt(btn.dataset.v!, 10);
+      selectPill(value);
+      try {
+        const r = await api.setConcurrency(value);
+        selectPill(r.concurrency);
+      } catch (e) {
+        statusEl.textContent = `Error: ${(e as Error).message}`;
+        statusEl.classList.add("err");
+      }
+    });
+  });
+
+  restartBtn.addEventListener("click", async () => {
+    if (runningCount > 0 &&
+        !confirm(`${runningCount} match(es) are running and will be re-queued. Restart workers?`)) {
+      return;
+    }
+    restartBtn.disabled = true;
+    restartStatus.hidden = false;
+    restartStatus.textContent = "Restarting…";
+    try {
+      await api.restartPool();
+      restartStatus.textContent = "Workers restarted.";
+      setTimeout(() => (restartStatus.hidden = true), 1500);
+    } catch (e) {
+      restartStatus.textContent = `Error: ${(e as Error).message}`;
+    } finally {
+      restartBtn.disabled = false;
+    }
+  });
 }
 
 async function renderAuthSection(): Promise<void> {
@@ -180,7 +267,7 @@ function mountTokenForm(host: HTMLElement, submitLabel: string): void {
   host.innerHTML = `
     <div class="kauth-form">
       <label class="kauth-label">
-        Paste a <code>KGAT_…</code> access token <em>or</em> the contents of <code>kaggle.json</code>
+        <span class="kauth-label-text">Paste a <code>KGAT_…</code> access token <em>or</em> the contents of <code>kaggle.json</code></span>
         <textarea id="kauth-token" class="kauth-token" rows="4"
           placeholder='KGAT_… (or {"username":"…","key":"…"})'
           spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>

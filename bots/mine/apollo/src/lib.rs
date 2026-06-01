@@ -5,10 +5,9 @@ mod blockers;
 mod constants;
 mod engine;
 mod entity_cache;
-mod helpers;
 mod hellburner;
+mod helpers;
 mod rollout;
-mod sim_probe;
 mod world;
 
 #[cfg(test)]
@@ -18,9 +17,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
-use crate::constants::{COMET_SPAWN_STEPS, TOTAL_OVERAGE_TIME};
-use crate::engine::{CometGroup, Configuration, EngineState, Fleet, Planet};
+use crate::constants::{COMET_SPAWN_STEPS, HORIZON, TOTAL_OVERAGE_TIME};
+use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 use crate::entity_cache::EntityCache;
+use crate::helpers::ArrivalLedger;
 use crate::rollout::pick_plan_by_rollout;
 use crate::world::WorldState;
 
@@ -41,6 +41,22 @@ fn get_item<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny
         .ok_or_else(|| PyValueError::new_err(format!("obs missing field '{}'", key)))
 }
 
+/// Extract an integer field, tolerating whole-number floats.
+///
+/// The Kaggle engine sanitizes a move's `ships` to `int(...)` but stores the
+/// move's `from_id` verbatim into the resulting fleet's `from_planet_id` slot
+/// (`orbit_wars.py`). An opponent who submits a move with a float planet id
+/// (e.g. `33.0`) therefore produces a fleet whose `from_planet_id` is a float,
+/// which a plain `extract::<i64>()` rejects with "'float' object cannot be
+/// interpreted as an integer", crashing our agent on its next turn. Falling
+/// back to an `f64` extraction makes parsing robust to such poisoned fields.
+fn extract_i64(v: &Bound<'_, PyAny>) -> PyResult<i64> {
+    match v.extract::<i64>() {
+        Ok(i) => Ok(i),
+        Err(_) => Ok(v.extract::<f64>()?.round() as i64),
+    }
+}
+
 fn parse_planets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Planet>> {
     let seq: Bound<'_, PySequence> = seq.downcast::<PySequence>()?.clone();
     let len = seq.len()?;
@@ -48,13 +64,13 @@ fn parse_planets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Planet>> {
     for i in 0..len {
         let row = seq.get_item(i)?;
         out.push(Planet {
-            id: row.get_item(0)?.extract()?,
-            owner: row.get_item(1)?.extract()?,
+            id: extract_i64(&row.get_item(0)?)?,
+            owner: extract_i64(&row.get_item(1)?)?,
             x: row.get_item(2)?.extract()?,
             y: row.get_item(3)?.extract()?,
             radius: row.get_item(4)?.extract()?,
-            ships: row.get_item(5)?.extract()?,
-            production: row.get_item(6)?.extract()?,
+            ships: extract_i64(&row.get_item(5)?)?,
+            production: extract_i64(&row.get_item(6)?)?,
         });
     }
     Ok(out)
@@ -67,13 +83,13 @@ fn parse_fleets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Fleet>> {
     for i in 0..len {
         let row = seq.get_item(i)?;
         out.push(Fleet {
-            id: row.get_item(0)?.extract()?,
-            owner: row.get_item(1)?.extract()?,
+            id: extract_i64(&row.get_item(0)?)?,
+            owner: extract_i64(&row.get_item(1)?)?,
             x: row.get_item(2)?.extract()?,
             y: row.get_item(3)?.extract()?,
             angle: row.get_item(4)?.extract()?,
-            from_planet_id: row.get_item(5)?.extract()?,
-            ships: row.get_item(6)?.extract()?,
+            from_planet_id: extract_i64(&row.get_item(5)?)?,
+            ships: extract_i64(&row.get_item(6)?)?,
         });
     }
     Ok(out)
@@ -106,7 +122,7 @@ fn parse_comets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<CometGroup>> {
         for j in 0..paths_seq.len()? {
             paths.push(parse_path(&paths_seq.get_item(j)?)?);
         }
-        let path_index: i64 = get_item(dict, "path_index")?.extract()?;
+        let path_index: i64 = extract_i64(&get_item(dict, "path_index")?)?;
         out.push(CometGroup {
             planet_ids,
             paths,
@@ -118,13 +134,12 @@ fn parse_comets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<CometGroup>> {
 
 impl Observation {
     fn from_dict(obs: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let player: i64 = get_item(obs, "player")?.extract()?;
+        let player: i64 = extract_i64(&get_item(obs, "player")?)?;
         let planets = parse_planets(&get_item(obs, "planets")?)?;
         let fleets = parse_fleets(&get_item(obs, "fleets")?)?;
         let initial_planets = parse_planets(&get_item(obs, "initial_planets")?)?;
         let comets = parse_comets(&get_item(obs, "comets")?)?;
-        let comet_planet_ids: Vec<i64> =
-            get_item(obs, "comet_planet_ids")?.extract()?;
+        let comet_planet_ids: Vec<i64> = get_item(obs, "comet_planet_ids")?.extract()?;
         let angular_velocity: f64 = get_item(obs, "angular_velocity")?.extract()?;
         let remaining_overage_time: f64 = match obs.get_item("remainingOverageTime")? {
             Some(v) => v.extract().unwrap_or(TOTAL_OVERAGE_TIME),
@@ -164,12 +179,12 @@ impl Bot {
         self.current_turn
     }
 
-    fn compute_moves(
-        &mut self,
-        obs: &Bound<'_, PyDict>,
-    ) -> PyResult<Vec<(i64, f64, i64)>> {
+    fn compute_moves(&mut self, obs: &Bound<'_, PyDict>) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
+        // Step-scoped L1 aim cache, shared across every model built this step.
+        // Declared before `world` so it outlives the borrow `world` takes on it.
+        let shot_l1 = crate::world::ShotL1::default();
         let cache = self.cache.as_ref().expect("entity cache populated above");
 
         let mut world = WorldState::build(
@@ -184,10 +199,14 @@ impl Bot {
             cache,
         );
         world.remaining_overage_time = obs.remaining_overage_time;
+        world.shot_l1 = Some(&shot_l1);
 
         let moves = crate::hellburner::plan(&world);
         self.current_turn += 1;
-        Ok(moves)
+        Ok(moves
+            .into_iter()
+            .map(|m| (m.from_id, m.angle, m.ships))
+            .collect())
     }
 
     /// Plan with rollout-based multi-candidate selection. Costs ~5-10x more
@@ -198,12 +217,21 @@ impl Bot {
     ) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
+        // Step-scoped L1 aim cache shared across candidate generation and every
+        // model built inside the rollout. Declared before any borrow of it.
+        let shot_l1 = crate::world::ShotL1::default();
 
         // Build engine state once; reused for candidate WorldState and rollout seed.
         // NOTE: next_fleet_id may recycle destroyed fleets' IDs since we only
         // see currently-visible fleets. Safe while no consumer keys on fleet
         // ID across turns; revisit if any cache/hash ever does.
-        let next_fleet_id = obs.fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
+        let next_fleet_id = obs
+            .fleets
+            .iter()
+            .map(|f| f.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
         let player = obs.player;
         let initial_state = EngineState::from_observation_parts(
@@ -216,16 +244,22 @@ impl Bot {
             obs.comet_planet_ids,
             obs.comets,
             num_players,
-            Configuration::default(),
         );
 
-        // Plan candidates inside a block so the WorldState's immutable borrow
-        // on the cache ends before the rollout reborrows it mutably.
-        let candidates = {
+        // The turn-0 arrival ledger is player-agnostic, so build it once here and
+        // reuse it both for candidate generation and for the opponent turn-0
+        // modelling inside the rollout — saving a redundant HORIZON-turn walk.
+        // Built in a block so the WorldState's immutable borrow on the cache
+        // ends before the rollout reborrows it mutably.
+        let (candidates, initial_ledger) = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
-            let mut world = WorldState::from_engine(player, &initial_state, cache_ref);
+            let initial_sim = Simulator::new(&initial_state);
+            let ledger = ArrivalLedger::build(&initial_sim, HORIZON, cache_ref);
+            let mut world =
+                WorldState::from_simulator_with_ledger(player, &initial_sim, &ledger, cache_ref);
             world.remaining_overage_time = obs.remaining_overage_time;
-            crate::hellburner::search_candidates(&world)
+            world.shot_l1 = Some(&shot_l1);
+            (crate::hellburner::search_candidates(&world), ledger)
         };
 
         let cache_mut = self.cache.as_mut().expect("entity cache populated above");
@@ -237,9 +271,14 @@ impl Bot {
             crate::hellburner::search_candidates,
             cache_mut,
             obs.remaining_overage_time,
+            Some(&initial_ledger),
+            Some(&shot_l1),
         );
         self.current_turn += 1;
-        Ok(moves)
+        Ok(moves
+            .into_iter()
+            .map(|m| (m.from_id, m.angle, m.ships))
+            .collect())
     }
 }
 
@@ -269,9 +308,22 @@ impl Bot {
     }
 }
 
+/// TEMP instrumentation: read the aim hot-path stage counters as a string.
+#[pyfunction]
+fn aim_counters_report() -> String {
+    crate::blockers::counters::report()
+}
+
+/// TEMP instrumentation: zero the aim hot-path stage counters.
+#[pyfunction]
+fn aim_counters_reset() {
+    crate::blockers::counters::reset();
+}
+
 #[pymodule]
 fn apollo_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bot>()?;
+    m.add_function(wrap_pyfunction!(aim_counters_report, m)?)?;
+    m.add_function(wrap_pyfunction!(aim_counters_reset, m)?)?;
     Ok(())
 }
-

@@ -13,6 +13,8 @@ from orbit_wars_app.tournament import Tournament
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+from tests.zoo import REAL_ZOO
+
 
 @pytest.mark.asyncio
 async def test_get_replay_returns_native_json(tmp_path: Path, monkeypatch):
@@ -23,7 +25,7 @@ async def test_get_replay_returns_native_json(tmp_path: Path, monkeypatch):
         mode="fast",
     )
     run_id = Tournament(
-        config=cfg, runs_root=tmp_path, zoo_root=PROJECT_ROOT / "agents",
+        config=cfg, runs_root=tmp_path, zoo_root=REAL_ZOO,
     ).run()
 
     transport = ASGITransport(app=app)

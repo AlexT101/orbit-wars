@@ -19,7 +19,9 @@ from orbit_wars_app.tournament import Tournament
 
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-RANDOM_AGENT_DIR = PROJECT_ROOT / "agents" / "baselines" / "random"
+
+from tests.zoo import REAL_ZOO
+RANDOM_AGENT_DIR = REAL_ZOO / "baselines" / "random"
 
 
 def test_per_agent_durations_from_logs_extracts_only_dicts_with_duration():
@@ -93,7 +95,7 @@ def test_tournament_persists_runtimes_json(tmp_path: Path):
     Tournament(
         config=cfg,
         runs_root=tmp_path,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     ).run()
 
     runtimes_path = tmp_path / "runtimes.json"
@@ -122,7 +124,7 @@ def test_runtime_store_clear_after_tournament(tmp_path: Path):
     Tournament(
         config=cfg,
         runs_root=tmp_path,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     ).run()
 
     store = RuntimeStore(tmp_path / "runtimes.json")

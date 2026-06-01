@@ -11,7 +11,7 @@
 //!     [`WorldState::projected_timeline`] — hellburner's `simulate_planet_timeline`.
 //!
 //! Hellburner-specific data we build here:
-//!   * Proximity graph (`MAX_DISTANCE=38`, `ROTATION_LOOK_AHEAD=10`).
+//!   * Proximity graph (`MAX_DISTANCE=38`, `ROTATION_LOOK_AHEAD_TURNS=10`).
 //!   * `reinforcement_target` per owned planet (frontline BFS).
 //!   * Per-turn `PlanState` (spent ships + planned commitments).
 
@@ -21,43 +21,17 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::constants::HORIZON;
-use crate::engine::Planet;
-use crate::entity_cache::{AimCacheVerdict};
+use crate::constants::{
+    A_S_LOOKAHEAD, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, OFFSET_LOOKAHEAD, OPENING_TURNS,
+    ROTATION_LOOK_AHEAD_TURNS,
+};
+use crate::engine::{MoveAction, Planet};
+use crate::entity_cache::{AimCacheVerdict, InvariantVerdict};
 use crate::helpers::{
-    aim_with_prediction, dist, simulate_planet_timeline, AimResult, ArrivalEvent,
-    PlanetTimeline,
+    aim_ignoring_comets, aim_with_prediction, dist, simulate_checkpoint_into,
+    simulate_planet_timeline, state_at_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
 use crate::world::{merge_arrivals, WorldState};
-
-// ── Constants ────────────────────────────────────────────────────────────
-const EARLY_ROUNDS: i64 = 3;
-const MAX_DISTANCE: f64 = 38.0;
-const ROTATION_LOOK_AHEAD: i64 = 10;
-const REINFORCEMENT_SIZE: i64 = 17;
-const GARRISON_SIZE: i64 = 11;
-const SECOND_ENEMY_ARRIVAL_TOL: i64 = 1;
-const TRIM_MIN_SHIPS: i64 = 10;
-/// How many turns of delayed-launch we sweep per target when computing the
-/// urgency of acting **this** turn. The δ=0 entry decides what we actually
-/// commit; δ>0 entries only feed the priority calculation.
-const OFFSET_LOOKAHEAD: i64 = 5;
-/// Cap on inbound owned sources we enumerate for full 2^N subset search.
-/// Beyond this the nearest `MAX_SUBSET_SOURCES` are kept (sources are
-/// already distance-ordered by `inbound_edges`) — in practice maps in this
-/// game rarely have more than a handful of inbound owned neighbors.
-const MAX_SUBSET_SOURCES: usize = 10;
-/// Max extra launch delay (beyond the subset's base offset) a single source
-/// will accept when coordinating arrivals to land on the same turn as the
-/// subset's latest-arriving source. Per-source scan, cache-friendly.
-const MAX_COORD_DELAY: i64 = 5;
-/// How many turns past the natural max-arrival the coordinated schedule will
-/// push the cluster. Lets slow-growing sources accumulate `production·d`
-/// extra ships at the cost of arriving later — a richer brute-force sweep
-/// that complements the `MAX_COORD_DELAY` per-source delay budget.
-const A_S_LOOKAHEAD: i64 = 3;
-
-type FleetOrder = (i64, f64, i64); // (src_id, angle, ships)
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -71,7 +45,7 @@ pub struct HellburnerModel<'a> {
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
     /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
     /// Avoids repeated traffic to the L2 `EntityCache::aim_cache` inside the
-    /// inner loops of `evaluate_frontline_strategy`, `evaluate_move_orders`
+    /// inner loops of `evaluate_frontline_strategy`, `evaluate_target`
     /// (where the same shot can be re-queried several times across the main
     /// loop and the worst-case sub-rollout), and `run_early_game`'s DFS
     /// (which probes both `offset == 0` shots and delayed-launch shots).
@@ -89,14 +63,17 @@ impl<'a> HellburnerModel<'a> {
             .map(|p| p.id)
             .collect();
 
+        let non_comets: Vec<&Planet> = state
+            .planets
+            .iter()
+            .filter(|p| non_comet_ids.contains(&p.id))
+            .collect();
+
         let mut future_pos: HashMap<i64, [f64; 2]> = HashMap::default();
-        for p in &state.planets {
-            if !non_comet_ids.contains(&p.id) {
-                continue;
-            }
+        for p in &non_comets {
             let pos = state
                 .entity_cache
-                .position(p.id, 1 + ROTATION_LOOK_AHEAD)
+                .position(p.id, 1 + ROTATION_LOOK_AHEAD_TURNS)
                 .unwrap_or([p.x, p.y]);
             future_pos.insert(p.id, pos);
         }
@@ -107,12 +84,9 @@ impl<'a> HellburnerModel<'a> {
             inbound_edges.insert(pid, Vec::new());
             outbound_edges.insert(pid, Vec::new());
         }
-        for src in &state.planets {
-            if !non_comet_ids.contains(&src.id) {
-                continue;
-            }
-            for dst in &state.planets {
-                if dst.id == src.id || !non_comet_ids.contains(&dst.id) {
+        for src in &non_comets {
+            for dst in &non_comets {
+                if src.id == dst.id {
                     continue;
                 }
                 let [fx, fy] = future_pos[&dst.id];
@@ -130,8 +104,13 @@ impl<'a> HellburnerModel<'a> {
             }
         }
 
-        let reinforcement_target =
-            build_reinforcement_targets(state, &non_comet_ids, &inbound_edges, &outbound_edges, player);
+        let reinforcement_target = build_reinforcement_targets(
+            state,
+            &non_comet_ids,
+            &inbound_edges,
+            &outbound_edges,
+            player,
+        );
 
         Self {
             state,
@@ -164,20 +143,104 @@ impl<'a> HellburnerModel<'a> {
         launch_turn_offset: i64,
     ) -> Option<AimResult> {
         let ships = ships.max(1);
-        let key = (src_id, target_id, ships, launch_turn_offset);
-        if let Some(&cached) = self.shot_cache.borrow().get(&key) {
+        let cache = self.state.entity_cache;
+        // L1 is keyed by the *absolute* launch turn so the step-scoped shared
+        // cache stays correct as the rollout walks `current_turn` forward (a
+        // relative-offset key would collide across turns). Falls back to the
+        // model's own per-model cache when no shared L1 is threaded in.
+        let abs_launch = cache.current_turn + launch_turn_offset;
+        let key = (src_id, target_id, ships, abs_launch);
+        let l1 = self.state.shot_l1.unwrap_or(&self.shot_cache);
+        if let Some(&cached) = l1.borrow().get(&key) {
+            // crate::blockers::counters::bump(&crate::blockers::counters::L1_HIT);
             return cached;
         }
-        let cache = self.state.entity_cache;
-        let result = match cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset) {
+        let _lookup = cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset);
+        // match _lookup {
+        //     AimCacheVerdict::Hit(_) => {
+        //         crate::blockers::counters::bump(&crate::blockers::counters::L2_HIT)
+        //     }
+        //     AimCacheVerdict::Miss => {
+        //         crate::blockers::counters::bump(&crate::blockers::counters::L2_MISS)
+        //     }
+        //     AimCacheVerdict::Stale => {
+        //         crate::blockers::counters::bump(&crate::blockers::counters::L2_STALE)
+        //     }
+        // }
+        let result = match _lookup {
             AimCacheVerdict::Hit(r) => r,
             AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
-                let r = aim_with_prediction(cache, src_id, target_id, ships, launch_turn_offset);
-                cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
-                r
+                // L3 — cross-turn invariant fast path for disc-qualified
+                // static→static / orbiting→orbiting shots. Skips lead_target and
+                // the per-entity planet sweep, only re-checking comets per turn.
+                match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
+                    InvariantVerdict::Use(r) => {
+                        // crate::blockers::counters::bump(&crate::blockers::counters::L3_USE);
+                        Some(r)
+                    }
+                    InvariantVerdict::SingleSolve => {
+                        // crate::blockers::counters::bump(&crate::blockers::counters::L3_SINGLE);
+                        let r = aim_with_prediction(
+                            cache,
+                            src_id,
+                            target_id,
+                            ships,
+                            launch_turn_offset,
+                        );
+                        cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
+                        r
+                    }
+                    InvariantVerdict::DualSolve => {
+                        // crate::blockers::counters::bump(&crate::blockers::counters::L3_DUAL);
+                        // Populate the invariant base with one comet-free solve,
+                        // then gate it against just the comets. Comet-clear ⇒ the
+                        // base is exactly this turn's shot (no second solve);
+                        // comet-blocked / disqualified ⇒ fall back to a normal
+                        // full solve.
+                        let base = aim_ignoring_comets(
+                            cache,
+                            src_id,
+                            target_id,
+                            ships,
+                            launch_turn_offset,
+                        );
+                        cache.invariant_aim_store(
+                            src_id,
+                            target_id,
+                            ships,
+                            launch_turn_offset,
+                            base,
+                        );
+                        match cache.invariant_aim_lookup(
+                            src_id,
+                            target_id,
+                            ships,
+                            launch_turn_offset,
+                        ) {
+                            InvariantVerdict::Use(r) => Some(r),
+                            _ => {
+                                let r = aim_with_prediction(
+                                    cache,
+                                    src_id,
+                                    target_id,
+                                    ships,
+                                    launch_turn_offset,
+                                );
+                                cache.aim_cache_store(
+                                    src_id,
+                                    target_id,
+                                    ships,
+                                    launch_turn_offset,
+                                    r,
+                                );
+                                r
+                            }
+                        }
+                    }
+                }
             }
         };
-        self.shot_cache.borrow_mut().insert(key, result);
+        l1.borrow_mut().insert(key, result);
         result
     }
 }
@@ -189,13 +252,6 @@ fn build_reinforcement_targets(
     outbound: &HashMap<i64, Vec<(i64, f64)>>,
     player: i64,
 ) -> HashMap<i64, i64> {
-    let owned_ids: HashSet<i64> = state
-        .my_planets
-        .iter()
-        .filter(|p| non_comet_ids.contains(&p.id))
-        .map(|p| p.id)
-        .collect();
-
     let mut front_line: HashSet<i64> = HashSet::default();
     for p in &state.my_planets {
         if !non_comet_ids.contains(&p.id) {
@@ -226,7 +282,7 @@ fn build_reinforcement_targets(
         head += 1;
         let dh = hops[&node];
         for (sid, _) in &inbound[&node] {
-            if !owned_ids.contains(sid) || hops.contains_key(sid) {
+            if state.planet(*sid).owner != player || hops.contains_key(sid) {
                 continue;
             }
             hops.insert(*sid, dh + 1);
@@ -257,7 +313,7 @@ fn build_reinforcement_targets(
         let mut reachable: Vec<i64> = outbound[&p.id]
             .iter()
             .filter_map(|(did, _)| {
-                if owned_ids.contains(did)
+                if state.planet(*did).owner == player
                     && !front_line.contains(did)
                     && hops.contains_key(did)
                 {
@@ -288,13 +344,37 @@ impl PlanState {
     fn ships_available(&self, src: &Planet) -> i64 {
         (src.ships - self.spent.get(&src.id).copied().unwrap_or(0)).max(0)
     }
-    /// Growth-aware available ships at a future launch offset. Counts the
-    /// production a source will accumulate over `offset` turns on top of its
-    /// current pool. Conservative against `spent`: every prior commitment is
-    /// subtracted regardless of when those ships are scheduled to leave.
-    fn ships_available_at(&self, src: &Planet, offset: i64) -> i64 {
+    /// Rollout-aware available ships at a future launch offset.
+    ///
+    /// O(1) in the common case — it reads the prebuilt baseline trajectory the
+    /// arrival ledger already produced. Only when this source has its own
+    /// planned reinforcements queued *this* turn does it pay a single per-call
+    /// planet sim to fold those in. Conservative against `spent`: every prior
+    /// commitment from this source is subtracted regardless of when those ships
+    /// are scheduled to leave.
+    fn ships_available_at(&self, world: &WorldState, src: &Planet, offset: i64) -> i64 {
+        let offset = offset.max(0);
         let spent = self.spent.get(&src.id).copied().unwrap_or(0);
-        (src.ships - spent + src.production * offset.max(0)).max(0)
+        let planned: &[ArrivalEvent] = self
+            .planned
+            .get(&src.id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let (owner, ships) = if planned.is_empty() {
+            match world.timeline_cache.baseline(src.id) {
+                Some(b) => state_at_timeline(b, offset),
+                // No cached trajectory: fall back to linear growth.
+                None => (src.owner, src.ships + src.production * offset),
+            }
+        } else {
+            // This source also has reinforcements we've planned this turn
+            let tl = world.projected_timeline(src.id, offset, planned, &[]);
+            state_at_timeline(&tl, offset)
+        };
+        if owner != world.player {
+            return 0;
+        }
+        (ships - spent).max(0)
     }
     fn commit(&mut self, src_id: i64, target_id: i64, ships: i64, arrival_turn: i64, owner: i64) {
         *self.spent.entry(src_id).or_insert(0) += ships;
@@ -368,6 +448,32 @@ fn neighbor_holds_under_worst_case(
         });
         half_pressure += half_ships;
     }
+
+    // TODO: When we properly integrate comets into our graph model, this extra
+    // comet check can be removed.
+    //
+    // Enemy comets are excluded from the proximity graph (`inbound_edges`), so
+    // the loop above never sees them.
+    for &cid in &world.comet_ids {
+        let comet = world.planet(cid);
+        if comet.owner == world.player || comet.owner == -1 || comet.ships == 0 {
+            continue;
+        }
+        if dist(comet.x, comet.y, neighbor.x, neighbor.y) > MAX_DISTANCE {
+            continue;
+        }
+        let Some((_, turns, _, _, _)) = model.plan_shot(cid, neighbor.id, comet.ships, 0) else {
+            continue;
+        };
+        let half_ships = (comet.ships / 2).max(1);
+        extras.push(ArrivalEvent {
+            turns: turns.max(1),
+            owner: comet.owner,
+            ships: half_ships,
+        });
+        half_pressure += half_ships;
+    }
+
     if extras.is_empty() {
         return (true, 0);
     }
@@ -395,36 +501,104 @@ fn neighbor_holds_under_worst_case(
     (final_owner(&tl) == world.player, half_pressure)
 }
 
+/// Per-source defense summary, memoized across every (target × offset)
+/// evaluated in one recompute pass (one [`run_strategy`] greedy iteration, or
+/// one [`select_best_uncached`] call). Both components are independent of the
+/// target and the launch offset:
+///   * `not_doomed` ([`baseline_owns`]) depends only on the turn's world state.
+///   * `holds` / `half_pressure` ([`neighbor_holds_under_worst_case`])
+///     additionally depend on `plan`, which is fixed within one recompute pass.
+/// `holds` / `half_pressure` are only meaningful when `not_doomed` is true —
+/// the worst-case sim is skipped otherwise, mirroring the original control flow
+/// in [`collect_source_candidates`].
+#[derive(Clone, Copy)]
+struct SourceDefense {
+    not_doomed: bool,
+    holds: bool,
+    half_pressure: i64,
+}
+
+type SourceDefenseCache = HashMap<i64, SourceDefense>;
+
+/// Cached [`baseline_owns`] + [`neighbor_holds_under_worst_case`] for `src`. A
+/// source that neighbors many targets is otherwise re-checked once per
+/// (target × offset), each `neighbor_holds_under_worst_case` running a full
+/// `simulate_planet_timeline`; this collapses that to one computation per
+/// source per recompute pass.
+fn source_defense(
+    world: &WorldState,
+    model: &HellburnerModel,
+    src: &Planet,
+    plan: &PlanState,
+    cache: &mut SourceDefenseCache,
+) -> SourceDefense {
+    if let Some(&d) = cache.get(&src.id) {
+        return d;
+    }
+    let not_doomed = baseline_owns(world, src.id);
+    let (holds, half_pressure) = if not_doomed {
+        neighbor_holds_under_worst_case(world, model, src, plan)
+    } else {
+        (false, 0)
+    };
+    let d = SourceDefense {
+        not_doomed,
+        holds,
+        half_pressure,
+    };
+    cache.insert(src.id, d);
+    d
+}
+
 // ── Unified zero-sum scoring ─────────────────────────────────────────────
 
-/// Captured production weighting: enemy targets count double (we gain the
-/// production *and* they lose it — true zero-sum delta), neutral and
-/// own-planet defense are 1×.
-fn zero_sum_mult(world: &WorldState, target: &Planet) -> f64 {
-    if target.owner != world.player && target.owner != -1 {
-        2.0
-    } else {
+fn owner_value(owner: i64, player: i64) -> f64 {
+    if owner == player {
         1.0
+    } else if owner == -1 {
+        0.0
+    } else {
+        -1.0
     }
 }
 
-/// Score of capturing/holding `target` with last arrival at `arrival_turn`
-/// (relative to current step). The integral `prod × remaining` automatically
-/// trades arrival-time against production: waiting 2 turns for a 5-prod
-/// target beats grabbing a 2-prod target now once `5(H−A−2) > 2(H−A)`.
+fn signed_ships(owner: i64, ships: i64, player: i64) -> f64 {
+    owner_value(owner, player) * ships.max(0) as f64
+}
+
+/// Zero-sum value of a trial target timeline relative to its baseline.
 ///
-/// For neutral captures, the garrison cost (`target.ships`) is subtracted so
-/// expensive low-production neutrals don't drain frontline ships — mirrors
-/// the early-game DFS gain formula.
-fn score_capture(world: &WorldState, target: &Planet, arrival_turn: i64) -> f64 {
-    let h = world.timeline_cache.horizon;
-    let remaining = (h - arrival_turn).max(0) as f64;
-    let reward = target.production as f64 * remaining * zero_sum_mult(world, target);
-    if target.owner == -1 {
-        reward - target.ships as f64
-    } else {
-        reward
+/// The old local score valued only "we own it at horizon" and latest arrival
+/// time. This consumes the full simulated timeline already produced for each
+/// trial, so temporary steals, third-party pileups, weak holds, and costly
+/// captures are priced by actual ownership duration and final ship delta.
+fn timeline_delta_score(
+    world: &WorldState,
+    target: &Planet,
+    baseline: &PlanetTimeline,
+    owner_at: &[i64],
+    ships_at: &[i64],
+    ships_committed: i64,
+    start_turn: i64,
+) -> f64 {
+    let player = world.player;
+    let h = baseline.horizon as usize;
+    let production = target.production as f64;
+    let mut score = 0.0;
+
+    // Turns before `start_turn` are copied verbatim from `baseline` by
+    // `simulate_checkpoint_into`, so their owner delta is exactly zero — start
+    // the integral at the first rewritten turn. `start_turn` is clamped the same
+    // way the checkpoint clamps it, so turn `h` is never skipped.
+    let start = (start_turn.clamp(1, h.max(1) as i64)) as usize;
+    for t in start..=h {
+        score += production
+            * (owner_value(owner_at[t], player) - owner_value(baseline.owner_at[t], player));
     }
+
+    score += signed_ships(owner_at[h], ships_at[h], player)
+        - signed_ships(baseline.owner_at[h], baseline.ships_at[h], player);
+    score - ships_committed as f64
 }
 
 // ── evaluate_frontline_strategy ──────────────────────────────────────────
@@ -434,13 +608,13 @@ fn score_capture(world: &WorldState, target: &Planet, arrival_turn: i64) -> f64 
 /// `effective_offset == 0` are emitted as fleet moves this turn, the rest
 /// are *reservations* (recorded in `PlanState` so other targets can't grab
 /// the ships, but no fleet order is emitted; next bot turn re-plans).
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct PlannedOrder {
     src_id: i64,
     angle: f64,
     ships: i64,
-    arrival: i64,           // turns from current step until arrival
-    effective_offset: i64,  // launch_offset; 0 ⇒ emit this turn
+    arrival: i64,          // turns from current step until arrival
+    effective_offset: i64, // launch_offset; 0 ⇒ emit this turn
 }
 
 /// A winning commitment for a target. Built by `evaluate_frontline_strategy`
@@ -449,6 +623,50 @@ struct FrontlineWin {
     orders: Vec<PlannedOrder>,
     /// Latest arrival turn among `orders`, relative to current step.
     max_arrival: i64,
+    /// Timeline-delta score of this target commitment relative to baseline.
+    score: f64,
+}
+
+/// Reusable scratch buffers for [`evaluate_frontline_strategy`], pooled across
+/// a whole [`run_strategy`] run (every greedy iteration, target, and offset) so
+/// the working set is allocated once, not per call. None of these carry state
+/// between calls — each field is cleared (or fully overwritten by
+/// `simulate_checkpoint_into`) before use.
+#[derive(Default)]
+struct FrontlineScratch {
+    candidates: Vec<SourceCandidate>,
+    plan_orders: Vec<PlannedOrder>,
+    trial: Vec<ArrivalEvent>,
+    fixed_arrivals: Vec<ArrivalEvent>,
+    merged_scratch: Vec<ArrivalEvent>,
+    owner_buf: Vec<i64>,
+    ships_buf: Vec<i64>,
+    by_turn_buf: Vec<Vec<ArrivalEvent>>,
+    delay_table: Vec<Option<(i64, f64, i64)>>,
+}
+
+/// Per-target, offset-independent inputs to the frontline subset search,
+/// computed once per target and shared across the offset sweep. Both fields are
+/// turn-constant (owner assignments and the in-flight ledger don't change within
+/// a planning turn), so recomputing them per offset was pure waste.
+struct TargetContext {
+    /// Owned inbound sources of the target, distance-sorted (nearest first).
+    origins: Vec<(i64, f64)>,
+}
+
+fn target_context(world: &WorldState, model: &HellburnerModel, target: &Planet) -> TargetContext {
+    let empty: Vec<(i64, f64)> = Vec::new();
+    let mut origins: Vec<(i64, f64)> = model
+        .inbound_edges
+        .get(&target.id)
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|(sid, _)| world.planet(*sid).owner == world.player)
+        .copied()
+        .collect();
+    origins.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    TargetContext { origins }
 }
 
 /// Offset-aware frontline assembly. `offset == 0` is "launch this turn" —
@@ -467,13 +685,25 @@ fn evaluate_frontline_strategy(
     target: &Planet,
     plan: &PlanState,
     offset: i64,
+    defense_cache: &mut SourceDefenseCache,
+    ctx: &TargetContext,
+    scratch: &mut FrontlineScratch,
 ) -> Option<FrontlineWin> {
     // ── 1. Per-source candidate baseline (all 2^N subsets share these). ──
-    let candidates = collect_source_candidates(world, model, target, plan, offset);
-    if candidates.is_empty() {
+    collect_source_candidates(
+        world,
+        model,
+        target,
+        plan,
+        offset,
+        defense_cache,
+        ctx,
+        &mut scratch.candidates,
+    );
+    if scratch.candidates.is_empty() {
         return None;
     }
-    let n = candidates.len().min(MAX_SUBSET_SOURCES);
+    let n = scratch.candidates.len();
 
     // ── 2. Enumerate non-empty subsets × {uncoordinated, coordinated}. ──
     //       Schedule A (uncoordinated): each source at `offset`. Earliest
@@ -486,77 +716,179 @@ fn evaluate_frontline_strategy(
     let mut best_ships = i64::MAX;
     let mut best_orders: Vec<PlannedOrder> = Vec::new();
     let mut best_max_arrival: i64 = 0;
-    let mut best_marginal_in_orders: usize = 0;
-    let mut best_marginal_not_doomed = false;
 
-    let mut plan_orders: Vec<PlannedOrder> = Vec::with_capacity(n);
-    let mut trial: Vec<ArrivalEvent> = Vec::with_capacity(n);
+    // ── Shared per-target arrival context (fixed across all masks). ──
+    // Every (subset, schedule) trial layers its candidate arrivals on top of
+    // the same base (in-flight) + planned (this turn's prior commitments)
+    // arrivals. Build that fixed prefix once and `simulate_checkpoint_into` the
+    // trial deltas, so the subset enumeration allocates no per-mask timeline.
+    let horizon = world.timeline_cache.horizon;
+    let base_arrivals = world.timeline_cache.arrivals(target.id);
+    let planned: &[ArrivalEvent] = plan
+        .planned
+        .get(&target.id)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let expiry = world.timeline_cache.expiry(target.id);
 
-    let consider = |
-        orders: &Vec<PlannedOrder>,
-        max_arrival: i64,
-        ships_total: i64,
-        marginal_idx: usize,
-        marginal_not_doomed: bool,
-        best_score: &mut f64,
-        best_ships: &mut i64,
-        best_orders: &mut Vec<PlannedOrder>,
-        best_max_arrival: &mut i64,
-        best_marginal_in_orders: &mut usize,
-        best_marginal_not_doomed: &mut bool,
-    | {
-        let score = score_capture(world, target, max_arrival);
-        let better = score > *best_score || (score == *best_score && ships_total < *best_ships);
+    scratch.fixed_arrivals.clear();
+    scratch.fixed_arrivals.extend_from_slice(base_arrivals);
+    scratch.fixed_arrivals.extend_from_slice(planned);
+
+    // Prefix baseline incorporating base + planned (but not the trial extras).
+    // With no planned commitments the cache's pre-built baseline already
+    // reflects the base arrivals, so reuse it allocation-free.
+    let owned_baseline: Option<PlanetTimeline> = if planned.is_empty() {
+        None
+    } else {
+        Some(simulate_planet_timeline(
+            target,
+            &scratch.fixed_arrivals,
+            world.player,
+            horizon,
+            expiry,
+        ))
+    };
+    let prefix_baseline: &PlanetTimeline = match &owned_baseline {
+        Some(b) => b,
+        None => world
+            .timeline_cache
+            .baseline(target.id)
+            .expect("target planet must be in the timeline cache"),
+    };
+
+    // Layer `trial` on the fixed prefix baseline via `simulate_checkpoint_into`,
+    // writing the per-turn owner/ships arrays into the reusable buffers and
+    // returning the horizon owner. Equivalent to
+    // `final_owner(&target_timeline(world, target.id, trial, plan))`. Buffers are
+    // passed in rather than captured so callers can hand over disjoint
+    // `FrontlineScratch` fields without a closure-capture borrow conflict.
+    let run_trial = |trial: &[ArrivalEvent],
+                     fixed_arrivals: &[ArrivalEvent],
+                     merged_scratch: &mut Vec<ArrivalEvent>,
+                     owner_buf: &mut Vec<i64>,
+                     ships_buf: &mut Vec<i64>,
+                     by_turn_buf: &mut Vec<Vec<ArrivalEvent>>|
+     -> (i64, i64) {
+        let start_turn = trial.iter().map(|e| e.turns.max(1)).min().unwrap_or(1);
+        merged_scratch.clear();
+        merged_scratch.extend_from_slice(fixed_arrivals);
+        merged_scratch.extend_from_slice(trial);
+        simulate_checkpoint_into(
+            target,
+            prefix_baseline,
+            start_turn,
+            merged_scratch.as_slice(),
+            expiry,
+            owner_buf,
+            ships_buf,
+            by_turn_buf,
+        );
+        (owner_buf[horizon as usize], start_turn)
+    };
+
+    let consider = |orders: &Vec<PlannedOrder>,
+                    max_arrival: i64,
+                    ships_total: i64,
+                    score: f64,
+                    best_score: &mut f64,
+                    best_ships: &mut i64,
+                    best_orders: &mut Vec<PlannedOrder>,
+                    best_max_arrival: &mut i64| {
+        if score <= 0.0 {
+            return;
+        }
+        let better = score > *best_score
+            || (score == *best_score
+                && (ships_total < *best_ships
+                    || (ships_total == *best_ships && max_arrival < *best_max_arrival)));
         if better {
             *best_score = score;
             *best_ships = ships_total;
             *best_orders = orders.clone();
             *best_max_arrival = max_arrival;
-            *best_marginal_in_orders = marginal_idx;
-            *best_marginal_not_doomed = marginal_not_doomed;
         }
     };
 
+    // Precompute Schedule-B per-source delay options once. For each source and
+    // delay `d`, the growth-aware fleet (`ships_max + production·d`, launched at
+    // `offset + d`) yields a `(arrival, angle, ships)` triple that depends only
+    // on the source and `offset` — not on the subset mask or coordination target
+    // — so it's hoisted out of the inner subset scan into this flat row-major
+    // table, indexed `[i*stride + d]`.
+    let delay_stride = (MAX_COORD_DELAY + A_S_LOOKAHEAD + 1) as usize;
+    scratch.delay_table.clear();
+    for i in 0..n {
+        let (cid, c_ships_max, c_production) = {
+            let c = &scratch.candidates[i];
+            (c.id, c.ships_max, c.production)
+        };
+        for d in 0..(delay_stride as i64) {
+            let ships_try = c_ships_max + c_production * d;
+            let entry = model
+                .plan_shot(cid, target.id, ships_try, offset + d)
+                .map(|(a, t, _, _, _)| ((offset + d + t).max(1), a, ships_try));
+            scratch.delay_table.push(entry);
+        }
+    }
+
     for mask in 1u32..(1u32 << n) {
         // ── Schedule A: uncoordinated. ──
-        plan_orders.clear();
-        trial.clear();
+        scratch.plan_orders.clear();
+        scratch.trial.clear();
         let mut ships_total: i64 = 0;
         let mut max_arrival_a: i64 = 0;
-        let mut marginal_idx_a: usize = 0;
-        let mut marginal_not_doomed_a = false;
         for i in 0..n {
             if mask & (1u32 << i) == 0 {
                 continue;
             }
-            let c = &candidates[i];
+            let c = &scratch.candidates[i];
             if c.arrival > max_arrival_a {
                 max_arrival_a = c.arrival;
-                marginal_idx_a = plan_orders.len();
-                marginal_not_doomed_a = c.not_doomed;
             }
-            plan_orders.push(PlannedOrder {
+            let order = PlannedOrder {
                 src_id: c.id,
                 angle: c.angle,
                 ships: c.ships_max,
                 arrival: c.arrival,
                 effective_offset: offset,
-            });
-            trial.push(ArrivalEvent {
+            };
+            let event = ArrivalEvent {
                 turns: c.arrival,
                 owner: world.player,
                 ships: c.ships_max,
-            });
+            };
             ships_total += c.ships_max;
+            scratch.plan_orders.push(order);
+            scratch.trial.push(event);
         }
-        let tl = target_timeline(world, target.id, &trial, plan);
-        if final_owner(&tl) == world.player {
+        let (final_owner_a, start_turn_a) = run_trial(
+            &scratch.trial,
+            &scratch.fixed_arrivals,
+            &mut scratch.merged_scratch,
+            &mut scratch.owner_buf,
+            &mut scratch.ships_buf,
+            &mut scratch.by_turn_buf,
+        );
+        if final_owner_a == world.player {
+            let score_a = timeline_delta_score(
+                world,
+                target,
+                prefix_baseline,
+                &scratch.owner_buf,
+                &scratch.ships_buf,
+                ships_total,
+                start_turn_a,
+            );
             consider(
-                &plan_orders, max_arrival_a, ships_total,
-                marginal_idx_a, marginal_not_doomed_a,
-                &mut best_score, &mut best_ships, &mut best_orders,
-                &mut best_max_arrival, &mut best_marginal_in_orders,
-                &mut best_marginal_not_doomed,
+                &scratch.plan_orders,
+                max_arrival_a,
+                ships_total,
+                score_a,
+                &mut best_score,
+                &mut best_ships,
+                &mut best_orders,
+                &mut best_max_arrival,
             );
         }
 
@@ -571,8 +903,10 @@ fn evaluate_frontline_strategy(
         let a_s = max_arrival_a;
         let mut has_earlier = false;
         for i in 0..n {
-            if mask & (1u32 << i) == 0 { continue; }
-            if candidates[i].arrival < a_s {
+            if mask & (1u32 << i) == 0 {
+                continue;
+            }
+            if scratch.candidates[i].arrival < a_s {
                 has_earlier = true;
                 break;
             }
@@ -584,69 +918,89 @@ fn evaluate_frontline_strategy(
         for k in start_k..=A_S_LOOKAHEAD {
             let target_a_s = a_s + k;
             let max_delay = MAX_COORD_DELAY + k;
-            plan_orders.clear();
-            trial.clear();
+            scratch.plan_orders.clear();
+            scratch.trial.clear();
             let mut ships_total: i64 = 0;
             let mut max_arrival_b: i64 = 0;
-            let mut marginal_idx_b: usize = 0;
-            let mut marginal_not_doomed_b = false;
             let mut feasible = true;
             for i in 0..n {
-                if mask & (1u32 << i) == 0 { continue; }
-                let c = &candidates[i];
-                // Pick the latest arrival ≤ target_a_s achievable within the
-                // delay budget. Per source, growth scales ships with delay.
-                let mut best_d: i64 = -1;
-                let mut best_arr: i64 = -1;
-                let mut best_ang: f64 = c.angle;
-                let mut best_ships: i64 = c.ships_max;
+                if mask & (1u32 << i) == 0 {
+                    continue;
+                }
+                let (c_id, c_angle, c_ships_max) = {
+                    let c = &scratch.candidates[i];
+                    (c.id, c.angle, c.ships_max)
+                };
+                let mut sel_d: i64 = -1;
+                let mut sel_arr: i64 = -1;
+                let mut sel_ang: f64 = c_angle;
+                let mut sel_ships: i64 = c_ships_max;
+                // Pick the latest arrival ≤ target_a_s within the delay budget
+                // from the precomputed table (ties resolve to the smallest `d`,
+                // matching the original `arr > sel_arr` strict comparison).
+                let row = i * delay_stride;
                 for d in 0..=max_delay {
-                    let ships_try = c.ships_max + c.production * d;
-                    let Some((a, t, _, _, _)) =
-                        model.plan_shot(c.id, target.id, ships_try, offset + d)
-                    else { continue };
-                    let arr = (offset + d + t).max(1);
-                    if arr <= target_a_s && arr > best_arr {
-                        best_d = d;
-                        best_arr = arr;
-                        best_ang = a;
-                        best_ships = ships_try;
+                    let Some((arr, a, ships_try)) = scratch.delay_table[row + d as usize] else {
+                        continue;
+                    };
+                    if arr <= target_a_s && arr > sel_arr {
+                        sel_d = d;
+                        sel_arr = arr;
+                        sel_ang = a;
+                        sel_ships = ships_try;
                     }
                 }
-                if best_d < 0 {
+                if sel_d < 0 {
                     feasible = false;
                     break;
                 }
-                if best_arr > max_arrival_b {
-                    max_arrival_b = best_arr;
-                    marginal_idx_b = plan_orders.len();
-                    marginal_not_doomed_b = c.not_doomed;
+                if sel_arr > max_arrival_b {
+                    max_arrival_b = sel_arr;
                 }
-                plan_orders.push(PlannedOrder {
-                    src_id: c.id,
-                    angle: best_ang,
-                    ships: best_ships,
-                    arrival: best_arr,
-                    effective_offset: offset + best_d,
+                scratch.plan_orders.push(PlannedOrder {
+                    src_id: c_id,
+                    angle: sel_ang,
+                    ships: sel_ships,
+                    arrival: sel_arr,
+                    effective_offset: offset + sel_d,
                 });
-                trial.push(ArrivalEvent {
-                    turns: best_arr,
+                scratch.trial.push(ArrivalEvent {
+                    turns: sel_arr,
                     owner: world.player,
-                    ships: best_ships,
+                    ships: sel_ships,
                 });
-                ships_total += best_ships;
+                ships_total += sel_ships;
             }
             if !feasible {
                 continue;
             }
-            let tl = target_timeline(world, target.id, &trial, plan);
-            if final_owner(&tl) == world.player {
+            let (final_owner_b, start_turn_b) = run_trial(
+                &scratch.trial,
+                &scratch.fixed_arrivals,
+                &mut scratch.merged_scratch,
+                &mut scratch.owner_buf,
+                &mut scratch.ships_buf,
+                &mut scratch.by_turn_buf,
+            );
+            if final_owner_b == world.player {
+                let score_b = timeline_delta_score(
+                    world,
+                    target,
+                    prefix_baseline,
+                    &scratch.owner_buf,
+                    &scratch.ships_buf,
+                    ships_total,
+                    start_turn_b,
+                );
                 consider(
-                    &plan_orders, max_arrival_b, ships_total,
-                    marginal_idx_b, marginal_not_doomed_b,
-                    &mut best_score, &mut best_ships, &mut best_orders,
-                    &mut best_max_arrival, &mut best_marginal_in_orders,
-                    &mut best_marginal_not_doomed,
+                    &scratch.plan_orders,
+                    max_arrival_b,
+                    ships_total,
+                    score_b,
+                    &mut best_score,
+                    &mut best_ships,
+                    &mut best_orders,
+                    &mut best_max_arrival,
                 );
             }
         }
@@ -656,74 +1010,10 @@ fn evaluate_frontline_strategy(
         return None;
     }
 
-    // ── 3. Halve-trim on the marginal (latest-arriving) source. ──
-    // (Binary-search-to-minimum was tested and dropped win rate: smaller
-    // marginal fleets are also slower under log-shaped fleet_speed, and
-    // arriving earlier with overcommitted ships forces the opponent's hand.)
-    if best_marginal_not_doomed {
-        trial.clear();
-        for o in &best_orders {
-            trial.push(ArrivalEvent {
-                turns: o.arrival,
-                owner: world.player,
-                ships: o.ships,
-            });
-        }
-        let tl = target_timeline(world, target.id, &trial, plan);
-        let horizon = tl.horizon as usize;
-        let arrival_idx = (best_max_arrival as usize).min(horizon);
-        let mut excess: i64 = i64::MAX;
-        for t in arrival_idx..=horizon {
-            let margin = if tl.owner_at[t] == world.player {
-                tl.ships_at[t]
-            } else {
-                0
-            };
-            if margin < excess {
-                excess = margin;
-            }
-        }
-        if excess == i64::MAX {
-            excess = 0;
-        }
-        let marginal = &best_orders[best_marginal_in_orders];
-        let src_id = marginal.src_id;
-        let max_ships = marginal.ships;
-        let marginal_eff_offset = marginal.effective_offset;
-        let excess = excess.min(max_ships);
-        let keep = excess / 2;
-        let trimmed = (max_ships - keep).max(TRIM_MIN_SHIPS);
-        if trimmed < max_ships {
-            if let Some((t_angle, t_turns, _, _, _)) =
-                model.plan_shot(src_id, target.id, trimmed, marginal_eff_offset)
-            {
-                let t_arrival = (marginal_eff_offset + t_turns).max(1);
-                let saved = trial[best_marginal_in_orders];
-                trial[best_marginal_in_orders] = ArrivalEvent {
-                    turns: t_arrival,
-                    owner: world.player,
-                    ships: trimmed,
-                };
-                let tl2 = target_timeline(world, target.id, &trial, plan);
-                if final_owner(&tl2) == world.player {
-                    best_orders[best_marginal_in_orders] = PlannedOrder {
-                        src_id,
-                        angle: t_angle,
-                        ships: trimmed,
-                        arrival: t_arrival,
-                        effective_offset: marginal_eff_offset,
-                    };
-                    best_max_arrival = best_orders.iter().map(|o| o.arrival).max().unwrap_or(0);
-                } else {
-                    trial[best_marginal_in_orders] = saved;
-                }
-            }
-        }
-    }
-
     Some(FrontlineWin {
         orders: best_orders,
         max_arrival: best_max_arrival,
+        score: best_score,
     })
 }
 
@@ -736,8 +1026,7 @@ struct SourceCandidate {
     id: i64,
     angle: f64,
     arrival: i64,   // turns from current step until arrival
-    ships_max: i64, // pre-trim ships willing to send at base `offset`
-    not_doomed: bool,
+    ships_max: i64, // ships willing to send at base `offset`
     /// Production rate; used by the coordinated schedule to grow `ships_max`
     /// when this source delays beyond its natural arrival.
     production: i64,
@@ -749,47 +1038,28 @@ fn collect_source_candidates(
     target: &Planet,
     plan: &PlanState,
     offset: i64,
-) -> Vec<SourceCandidate> {
-    let empty: Vec<(i64, f64)> = Vec::new();
-    let mut origins: Vec<(i64, f64)> = model
-        .inbound_edges
-        .get(&target.id)
-        .unwrap_or(&empty)
-        .iter()
-        .filter(|(sid, _)| world.planet(*sid).owner == world.player)
-        .copied()
-        .collect();
-    origins.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Don't drop in mid-battle between two other players: if target isn't
-    // ours, skip our arrivals that land at or before another enemy's earliest
-    // arrival window.
-    let second_enemy_arrival: Option<i64> = if target.owner != world.player {
-        world
-            .timeline_cache
-            .arrivals(target.id)
-            .iter()
-            .filter(|ev| ev.owner != world.player && ev.owner != target.owner)
-            .map(|ev| ev.turns)
-            .min()
-    } else {
-        None
-    };
-
-    let mut out = Vec::with_capacity(origins.len());
-    for (src_id, _travel) in origins {
-        let src = world.planet(src_id).clone();
+    defense_cache: &mut SourceDefenseCache,
+    ctx: &TargetContext,
+    out: &mut Vec<SourceCandidate>,
+) {
+    out.clear();
+    for &(src_id, _travel) in &ctx.origins {
+        let src = *world.planet(src_id);
         // Growth-aware: at launch offset the source will have accumulated
         // `production·offset` extra ships on top of the current pool.
-        let available = plan.ships_available_at(&src, offset);
+        let available = plan.ships_available_at(world, &src, offset);
         if available == 0 {
             continue;
         }
         let mut ships_to_send = available;
-        let not_doomed = baseline_owns(world, src_id);
+        let defense = source_defense(world, model, &src, plan, defense_cache);
+        let not_doomed = defense.not_doomed;
         if not_doomed {
-            let (holds, half_pressure) =
-                neighbor_holds_under_worst_case(world, model, &src, plan);
+            let SourceDefense {
+                holds,
+                half_pressure,
+                ..
+            } = defense;
             if !holds {
                 if target.production <= src.production {
                     continue;
@@ -808,24 +1078,17 @@ fn collect_source_candidates(
             continue;
         };
         let arrival = (offset + turns).max(1);
-        if let Some(sea) = second_enemy_arrival {
-            if arrival <= sea + SECOND_ENEMY_ARRIVAL_TOL {
-                continue;
-            }
-        }
         out.push(SourceCandidate {
             id: src_id,
             angle,
             arrival,
             ships_max: ships_to_send,
-            not_doomed,
             production: src.production,
         });
     }
-    out
 }
 
-// ── evaluate_move_orders ─────────────────────────────────────────────────
+// ── target evaluation ────────────────────────────────────────────────────
 
 /// Which target each greedy iteration of `run_strategy` should commit. The
 /// rollouts in `plan()` try every variant and pick whichever resulting
@@ -833,11 +1096,8 @@ fn collect_source_candidates(
 /// "which sort key is right" is decided empirically per turn, not baked in.
 #[derive(Clone, Copy)]
 enum SelectionStrategy {
-    /// `score_now − max(0, best_score_later)` — urgency-aware. The default
-    /// from when we added the offset sweep.
-    PriorityFirst,
-    /// Pure `score_capture(now)`. Ignores how the target's value would
-    /// decay if deferred — better when timing isn't fragile.
+    /// Pure timeline-delta score: production control, final ship delta, and
+    /// committed-ship cost relative to the baseline target timeline.
     ScoreFirst,
     /// `score_now / ships_total` — favours efficient captures, freeing
     /// fleet for subsequent iterations.
@@ -851,88 +1111,76 @@ enum SelectionStrategy {
 impl SelectionStrategy {
     fn key(self, score: f64, production: i64, ships_total: i64) -> f64 {
         match self {
-            // PriorityFirst and ScoreFirst both key on the offset-aware score;
-            // the old urgency-delta term is subsumed because we now pick the
-            // best offset per target, so the score already reflects whether
-            // waiting helps.
-            SelectionStrategy::PriorityFirst | SelectionStrategy::ScoreFirst => score,
+            SelectionStrategy::ScoreFirst => score,
             SelectionStrategy::ScorePerShip => score / (1.0 + ships_total as f64),
             SelectionStrategy::ProductionFirst => production as f64,
         }
     }
 }
 
-/// Picks the single best (target, launch-offset) commitment for this greedy
-/// iteration. Sweeps `offset ∈ 0..=OFFSET_LOOKAHEAD` per target and keeps the
-/// highest-scoring [`score_capture`] commitment. Orders with
-/// `effective_offset > 0` are *reservations* — [`run_strategy`] reserves the
-/// ships in [`PlanState`] but doesn't emit a fleet move this turn, so
-/// "wait and grow" emerges naturally when a delayed plan outscores any
-/// offset-0 alternative.
-fn evaluate_move_orders(
+/// Best `(score, winning commitment)` for a single target across the launch-
+/// offset sweep, or `None` when the target is already won by baseline+planned
+/// commitments or no offset yields a capture. Strategy-independent: the
+/// selection key that ranks targets against each other is applied by the caller
+/// ([`run_strategy`]), so this result can be cached and reused across greedy
+/// iterations for any target whose plan inputs haven't changed.
+fn evaluate_target(
     world: &WorldState,
     model: &HellburnerModel,
     plan: &PlanState,
-    strategy: SelectionStrategy,
-) -> Option<(i64, Vec<PlannedOrder>, i64)> {
-    let candidates: Vec<&Planet> = world
-        .planets
-        .iter()
-        .filter(|p| model.non_comet_ids.contains(&p.id))
-        .filter(|p| {
-            model
-                .inbound_edges
-                .get(&p.id)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false)
-        })
-        .collect();
-
-    // Track best by (priority, score_now), tiebreak shorter order lists.
-    let mut best: Option<(f64, f64, usize, i64, Vec<PlannedOrder>)> = None;
-
-    for target in candidates {
-        // Skip targets already won by baseline + planned commitments.
-        let tl = target_timeline(world, target.id, &[], plan);
-        if final_owner(&tl) == world.player {
-            continue;
-        }
-
-        // Sweep offsets and keep the highest-scoring commitment. Acting now
-        // (offset 0) competes head-to-head against waiting (offset > 0):
-        // whichever offset yields the better `score_capture` wins. Delayed
-        // wins return `effective_offset > 0` orders, which `run_strategy`
-        // commits as reservations (no emission this turn).
-        let mut best_for_target: Option<(f64, FrontlineWin)> = None;
-        for delta in 0..=OFFSET_LOOKAHEAD {
-            let Some(win) = evaluate_frontline_strategy(world, model, target, plan, delta)
-            else { continue };
-            let s = score_capture(world, target, win.max_arrival);
-            match &best_for_target {
-                None => best_for_target = Some((s, win)),
-                Some((bs, _)) if s > *bs => best_for_target = Some((s, win)),
-                _ => {}
-            }
-        }
-        let Some((score, win)) = best_for_target else { continue };
-
-        let ships_total: i64 = win.orders.iter().map(|o| o.ships).sum();
-        let primary = strategy.key(score, target.production, ships_total);
-        // Secondary tiebreak: raw score. Tertiary: shorter order list.
-        let better = match &best {
-            None => true,
-            Some((bp, bs, blen, _, _)) => {
-                primary > *bp
-                    || (primary == *bp && score > *bs)
-                    || (primary == *bp && score == *bs && win.orders.len() < *blen)
-            }
-        };
-        if better {
-            best = Some((primary, score, win.orders.len(), target.id, win.orders));
-        }
+    target: &Planet,
+    defense_cache: &mut SourceDefenseCache,
+    scratch: &mut FrontlineScratch,
+) -> Option<(f64, FrontlineWin)> {
+    // Skip targets already won by baseline + planned commitments. With no
+    // planned commitments for this target the prebuilt cache baseline's final
+    // owner is identical (same arrivals → same trajectory), so read it
+    // allocation-free; only fall back to a full projection when planned
+    // commitments exist.
+    let planned_here = plan
+        .planned
+        .get(&target.id)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let already_won = if planned_here.is_empty() {
+        baseline_owns(world, target.id)
+    } else {
+        final_owner(&target_timeline(world, target.id, &[], plan)) == world.player
+    };
+    if already_won {
+        return None;
     }
 
-    best.map(|(_, score, _, t, o)| (t, o, score as i64))
+    // Offset-independent inputs shared across the offset sweep below.
+    let ctx = target_context(world, model, target);
+
+    // Sweep offsets and keep the highest-scoring commitment. Acting now
+    // (offset 0) competes head-to-head against waiting (offset > 0): whichever
+    // offset yields the better timeline-delta score wins. Delayed wins return
+    // `effective_offset > 0` orders, which `run_strategy` commits as
+    // reservations (no emission this turn).
+    let mut best_for_target: Option<(f64, FrontlineWin)> = None;
+    for delta in 0..=OFFSET_LOOKAHEAD {
+        let Some(win) = evaluate_frontline_strategy(
+            world,
+            model,
+            target,
+            plan,
+            delta,
+            defense_cache,
+            &ctx,
+            scratch,
+        ) else {
+            continue;
+        };
+        let s = win.score;
+        match &best_for_target {
+            None => best_for_target = Some((s, win)),
+            Some((bs, _)) if s > *bs => best_for_target = Some((s, win)),
+            _ => {}
+        }
+    }
+    best_for_target
 }
 
 // ── send_reinforcements ──────────────────────────────────────────────────
@@ -941,7 +1189,7 @@ fn send_reinforcements(
     world: &WorldState,
     model: &HellburnerModel,
     plan: &PlanState,
-) -> Vec<FleetOrder> {
+) -> Vec<MoveAction> {
     let mut out = Vec::new();
     let player = world.player;
     let empty: Vec<(i64, f64)> = Vec::new();
@@ -953,7 +1201,7 @@ fn send_reinforcements(
             continue;
         };
         let available = plan.ships_available(p);
-        if available < REINFORCEMENT_SIZE + GARRISON_SIZE {
+        if available <= 0 {
             continue;
         }
         let has_enemy_incoming = model
@@ -965,13 +1213,37 @@ fn send_reinforcements(
         if has_enemy_incoming {
             continue;
         }
-        let ships = available - GARRISON_SIZE;
-        let Some((angle, _turns, _, _, _)) =
-            model.plan_shot(p.id, target_id, ships, 0)
-        else {
+        let ships = available;
+        let Some((angle, turns_now, _, _, _)) = model.plan_shot(p.id, target_id, ships, 0) else {
+            // Blocked now — we can only emit launch-this-turn orders, so nothing
+            // to send regardless of how waiting would compare.
             continue;
         };
-        out.push((p.id, angle, ships));
+        let arrival_now = turns_now.max(1);
+
+        // Hold if waiting delivers the fleet no later than launching now.
+        // Fleet speed is log-shaped in ship count, so `production·d` extra ships
+        // accumulated over `d` turns (and any shifted geometry / cleared blockers
+        // at the future launch turn) can speed the fleet enough to offset the
+        // launch delay. When that happens, sending now is strictly dominated:
+        // same-or-earlier arrival while delivering fewer ships. We re-plan every
+        // turn, so this is a per-turn send-vs-hold decision, not a commitment to
+        // a specific delay. Replaces the old fixed `REINFORCEMENT_SIZE` floor.
+        let wait_is_better = (1..=OFFSET_LOOKAHEAD).any(|d| {
+            let ships_d = ships + p.production * d;
+            match model.plan_shot(p.id, target_id, ships_d, d) {
+                Some((_, turns_d, _, _, _)) => (d + turns_d).max(1) <= arrival_now,
+                None => false,
+            }
+        });
+        if wait_is_better {
+            continue;
+        }
+        out.push(MoveAction {
+            from_id: p.id,
+            angle,
+            ships,
+        });
     }
     out
 }
@@ -1000,7 +1272,7 @@ fn early_production_of(world: &WorldState, planet_id: i64) -> i64 {
     world
         .planet_by_id
         .get(&planet_id)
-        .map(|p| p.production)
+        .map(|&idx| world.planets[idx].production)
         .unwrap_or(0)
 }
 
@@ -1173,7 +1445,7 @@ fn early_score(state: &EarlyState, world: &WorldState) -> i64 {
     total
 }
 
-fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder> {
+fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<MoveAction> {
     let player = world.player;
     let owned_ids: HashSet<i64> = world
         .my_planets
@@ -1337,7 +1609,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
     );
 
     // Emit only moves whose launch_turn == current step.
-    let mut moves: Vec<FleetOrder> = Vec::new();
+    let mut moves: Vec<MoveAction> = Vec::new();
     for (target_planet, (source_id, fleet_size, launch_turn), _) in &best_sequence {
         if *launch_turn != world.step {
             continue;
@@ -1347,12 +1619,61 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<FleetOrder
         else {
             continue;
         };
-        moves.push((*source_id, angle, *fleet_size));
+        moves.push(MoveAction {
+            from_id: *source_id,
+            angle,
+            ships: *fleet_size,
+        });
     }
     moves
 }
 
 // ── Public entry ─────────────────────────────────────────────────────────
+
+/// Debug-only reference for [`run_strategy`]'s per-iteration target selection:
+/// recomputes *every* candidate from scratch (no persistent cache) and applies
+/// the same selection key/tiebreak. Used by a `debug_assert_eq!` in
+/// `run_strategy` to prove the incremental dirty-set cache picks exactly what
+/// the full recompute would, every iteration. Compiled out of release builds.
+#[cfg(debug_assertions)]
+fn select_best_uncached(
+    world: &WorldState,
+    model: &HellburnerModel,
+    plan: &PlanState,
+    strategy: SelectionStrategy,
+    candidate_ids: &[i64],
+) -> Option<(i64, Vec<PlannedOrder>)> {
+    let mut defense_cache: SourceDefenseCache = HashMap::default();
+    let mut scratch = FrontlineScratch::default();
+    let mut best: Option<(f64, f64, usize, i64, Vec<PlannedOrder>)> = None;
+    for &tid in candidate_ids {
+        let Some((score, win)) = evaluate_target(
+            world,
+            model,
+            plan,
+            world.planet(tid),
+            &mut defense_cache,
+            &mut scratch,
+        ) else {
+            continue;
+        };
+        let production = world.planet(tid).production;
+        let ships_total: i64 = win.orders.iter().map(|o| o.ships).sum();
+        let primary = strategy.key(score, production, ships_total);
+        let better = match &best {
+            None => true,
+            Some((bp, bs, blen, _, _)) => {
+                primary > *bp
+                    || (primary == *bp && score > *bs)
+                    || (primary == *bp && score == *bs && win.orders.len() < *blen)
+            }
+        };
+        if better {
+            best = Some((primary, score, win.orders.len(), tid, win.orders));
+        }
+    }
+    best.map(|(_, _, _, tid, orders)| (tid, orders))
+}
 
 /// One full pipeline run under a fixed target-selection strategy. Returns
 /// the emitted moves and the resulting PlanState (used by `rollout_score`).
@@ -1360,34 +1681,147 @@ fn run_strategy(
     world: &WorldState,
     model: &HellburnerModel,
     strategy: SelectionStrategy,
-) -> (Vec<FleetOrder>, PlanState) {
+) -> (Vec<MoveAction>, PlanState) {
     let mut state = PlanState::default();
-    let mut moves: Vec<FleetOrder> = Vec::new();
-    // Each iteration commits ≥1 ship from at least one source, so the loop
-    // is bounded by the total source pool. A fixed safety cap protects
-    // against any pathological selector that re-picks the same target with
-    // a vanishing commitment.
+    let mut moves: Vec<MoveAction> = Vec::new();
+
+    // Fixed-order candidate targets (non-comet, with inbound edges). The scan
+    // order matches the original per-iteration sweep so selection tie-breaking
+    // stays deterministic and identical to the uncached path.
+    let candidate_ids: Vec<i64> = world
+        .planets
+        .iter()
+        .filter(|p| model.non_comet_ids.contains(&p.id))
+        .filter(|p| {
+            model
+                .inbound_edges
+                .get(&p.id)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        })
+        .map(|p| p.id)
+        .collect();
+
+    // Per-target evaluation cache, persisted across greedy iterations. Each
+    // iteration recomputes only the targets whose inputs the previous commit
+    // could have changed (`dirty`); the rest reuse their cached eval.
+    //
+    // `evaluate_target(T)` reads `plan` only through (a) `planned[T]` (its own
+    // prefix baseline / already-won check) and (b) the `spent`/`planned` state
+    // of T's inbound sources (availability + worst-case defense). Committing
+    // target `C` from sources `S` mutates `spent[s]` for `s ∈ S` and
+    // `planned[C]`, so the exactly-affected set is
+    // `{C} ∪ outbound(C) ∪ ⋃_{s∈S} outbound(s)` — every target fed by a touched
+    // source, plus targets for which `C` is itself a source. Over-invalidation
+    // would only cost time; this set is exact.
+    let mut cache: HashMap<i64, Option<(f64, FrontlineWin)>> =
+        HashMap::with_capacity_and_hasher(candidate_ids.len(), Default::default());
+    let mut dirty: HashSet<i64> = candidate_ids.iter().copied().collect();
+    let mut scratch = FrontlineScratch::default();
+
+    // Each iteration commits ≥1 ship from at least one source, so the loop is
+    // bounded by the total source pool. A fixed safety cap protects against any
+    // pathological selector that re-picks the same target with a vanishing
+    // commitment.
     for _ in 0..256 {
-        let Some((target_id, fleet_orders, _value)) =
-            evaluate_move_orders(world, model, &state, strategy)
-        else {
+        // Recompute dirty targets against the current plan. A fresh defense
+        // cache is consistent with the current plan and is populated lazily for
+        // just the sources the recomputed targets touch.
+        if !dirty.is_empty() {
+            let mut defense_cache: SourceDefenseCache = HashMap::default();
+            for &tid in &dirty {
+                let eval = evaluate_target(
+                    world,
+                    model,
+                    &state,
+                    world.planet(tid),
+                    &mut defense_cache,
+                    &mut scratch,
+                );
+                cache.insert(tid, eval);
+            }
+            dirty.clear();
+        }
+
+        // Select the best target under `strategy`, scanning candidates in fixed
+        // order so ties resolve exactly as the uncached path did.
+        let mut best: Option<(f64, f64, usize, i64)> = None; // (primary, score, len, tid)
+        for &tid in &candidate_ids {
+            let Some(Some((score, win))) = cache.get(&tid) else {
+                continue;
+            };
+            let production = world.planet(tid).production;
+            let ships_total: i64 = win.orders.iter().map(|o| o.ships).sum();
+            let primary = strategy.key(*score, production, ships_total);
+            let better = match &best {
+                None => true,
+                Some((bp, bs, blen, _)) => {
+                    primary > *bp
+                        || (primary == *bp && *score > *bs)
+                        || (primary == *bp && *score == *bs && win.orders.len() < *blen)
+                }
+            };
+            if better {
+                best = Some((primary, *score, win.orders.len(), tid));
+            }
+        }
+        // Debug-only: prove the incremental cache selected exactly what a full
+        // from-scratch recompute would, against the current plan.
+        #[cfg(debug_assertions)]
+        let reference_pick = select_best_uncached(world, model, &state, strategy, &candidate_ids);
+
+        let Some((_, _, _, target_id)) = best else {
+            #[cfg(debug_assertions)]
+            debug_assert!(
+                reference_pick.is_none(),
+                "run_strategy cache returned no target but uncached recompute found one"
+            );
             break;
         };
-        if fleet_orders.is_empty() {
+
+        // Clone the winning orders out of the cache for committing.
+        let orders: Vec<PlannedOrder> = match cache.get(&target_id) {
+            Some(Some((_, win))) => win.orders.clone(),
+            _ => break,
+        };
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            reference_pick,
+            Some((target_id, orders.clone())),
+            "run_strategy cache diverged from uncached recompute"
+        );
+        if orders.is_empty() {
             break;
         }
-        // Commit every order to PlanState (reservation), but only emit a
-        // fleet move when the order launches this turn. Reservations make
-        // subsequent iterations see the reserved ships as spent, so they
-        // can't be poached for lower-value captures — the no-op deferral
-        // emerges from the score sweep in `evaluate_move_orders`.
-        for o in fleet_orders {
+
+        // Commit every order to PlanState (reservation), but only emit a fleet
+        // move when the order launches this turn. Reservations make subsequent
+        // iterations see the reserved ships as spent, so they can't be poached
+        // for lower-value captures — the no-op deferral emerges from the score
+        // sweep. Mark every target fed by a touched source dirty for recompute.
+        for o in &orders {
             state.commit(o.src_id, target_id, o.ships, o.arrival, world.player);
             if o.effective_offset == 0 {
-                moves.push((o.src_id, o.angle, o.ships));
+                moves.push(MoveAction {
+                    from_id: o.src_id,
+                    angle: o.angle,
+                    ships: o.ships,
+                });
+            }
+            if let Some(outs) = model.outbound_edges.get(&o.src_id) {
+                for (did, _) in outs {
+                    dirty.insert(*did);
+                }
+            }
+        }
+        dirty.insert(target_id);
+        if let Some(outs) = model.outbound_edges.get(&target_id) {
+            for (did, _) in outs {
+                dirty.insert(*did);
             }
         }
     }
+
     moves.extend(send_reinforcements(world, model, &state));
     (moves, state)
 }
@@ -1396,20 +1830,19 @@ fn run_strategy(
 /// `plan()` runs directly (used as the cheap reply-policy hook inside the
 /// rollout layer), so its position is load-bearing — see the
 /// `search_candidates_includes_greedy_plan` test.
-const STRATEGIES: [SelectionStrategy; 4] = [
-    SelectionStrategy::PriorityFirst,
-    SelectionStrategy::ScoreFirst,
+const STRATEGIES: [SelectionStrategy; 3] = [
     SelectionStrategy::ScorePerShip,
     SelectionStrategy::ProductionFirst,
+    SelectionStrategy::ScoreFirst,
 ];
 
-pub fn plan(world: &WorldState) -> Vec<FleetOrder> {
+pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     if world.enemy_planets.is_empty() {
         return Vec::new();
     }
     let model = HellburnerModel::build(world);
 
-    if world.step < EARLY_ROUNDS {
+    if world.step < OPENING_TURNS {
         return run_early_game(world, &model);
     }
 
@@ -1431,17 +1864,34 @@ pub fn plan(world: &WorldState) -> Vec<FleetOrder> {
 /// Duplicate plans are deduplicated so the rollout doesn't pay for the same
 /// move set twice (different strategies often converge on the same answer
 /// once trial-timeline ownership is the binding constraint).
-pub fn search_candidates(world: &WorldState) -> Vec<Vec<FleetOrder>> {
+pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     if world.enemy_planets.is_empty() {
         return vec![Vec::new()];
     }
     let model = HellburnerModel::build(world);
 
-    if world.step < EARLY_ROUNDS {
+    // Stress test: probe `plan_shot` for every ordered pair of planets
+    // (both directions) with fleet sizes up to 50. Results are discarded —
+    // this just exercises the function. The `std::hint::black_box` keeps the
+    // optimizer from eliding the calls.
+
+    // for i in 0..50 {
+    //     for src in &world.planets {
+    //         for dst in &world.planets {
+    //             if src.id == dst.id {
+    //                 continue;
+    //             }
+    //             std::hint::black_box(model.plan_shot(src.id, dst.id, i, 0));
+    //         }
+    //     }
+    // }
+
+    if world.step < OPENING_TURNS {
         return vec![run_early_game(world, &model)];
     }
 
-    let mut out: Vec<Vec<FleetOrder>> = Vec::with_capacity(STRATEGIES.len());
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len());
+
     for &strat in &STRATEGIES {
         let (moves, _) = run_strategy(world, &model, strat);
         if !out.iter().any(|prev| prev == &moves) {

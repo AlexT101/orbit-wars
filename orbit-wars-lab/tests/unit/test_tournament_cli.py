@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from orbit_wars_app.schemas import AgentInfo
-from orbit_wars_app.tournament import _filter_agents_by_tags
+from orbit_wars_app.pairing import filter_agents_by_tags as _filter_agents_by_tags
 
 
 def _ainfo(aid: str, bucket: str, tags: list[str], disabled: bool = False) -> AgentInfo:

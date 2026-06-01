@@ -12,12 +12,18 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+from tests.zoo import REAL_ZOO
+
 
 def _cli(args: list[str], cwd: Path | None = None, env_runs: Path | None = None):
     cmd = [sys.executable, "-m", "orbit_wars_app.tournament", *args]
-    env = None
+    env = os.environ.copy()
+    env["ORBIT_WARS_ZOO_DIR"] = str(REAL_ZOO)
+    # Force UTF-8 stdio so the CLI's unicode output (μ, σ, →) doesn't crash on a
+    # Windows cp1252 console (Linux/CI default to UTF-8 already).
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     if env_runs is not None:
-        env = os.environ.copy()
         env["ORBIT_WARS_RUNS_DIR"] = str(env_runs)
     return subprocess.run(
         cmd,

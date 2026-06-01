@@ -54,6 +54,47 @@ runs/
 
 ---
 
+## Match scheduler
+
+Tournaments are executed by a process-wide scheduler
+([`orbit_wars_app/scheduler.py`](orbit_wars_app/scheduler.py)) rather than run
+one-at-a-time:
+
+- **Queue any number of tournaments.** `POST /api/tournaments` expands a config
+  into per-match jobs and returns immediately with `{run_id, status:"queued"}`.
+  Multiple tournaments (and Quick Matches) can be in flight at once — there is no
+  longer a single-tournament lock / 409.
+- **Fair round-robin.** Each tournament keeps its own FIFO sub-queue; the
+  scheduler interleaves one match per tournament in turn, so a large round-robin
+  can't starve a Quick Match queued behind it.
+- **One global concurrency setting.** A system-wide worker count (Match Settings
+  on the Settings tab, or `PUT /api/scheduler/concurrency`) controls how many
+  matches run at once, replacing the old per-tournament 1/2/4/8 picker. Backed by
+  a killable [`pebble`](https://pypi.org/project/pebble/) process pool, so workers
+  stay warm across matches.
+- **Graceful failures.** Per-match crashes are recorded as `crashed`; a match
+  that blows its deadline is killed and recorded as `timeout` — neither aborts
+  the rest of the run. The deadline isn't user-configurable: it's derived from
+  the player count via `match_timeout_for` (`(500 + 60) * players + 20` s, i.e.
+  ~500 turns at 1s + 60s overage per player + slack).
+- **Stop.** `POST /api/tournaments/{run_id}/stop` (alias `/cancel`) drops that
+  tournament's queued matches and kills its in-flight ones.
+- **Restart workers.** `POST /api/scheduler/restart-pool` (Match Settings →
+  "Restart workers") recycles the pool so a freshly-rebuilt native bot binary
+  (`.so`/`.pyd`, cached in warm workers) gets picked up; in-flight matches are
+  re-queued, not lost.
+- **Introspection.** `GET /api/scheduler` (concurrency, queue depth, active
+  tournaments) and `GET /api/scheduler/running` (live matches) back the
+  "Active now" panel on the Tournaments tab.
+
+Scheduler/queue state is **in-memory**: a backend restart clears the queue (any
+disk run still marked `running` is reconciled to `aborted` on startup). The
+`runs/` tree remains the durable archive. The CLI
+(`python -m orbit_wars_app.tournament run …`) runs synchronously through a
+transient scheduler; its `--parallel` flag sets that run's local worker count.
+
+---
+
 ## Credits
 
 Rule-based external agents are redistributed from their authors' public

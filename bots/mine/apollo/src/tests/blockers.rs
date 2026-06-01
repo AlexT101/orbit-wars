@@ -3,12 +3,13 @@
 //! independently re-simulate the fleet trajectory and the per-turn swept-pair
 //! collision against every obstacle, and require the two to agree.
 
-use crate::blockers::{aim_with_prediction, bucket_to_speed, lead_target, speed_bucket};
+use super::reference_engine::RefEngine;
+use crate::blockers::{aim_with_prediction, lead_target, shot_blocked_exact};
 use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
-use crate::engine::{fleet_speed, swept_pair_hit, Configuration, EngineState, MoveAction};
+use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
 use crate::entity_cache::{EntityCache, EntityKind};
 
-fn cache_for(state: &EngineState) -> EntityCache {
+fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(
         &state.initial_planets,
         &state.comets,
@@ -18,12 +19,13 @@ fn cache_for(state: &EngineState) -> EntityCache {
     )
 }
 
-/// Ground truth: at the **quantized** fleet speed (so we test the same speed
-/// the blocker table was built against), step the fleet one turn at a time and
-/// run the engine's own [`swept_pair_hit`] against every non-target obstacle
-/// and the sun. Returns the first colliding `(turn, blocker_id)`, where
-/// `blocker_id == -1` represents the sun (which is not stored in
-/// [`EntityCache::entities`]).
+/// Ground truth: at the **exact engine** fleet speed `fleet_speed(ships)` (the
+/// speed the simulator actually flies the fleet at, and the speed
+/// [`aim_with_prediction`] now decides against — there is no longer a quantized
+/// blocker table), step the fleet one turn at a time and run the engine's own
+/// [`swept_pair_hit`] against every non-target obstacle and the sun. Returns the
+/// first colliding `(turn, blocker_id)`, where `blocker_id == -1` represents the
+/// sun (which is not stored in [`EntityCache::entities`]).
 fn ground_truth_collision(
     cache: &EntityCache,
     shooter_id: i64,
@@ -32,7 +34,7 @@ fn ground_truth_collision(
     ships: i64,
     flight_time: f64,
 ) -> Option<(i64, i64)> {
-    let v = bucket_to_speed(speed_bucket(ships));
+    let v = fleet_speed(ships.max(1), 6.0);
     let [lx, ly] = cache.position(shooter_id, 0)?;
     let shooter_radius = cache.get(shooter_id).map(|e| e.radius).unwrap_or(0.0);
     let launch_offset = shooter_radius + LAUNCH_CLEARANCE;
@@ -76,8 +78,13 @@ fn ground_truth_collision(
             return Some((t, -1));
         }
 
-        for (&bid, ent) in &cache.entities {
-            if bid == shooter_id || bid == target_id {
+        for ent in &cache.entities {
+            let bid = ent.id;
+            // Skip only the target (reaching it is success). The source is
+            // *not* skipped: the engine checks the fleet against its own source
+            // planet every turn, so an orbiting source that sweeps back into a
+            // slow fleet's path is a real collision the aimer must predict.
+            if bid == target_id {
                 continue;
             }
             let Some([q0x, q0y]) = cache.position(bid, t - 1) else {
@@ -103,8 +110,8 @@ fn entity_ids_at_t0(cache: &EntityCache) -> Vec<i64> {
     let mut ids: Vec<i64> = cache
         .entities
         .iter()
-        .filter(|(_, e)| e.positions[0].is_some())
-        .map(|(&id, _)| id)
+        .filter(|e| e.positions[0].is_some())
+        .map(|e| e.id)
         .collect();
     ids.sort();
     ids
@@ -157,78 +164,6 @@ fn reaches_target_with_engine_speed(
     false
 }
 
-/// Diagnostic: dump geometry for the specific failing case.
-#[test]
-#[ignore]
-fn dump_failing_case_geometry() {
-    use crate::blockers::{bucket_to_speed, build_blocker_table, speed_bucket};
-    let state = crate::engine::EngineState::new(100, 2, crate::engine::Configuration::default());
-    let cache = cache_for(&state);
-    let shooter = 8i64;
-    let blocker = 12i64;
-    let ships = 500i64;
-    let v_quant = bucket_to_speed(speed_bucket(ships));
-    println!("v_quant = {v_quant}");
-    let [lx, ly] = cache.position(shooter, 0).unwrap();
-    let shooter_r = cache.get(shooter).map(|e| e.radius).unwrap_or(0.0);
-    let launch_offset = shooter_r + crate::constants::LAUNCH_CLEARANCE;
-    println!("shooter pos = ({lx:.4}, {ly:.4}), launch_offset = {launch_offset:.4}");
-    let blocker_r = cache.get(blocker).map(|e| e.radius).unwrap_or(0.0);
-    println!("blocker radius = {blocker_r}");
-
-    let t = 5i64;
-    let [q0x, q0y] = cache.position(blocker, t - 1).unwrap();
-    let [q1x, q1y] = cache.position(blocker, t).unwrap();
-    println!("blocker turn {t}: Q(s=0)=({q0x:.4},{q0y:.4}) Q(s=1)=({q1x:.4},{q1y:.4})");
-    let dqx = q1x - q0x;
-    let dqy = q1y - q0y;
-    let dq_speed = (dqx * dqx + dqy * dqy).sqrt();
-    println!("blocker chord speed = {dq_speed:.6}");
-    let d0 = launch_offset + (t as f64 - 1.0) * v_quant;
-    println!("d0 (fleet ring at s=0 of turn {t}) = {d0:.4}");
-    let mut min_diff = f64::INFINITY;
-    let mut min_s = 0.0f64;
-    for i in 0..=100 {
-        let s = i as f64 / 100.0;
-        let qx = q0x + s * dqx;
-        let qy = q0y + s * dqy;
-        let k = ((qx - lx).powi(2) + (qy - ly).powi(2)).sqrt();
-        let d = d0 + s * v_quant;
-        let diff = d - k;
-        if diff < min_diff {
-            min_diff = diff;
-            min_s = s;
-        }
-    }
-    println!("min D-K = {min_diff:.6} at s = {min_s:.2} (blocker_r = {blocker_r})");
-    for i in 0..=20 {
-        let s = i as f64 / 20.0;
-        let qx = q0x + s * dqx;
-        let qy = q0y + s * dqy;
-        let k = ((qx - lx).powi(2) + (qy - ly).powi(2)).sqrt();
-        let d = d0 + s * v_quant;
-        let diff = d - k;
-        println!(
-            "  s={s:.2}: K={k:.4} D={d:.4} D-K={diff:.6} {}",
-            if diff.abs() <= blocker_r { "COLLISION" } else { "" }
-        );
-    }
-
-    let table = build_blocker_table(&cache, shooter, 0, v_quant);
-    let angle = -1.585114f64;
-    println!("\nTable entries for blocker {blocker} (turn 5 range s in [4,5]):");
-    for e in &table.entries {
-        if e.blocker_id == blocker && e.flight_t >= 3.9 && e.flight_t <= 5.1 {
-            let aim_w = e.bearing + (angle - e.bearing).rem_euclid(2.0 * std::f64::consts::PI);
-            let covers = aim_w >= e.aim_min && aim_w <= e.aim_max;
-            println!(
-                "  flight_t={:.3} bearing={:.4} half_arc={:.4} [{:.4},{:.4}] covers_angle={}",
-                e.flight_t, e.bearing, e.half_arc, e.aim_min, e.aim_max, covers
-            );
-        }
-    }
-}
-
 /// For every (shooter, target, ships) case where the aimer says "path clear",
 /// re-simulate the fleet and require that no non-target obstacle's swept
 /// per-turn pair test fires before the fleet reaches the target.
@@ -243,7 +178,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
 
     let mut clear_cases = 0usize;
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -258,7 +193,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
                     else {
                         continue;
                     };
-                    let v = bucket_to_speed(speed_bucket(ships));
+                    let v = fleet_speed(ships.max(1), 6.0);
                     let Some((_, _, _, _, flight_time)) =
                         lead_target(&cache, shooter, target, 0, v)
                     else {
@@ -269,9 +204,8 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
                     // HORIZON turns of launch by design — past that the
                     // aimer is silent, not wrong.
                     let sim_time = flight_time.min(HORIZON as f64);
-                    let collision = ground_truth_collision(
-                        &cache, shooter, target, angle, ships, sim_time,
-                    );
+                    let collision =
+                        ground_truth_collision(&cache, shooter, target, angle, ships, sim_time);
                     if let Some((t, bid)) = collision {
                         panic!(
                             "seed={seed} ships={ships} shooter={shooter} target={target} \
@@ -309,7 +243,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
     let mut missing = Vec::new();
 
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -319,7 +253,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
                     continue;
                 }
                 for &ships in &ships_grid {
-                    let v = bucket_to_speed(speed_bucket(ships));
+                    let v = fleet_speed(ships.max(1), 6.0);
                     let Some((angle, turns, _, _, flight_time)) =
                         lead_target(&cache, shooter, target, 0, v)
                     else {
@@ -329,9 +263,8 @@ fn blocked_verdicts_correspond_to_real_collisions() {
                         continue;
                     }
 
-                    let collision = ground_truth_collision(
-                        &cache, shooter, target, angle, ships, flight_time,
-                    );
+                    let collision =
+                        ground_truth_collision(&cache, shooter, target, angle, ships, flight_time);
                     if collision.is_none() {
                         missing.push(format!(
                             "seed={seed} ships={ships} shooter={shooter} target={target} \
@@ -365,12 +298,12 @@ fn blocked_verdicts_correspond_to_real_collisions() {
 /// happens to miss the sun-blocking geometry on these seeds.
 #[test]
 fn sun_blocks_chords_passing_through_center() {
-    let state = EngineState::new(42, 2, Configuration::default());
+    let state = RefEngine::new(42, 2, Configuration::default());
     let cache = cache_for(&state);
 
     let statics: Vec<(i64, f64, f64, f64)> = cache
         .entities
-        .values()
+        .iter()
         .filter(|e| e.is_static())
         .filter_map(|e| e.positions[0].map(|p| (e.id, p[0], p[1], e.radius)))
         .collect();
@@ -430,7 +363,7 @@ fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
 
     let mut mismatches = Vec::new();
     for seed in seeds {
-        let state = EngineState::new(seed, 2, Configuration::default());
+        let state = RefEngine::new(seed, 2, Configuration::default());
         let cache = cache_for(&state);
         let ids = entity_ids_at_t0(&cache);
 
@@ -508,7 +441,7 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
 
     let mut misses = Vec::new();
     for seed in seeds {
-        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut state = RefEngine::new(seed, 2, Configuration::default());
         let mut cache = cache_for(&state);
 
         for &step in &future_steps {
@@ -520,8 +453,8 @@ fn accepted_orbiting_shots_reach_target_under_engine_speed() {
             let mut ids: Vec<i64> = cache
                 .entities
                 .iter()
-                .filter(|(_, e)| e.positions[state.step as usize].is_some())
-                .map(|(&id, _)| id)
+                .filter(|e| e.positions[state.step as usize].is_some())
+                .map(|e| e.id)
                 .collect();
             ids.sort_unstable();
 
@@ -594,7 +527,7 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
 
     let mut misses = Vec::new();
     for seed in seeds {
-        let mut state = EngineState::new(seed, 2, Configuration::default());
+        let mut state = RefEngine::new(seed, 2, Configuration::default());
         let mut cache = cache_for(&state);
 
         for &step in &future_steps {
@@ -608,8 +541,8 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
             let mut ids: Vec<i64> = cache
                 .entities
                 .iter()
-                .filter(|(_, e)| e.positions[state.step as usize].is_some())
-                .map(|(&id, _)| id)
+                .filter(|e| e.positions[state.step as usize].is_some())
+                .map(|e| e.id)
                 .collect();
             ids.sort_unstable();
 
@@ -665,4 +598,149 @@ fn wide_seed_scan_accepted_orbiting_shots_reach_target() {
         "accepted orbiting shots that did not reach target (broad scan):\n  {}",
         misses.join("\n  "),
     );
+}
+
+/// Bit-identity guard for the binary-searched H-reduction in `blocked_on_path`.
+///
+/// The reduction skips turns it proves can't contact (the fleet's monotonic
+/// outward radius makes the radially-reachable turns a contiguous band) and runs
+/// the exact swept test only inside that band — with an exact full-scan fallback
+/// when a slow fleet can be out-paced radially (`fleet_speed ≤ obstacle step`).
+/// Either way the verdict must equal an exhaustive per-turn scan.
+///
+/// We advance until a comet group spawns (comets are the fast movers that drive
+/// the fallback branch and the windowed clamp), then sweep every bearing from
+/// several launchers across the ships grid (`5` → slow fleet/fallback, `500` →
+/// fast fleet/binary-search) and require `shot_blocked_exact` to agree with the
+/// brute-force `ground_truth_collision` for every angle.
+#[test]
+fn h_reduction_matches_exhaustive_scan_with_comets() {
+    let mut state = RefEngine::new(42, 2, Configuration::default());
+    let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
+    let mut guard = 0;
+    while state.comet_planet_ids.is_empty() && guard < EPISODE_STEPS {
+        state.step_with_actions(&noop).unwrap();
+        guard += 1;
+    }
+    assert!(
+        !state.comet_planet_ids.is_empty(),
+        "expected comets to spawn"
+    );
+
+    let cache = cache_for(&state);
+    let now = cache.current_turn as usize;
+    // Entities on board *now* (offset 0) — includes the freshly spawned comets,
+    // which `entity_ids_at_t0` (keyed on absolute turn 0) would miss.
+    let mut on_board: Vec<i64> = cache
+        .entities
+        .iter()
+        .filter(|e| e.positions.get(now).map(|p| p.is_some()).unwrap_or(false))
+        .map(|e| e.id)
+        .collect();
+    on_board.sort();
+    let launchers: Vec<i64> = on_board
+        .iter()
+        .copied()
+        .filter(|id| !cache.get(*id).map(|e| e.is_comet()).unwrap_or(true))
+        .take(8)
+        .collect();
+    assert!(!launchers.is_empty(), "need planet launchers");
+
+    let ships_grid = [5i64, 50, 500];
+    let steps = 240usize;
+    let mut compared = 0usize;
+    for &shooter in &launchers {
+        for &target in on_board.iter().take(4) {
+            if shooter == target {
+                continue;
+            }
+            for &ships in &ships_grid {
+                let v = fleet_speed(ships.max(1), 6.0);
+                // A generous flight budget so the swept window spans the comets.
+                let flight_time = HORIZON as f64;
+                for k in 0..steps {
+                    let angle = std::f64::consts::TAU * k as f64 / steps as f64;
+                    let band =
+                        shot_blocked_exact(&cache, shooter, target, angle, flight_time, v, 0);
+                    let brute =
+                        ground_truth_collision(&cache, shooter, target, angle, ships, flight_time)
+                            .is_some();
+                    assert_eq!(
+                        band, brute,
+                        "verdict mismatch: shooter={shooter} target={target} ships={ships} \
+                         v={v:.3} angle={angle:.6} — band={band} exhaustive={brute}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        compared > 1000,
+        "expected a broad sweep, only {compared} comparisons"
+    );
+}
+
+/// Soundness guard for the cone-scan with comets present.
+///
+/// `clear_verdicts_survive_swept_pair_resimulation` already checks this for the
+/// comet-free board; this extends it to a comet-spawned cache, requiring every
+/// CLEAR verdict from `aim_with_prediction` to survive the exhaustive resim.
+#[test]
+fn cone_cull_clear_verdicts_sound_with_comets() {
+    let mut state = RefEngine::new(42, 2, Configuration::default());
+    let noop: Vec<Vec<MoveAction>> = vec![Vec::new(), Vec::new()];
+    let mut guard = 0;
+    while state.comet_planet_ids.is_empty() && guard < EPISODE_STEPS {
+        state.step_with_actions(&noop).unwrap();
+        guard += 1;
+    }
+    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+
+    let cache = cache_for(&state);
+    let now = cache.current_turn as usize;
+    let mut ids: Vec<i64> = cache
+        .entities
+        .iter()
+        .filter(|e| e.positions.get(now).map(|p| p.is_some()).unwrap_or(false))
+        .map(|e| e.id)
+        .collect();
+    ids.sort();
+
+    let ships_grid = [5i64, 50, 500];
+    let mut clear_cases = 0usize;
+    for &shooter in &ids {
+        if cache.get(shooter).map(|e| e.is_comet()).unwrap_or(true) {
+            continue; // launch from planets
+        }
+        for &target in &ids {
+            if shooter == target {
+                continue;
+            }
+            for &ships in &ships_grid {
+                let Some((angle, _, _, _, _)) =
+                    aim_with_prediction(&cache, shooter, target, ships, 0)
+                else {
+                    continue;
+                };
+                let v = fleet_speed(ships.max(1), 6.0);
+                let Some((_, _, _, _, flight_time)) = lead_target(&cache, shooter, target, 0, v)
+                else {
+                    continue;
+                };
+                let sim_time = flight_time.min(HORIZON as f64);
+                if let Some((t, bid)) =
+                    ground_truth_collision(&cache, shooter, target, angle, ships, sim_time)
+                {
+                    panic!(
+                        "shooter={shooter} target={target} ships={ships} angle={angle:.6}: \
+                         aimer says CLEAR but engine reports collision with {bid} on turn {t} \
+                         (cone cull dropped a real blocker?)"
+                    );
+                }
+                clear_cases += 1;
+            }
+        }
+    }
+    assert!(clear_cases > 50, "expected many clear verdicts, saw {clear_cases}");
 }

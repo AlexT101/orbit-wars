@@ -13,6 +13,8 @@ from orbit_wars_app.tournament import Tournament
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+from tests.zoo import REAL_ZOO
+
 
 def _run_one(tmp_path: Path) -> str:
     cfg = TournamentConfig(
@@ -20,7 +22,7 @@ def _run_one(tmp_path: Path) -> str:
         games_per_pair=1,
         mode="fast",
     )
-    return Tournament(config=cfg, runs_root=tmp_path, zoo_root=PROJECT_ROOT / "agents").run()
+    return Tournament(config=cfg, runs_root=tmp_path, zoo_root=REAL_ZOO).run()
 
 
 @pytest.mark.asyncio
@@ -102,7 +104,7 @@ async def test_runs_exclude_quick_match_filters_flagged_runs(tmp_path: Path, mon
     normal_id = Tournament(
         config=cfg_normal,
         runs_root=tmp_path,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     ).run()
 
     # Quick match (is_quick_match=True)
@@ -115,7 +117,7 @@ async def test_runs_exclude_quick_match_filters_flagged_runs(tmp_path: Path, mon
     qm_id = Tournament(
         config=cfg_qm,
         runs_root=tmp_path,
-        zoo_root=PROJECT_ROOT / "agents",
+        zoo_root=REAL_ZOO,
     ).run()
 
     transport = ASGITransport(app=app)
