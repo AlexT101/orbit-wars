@@ -45,7 +45,7 @@ pub const OPENING_TURNS: i64 = 3; // Number of turns at the start where we focus
 pub const MAX_DISTANCE: f64 = 38.0; // Maximum distance between planets for us to consider fleet travel
 
 // Simulation rules
-pub const NUDGE_SCAN: i64 = 16; // Number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
+pub const NUDGE_SCAN: i64 = 32; // Number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
 
 // Nudge scan notes:
 // Measured over 30 seeds × 5 ship counts × all shooter/target pairs:
