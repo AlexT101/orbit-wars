@@ -134,6 +134,129 @@ def test_quick_match_queue_keeps_requested_side_order(tmp_path: Path, zoo: Path)
     assert job.agent_ids == ["baselines/a", "baselines/b"]
 
 
+def _replay_map(num_players: int = 2) -> dict:
+    return {
+        "planets": [[0, -1, 10, 10, 1, 5, 1]],
+        "initial_planets": [[0, -1, 10, 10, 1, 5, 1]],
+        "angular_velocity": 0.03,
+        "source_seed": 123,
+        "source_name": "sample.json",
+        "num_players": num_players,
+    }
+
+
+def _comet_schedule(spawn_step: int = 50) -> list[dict]:
+    return [
+        {
+            "spawn_step": spawn_step,
+            "paths": [
+                [[1, 2], [3, 4]],
+                [[5, 6], [7, 8]],
+                [[9, 10], [11, 12]],
+                [[13, 14], [15, 16]],
+            ],
+            "ships": 13,
+        }
+    ]
+
+
+def test_tournament_queue_carries_replay_map(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    replay_map = _replay_map()
+    replay_map["comet_schedule"] = _comet_schedule()
+    run_id = sched.submit(
+        TournamentConfig(
+            agents=["baselines/a", "baselines/b"],
+            games_per_pair=1,
+            mode="fast",
+            seed_mode="replay",
+            replay_map=replay_map,
+        )
+    )
+
+    job = sched._tournaments[run_id].pending[0]
+    assert job.replay_map is not None
+    assert job.replay_map["source_name"] == "sample.json"
+    assert job.replay_map["comet_schedule"][0]["spawn_step"] == 50
+
+    data = json.loads((runs / run_id / "config.json").read_text())
+    assert data["seed_mode"] == "replay"
+    assert data["replay_map"]["source_seed"] == 123
+    assert data["replay_map"]["comet_schedule"][0]["ships"] == 13
+
+
+def test_replay_map_rejects_ultrafast(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    with pytest.raises(ValueError, match="fast and faithful"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b"],
+                games_per_pair=1,
+                mode="ultrafast",
+                seed_mode="replay",
+                replay_map=_replay_map(),
+            )
+        )
+
+
+def test_replay_map_rejects_format_mismatch(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    with pytest.raises(ValueError, match="Replay has 2 players"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b", "baselines/c", "baselines/d"],
+                games_per_pair=1,
+                mode="fast",
+                format="4p",
+                seed_mode="replay",
+                replay_map=_replay_map(num_players=2),
+            )
+        )
+
+
+def test_replay_map_rejects_invalid_comet_spawn_step(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    replay_map = _replay_map()
+    replay_map["comet_schedule"] = _comet_schedule(spawn_step=51)
+    with pytest.raises(ValueError, match="spawn steps"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b"],
+                games_per_pair=1,
+                mode="fast",
+                seed_mode="replay",
+                replay_map=replay_map,
+            )
+        )
+
+
+def test_replay_map_rejects_malformed_comet_paths(tmp_path: Path, zoo: Path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    sched = Scheduler(runs_root=runs, zoo_root=zoo)
+    replay_map = _replay_map()
+    replay_map["comet_schedule"] = _comet_schedule()
+    replay_map["comet_schedule"][0]["paths"] = [[[1, 2]]]
+    with pytest.raises(ValueError, match="4 paths"):
+        sched.submit(
+            TournamentConfig(
+                agents=["baselines/a", "baselines/b"],
+                games_per_pair=1,
+                mode="fast",
+                seed_mode="replay",
+                replay_map=replay_map,
+            )
+        )
+
+
 # --------------------------------------------------------------------------
 # End-to-end lifecycle with a real (killable) pool but fake jobs
 # --------------------------------------------------------------------------

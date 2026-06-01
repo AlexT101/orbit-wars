@@ -3,10 +3,18 @@
  * Emits onChange(config) on each change.
  */
 
+import {
+  replayMapFromFile,
+  replayMapLabel,
+  ReplayMapConfig,
+} from "../utils/replay-map";
+import { escapeHtml } from "../utils/escape";
+
 export interface MatchConfig {
   games: number;
   mode: "fast" | "faithful" | "ultrafast";
-  seed: "random" | number;
+  seed: "random" | "replay" | number;
+  replayMap?: ReplayMapConfig | null;
   format: "2p" | "4p";
 }
 
@@ -17,16 +25,29 @@ export interface MatchConfigHandle {
 export function mountMatchConfigBar(
   root: HTMLElement,
   onChange: (cfg: MatchConfig) => void,
+  onError?: (msg: string) => void,
 ): MatchConfigHandle {
   const config: MatchConfig = {
     games: 1,
     mode: "fast",
     seed: "random",
+    replayMap: null,
     format: "2p",
   };
   let customSeed = 42;
 
+  function clearReplayForUltrafast() {
+    if (config.mode !== "ultrafast") return;
+    if (config.seed === "replay" || config.replayMap) {
+      config.seed = "random";
+      config.replayMap = null;
+    }
+  }
+
   function render() {
+    clearReplayForUltrafast();
+    const replayLabel = replayMapLabel(config.replayMap);
+    const canUseReplay = config.mode !== "ultrafast";
     root.innerHTML = `
       <div class="config-bar">
         <div class="config-group">
@@ -52,15 +73,24 @@ export function mountMatchConfigBar(
         <div class="config-group">
           <span class="config-label">seed</span>
           <button class="config-pill ${config.seed === "random" ? "on" : ""}" data-k="seed" data-v="random">random</button>
-          <button class="config-pill ${config.seed !== "random" ? "on" : ""}" data-k="seed" data-v="custom">custom</button>
+          <button class="config-pill ${typeof config.seed === "number" ? "on" : ""}" data-k="seed" data-v="custom">custom</button>
+          ${canUseReplay
+            ? `<button class="config-pill ${config.seed === "replay" ? "on" : ""}" data-k="seed" data-v="replay">replay</button>`
+            : ""}
           <input
             id="config-custom-seed"
             class="config-input"
             type="number"
             inputmode="numeric"
             value="${customSeed}"
-            ${config.seed === "random" ? "disabled" : ""}
+            ${typeof config.seed !== "number" ? "disabled" : ""}
           >
+          <input id="config-replay-file" type="file" accept=".json,application/json" hidden>
+          <span
+            class="config-file-label"
+            title="${escapeHtml(replayLabel)}"
+            ${canUseReplay && (config.seed === "replay" || config.replayMap) ? "" : "hidden"}
+          >${escapeHtml(replayLabel)}</span>
         </div>
       </div>
     `;
@@ -70,8 +100,19 @@ export function mountMatchConfigBar(
         const k = el.dataset.k as keyof MatchConfig;
         const v = el.dataset.v!;
         if (k === "games") config.games = parseInt(v, 10);
-        else if (k === "mode") config.mode = v as "fast" | "faithful" | "ultrafast";
-        else if (k === "seed") config.seed = v === "random" ? "random" : customSeed;
+        else if (k === "mode") {
+          config.mode = v as "fast" | "faithful" | "ultrafast";
+          clearReplayForUltrafast();
+        }
+        else if (k === "seed") {
+          if (v === "replay") {
+            if (config.mode === "ultrafast") return;
+            root.querySelector<HTMLInputElement>("#config-replay-file")?.click();
+            return;
+          }
+          config.seed = v === "random" ? "random" : customSeed;
+          config.replayMap = null;
+        }
         else if (k === "format") config.format = v as "2p" | "4p";
         onChange({ ...config });
         render();
@@ -82,9 +123,28 @@ export function mountMatchConfigBar(
       const next = parseInt((e.target as HTMLInputElement).value, 10);
       if (Number.isNaN(next)) return;
       customSeed = next;
-      if (config.seed !== "random") {
+      if (typeof config.seed === "number") {
         config.seed = customSeed;
         onChange({ ...config });
+      }
+    });
+
+    root.querySelector<HTMLInputElement>("#config-replay-file")?.addEventListener("change", async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      if (config.mode === "ultrafast") {
+        clearReplayForUltrafast();
+        render();
+        return;
+      }
+      try {
+        config.replayMap = await replayMapFromFile(file);
+        config.seed = "replay";
+        onChange({ ...config });
+        render();
+      } catch (err) {
+        config.replayMap = null;
+        onError?.((err as Error).message);
       }
     });
   }

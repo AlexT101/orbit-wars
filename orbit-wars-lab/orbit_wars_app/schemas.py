@@ -10,7 +10,7 @@ Bucket = Literal["baselines", "external", "mine"]
 Format = Literal["2p", "4p"]
 Mode = Literal["fast", "faithful", "ultrafast"]
 TournamentShape = Literal["round-robin", "gauntlet"]
-SeedMode = Literal["fixed", "random"]
+SeedMode = Literal["fixed", "random", "replay"]
 MatchStatus = Literal[
     "ok", "timeout", "crashed", "agent_failed_to_start", "invalid_action", "draw"
 ]
@@ -84,6 +84,31 @@ class MatchResult(BaseModel):
     error: Optional[str] = None
 
 
+class ReplayCometGroupConfig(BaseModel):
+    """One observed comet spawn extracted from a replay."""
+
+    spawn_step: int
+    paths: list[list[list[int | float]]]
+    ships: int | float
+
+
+class ReplayMapConfig(BaseModel):
+    """Initial map snapshot extracted from a replay JSON.
+
+    The browser sends just the fields needed to seed an Orbit Wars initial
+    state. Planet rows follow the Kaggle replay shape:
+    [id, owner, x, y, radius, ships, production].
+    """
+
+    planets: list[list[int | float]]
+    initial_planets: list[list[int | float]] = Field(default_factory=list)
+    angular_velocity: float
+    source_seed: Optional[int] = None
+    source_name: Optional[str] = None
+    num_players: Optional[int] = None
+    comet_schedule: list[ReplayCometGroupConfig] = Field(default_factory=list)
+
+
 class RunSummary(BaseModel):
     id: str
     started_at: str
@@ -110,6 +135,7 @@ class TournamentConfig(BaseModel):
     parallel: int = Field(default=1, ge=1, le=16)
     seed_base: int = 42
     seed_mode: SeedMode = "fixed"
+    replay_map: Optional[ReplayMapConfig] = None
     # set False for seed-only runs to skip 5-10MB JSON writes per match
     save_replays: bool = True
     is_quick_match: bool = False  # True when launched from the Quick Match UI (filtered out by /api/runs?exclude_quick_match=true)

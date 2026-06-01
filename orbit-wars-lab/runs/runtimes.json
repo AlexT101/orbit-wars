@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-06-01T16:52:21.947721+00:00",
+  "last_updated": "2026-06-01T21:05:32.649789+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 22735,
@@ -9,10 +9,10 @@
       "last_updated": "2026-05-29T16:48:59.380844+00:00"
     },
     "baselines/random": {
-      "total_turns": 15375,
-      "total_seconds": 1.471007343997552,
-      "avg_ms": 0.09567527440634484,
-      "last_updated": "2026-06-01T16:52:21.934624+00:00"
+      "total_turns": 15656,
+      "total_seconds": 1.479357343997552,
+      "avg_ms": 0.09449139908006847,
+      "last_updated": "2026-06-01T21:05:32.637210+00:00"
     },
     "external/ykhnkf-distance-prioritized": {
       "total_turns": 14990,
@@ -159,10 +159,10 @@
       "last_updated": "2026-05-29T07:14:29.840421+00:00"
     },
     "mine/apollo": {
-      "total_turns": 37554,
-      "total_seconds": 384.3122070000002,
-      "avg_ms": 10.233589151621672,
-      "last_updated": "2026-06-01T16:13:58.100537+00:00"
+      "total_turns": 37887,
+      "total_seconds": 384.95255900000024,
+      "avg_ms": 10.160544751497882,
+      "last_updated": "2026-06-01T21:05:32.637192+00:00"
     },
     "external/evogen": {
       "total_turns": 67174,
@@ -183,10 +183,10 @@
       "last_updated": "2026-05-29T16:49:35.924638+00:00"
     },
     "mine/alphaow_newest": {
-      "total_turns": 19111,
-      "total_seconds": 9700.643983000002,
-      "avg_ms": 507.5947874522527,
-      "last_updated": "2026-06-01T16:52:21.934641+00:00"
+      "total_turns": 19353,
+      "total_seconds": 9870.016255,
+      "avg_ms": 509.9992897741953,
+      "last_updated": "2026-06-01T20:38:01.271010+00:00"
     },
     "mine/alphaow_temp": {
       "total_turns": 19020,

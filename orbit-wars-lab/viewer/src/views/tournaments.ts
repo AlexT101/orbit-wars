@@ -8,6 +8,11 @@ import { api, AgentInfo, Rating, RunSummary, SchedulerStatus } from "../api";
 import { installHeaderNav } from "../components/header-nav";
 import { navigate } from "../router";
 import { escapeHtml } from "../utils/escape";
+import {
+  replayMapFromFile,
+  replayMapLabel,
+  ReplayMapConfig,
+} from "../utils/replay-map";
 
 let pollInterval: number | null = null;
 
@@ -77,8 +82,11 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
                   <div class="seg-group" id="cfg-seed-mode">
                     <button class="config-pill on" data-v="random">random</button>
                     <button class="config-pill" data-v="custom">custom</button>
+                    <button class="config-pill" data-v="replay">replay</button>
                   </div>
                   <input id="cfg-seed" class="seed-input" type="number" value="42" inputmode="numeric" disabled>
+                  <input id="cfg-replay-file" type="file" accept=".json,application/json" hidden>
+                  <span id="cfg-replay-label" class="seed-file-name" hidden></span>
                 </div>
               </div>
               <label class="cfg-row create-config-checkbox" title="Skip writing per-match replay JSON files (5-10MB each). Ratings are still computed.">
@@ -115,6 +123,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   const selected = new Set<string>();
   let agents: AgentInfo[] = [];
   let ratingsByAgent = new Map<string, number>();
+  let replayMap: ReplayMapConfig | null = null;
   let bucketFilter: "all" | "baselines" | "external" | "mine" = "all";
   let searchTerm = "";
 
@@ -240,9 +249,6 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     }
     if (wrap) wrap.style.opacity = isUltrafast ? "0.55" : "";
   }
-  document.getElementById("cfg-mode")!
-    .querySelectorAll<HTMLButtonElement>(".config-pill")
-    .forEach((btn) => btn.addEventListener("click", () => setTimeout(refreshSaveReplays, 0)));
   const getFormat = wireSegGroup("cfg-format");
   const getShape = wireSegGroup("cfg-shape");
   const getGamesValue = wireSegGroup("cfg-games");
@@ -252,6 +258,8 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   const challengerSel = document.getElementById("cfg-challenger") as HTMLSelectElement;
   const totalMatchesEl = document.getElementById("cfg-total-matches")!;
   const seedInput = document.getElementById("cfg-seed") as HTMLInputElement;
+  const replayFileInput = document.getElementById("cfg-replay-file") as HTMLInputElement;
+  const replayLabel = document.getElementById("cfg-replay-label")!;
 
   function getGames(): number {
     return parseInt(getGamesValue(), 10);
@@ -262,7 +270,34 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   }
 
   function refreshSeedInput() {
-    seedInput.disabled = getSeedMode() === "random";
+    seedInput.disabled = getSeedMode() !== "custom";
+  }
+
+  function selectSeedMode(mode: "random" | "custom" | "replay") {
+    document.getElementById("cfg-seed-mode")!
+      .querySelectorAll<HTMLButtonElement>(".config-pill")
+      .forEach((btn) => btn.classList.toggle("on", btn.dataset.v === mode));
+  }
+
+  function refreshReplaySeedAvailability() {
+    const isUltrafast = getMode() === "ultrafast";
+    const replayBtn = document.querySelector<HTMLButtonElement>(
+      "#cfg-seed-mode [data-v='replay']",
+    );
+    if (replayBtn) replayBtn.hidden = isUltrafast;
+    if (isUltrafast && getSeedMode() === "replay") {
+      selectSeedMode("random");
+      replayMap = null;
+      replayFileInput.value = "";
+    }
+    refreshSeedInput();
+    refreshReplayLabel();
+  }
+
+  function refreshReplayLabel() {
+    replayLabel.hidden = getSeedMode() !== "replay";
+    replayLabel.textContent = replayMapLabel(replayMap);
+    replayLabel.title = replayMapLabel(replayMap);
   }
 
   function refreshChallengerDropdown() {
@@ -341,9 +376,55 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   document.getElementById("cfg-games")!
     .querySelectorAll<HTMLButtonElement>(".config-pill")
     .forEach((btn) => btn.addEventListener("click", () => setTimeout(updateTotalMatches, 0)));
+  document.getElementById("cfg-mode")!
+    .querySelectorAll<HTMLButtonElement>(".config-pill")
+    .forEach((btn) => btn.addEventListener("click", () => {
+      setTimeout(() => {
+        refreshSaveReplays();
+        refreshReplaySeedAvailability();
+      }, 0);
+    }));
   document.getElementById("cfg-seed-mode")!
     .querySelectorAll<HTMLButtonElement>(".config-pill")
-    .forEach((btn) => btn.addEventListener("click", () => setTimeout(refreshSeedInput, 0)));
+    .forEach((btn) => btn.addEventListener("click", () => {
+      setTimeout(() => {
+        const mode = getSeedMode();
+        if (mode === "replay" && getMode() === "ultrafast") {
+          selectSeedMode("random");
+          replayMap = null;
+          replayFileInput.value = "";
+        } else if (mode === "replay") {
+          replayFileInput.click();
+        } else {
+          replayMap = null;
+        }
+        refreshSeedInput();
+        refreshReplayLabel();
+      }, 0);
+    }));
+
+  replayFileInput.addEventListener("change", async () => {
+    const file = replayFileInput.files?.[0];
+    if (!file) return;
+    const statusEl = document.getElementById("create-status")!;
+    if (getMode() === "ultrafast") {
+      selectSeedMode("random");
+      replayMap = null;
+      replayFileInput.value = "";
+      refreshReplaySeedAvailability();
+      return;
+    }
+    try {
+      replayMap = await replayMapFromFile(file);
+      statusEl.hidden = true;
+    } catch (e) {
+      replayMap = null;
+      statusEl.hidden = false;
+      statusEl.textContent = `Replay error: ${(e as Error).message}`;
+    } finally {
+      refreshReplayLabel();
+    }
+  });
 
   // Start tournament
   document.getElementById("create-start")!.addEventListener("click", async () => {
@@ -367,9 +448,30 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     const games = getGames();
     const mode = getMode();
     const format = getFormat();
-    const useRandomSeed = getSeedMode() === "random";
+    const seedModeValue = getSeedMode();
+    const useRandomSeed = seedModeValue === "random";
+    const useReplayMap = seedModeValue === "replay";
     const seed = parseInt(seedInput.value, 10);
     const saveReplays = (document.getElementById("cfg-save-replays") as HTMLInputElement).checked;
+    if (useReplayMap) {
+      const expectedPlayers = format === "4p" ? 4 : 2;
+      if (!replayMap) {
+        statusEl.hidden = false;
+        statusEl.textContent = "Choose a replay JSON first.";
+        return;
+      }
+      if (mode === "ultrafast") {
+        statusEl.hidden = false;
+        statusEl.textContent = "Replay maps work in fast and faithful modes.";
+        return;
+      }
+      if (replayMap.num_players && replayMap.num_players !== expectedPlayers) {
+        statusEl.hidden = false;
+        statusEl.textContent =
+          `Replay is ${replayMap.num_players}p; switch format or choose a ${expectedPlayers}p replay.`;
+        return;
+      }
+    }
     const startBtn = document.getElementById("create-start") as HTMLButtonElement;
     // Feedback via the button label (no layout shift). Interactions unchanged.
     startBtn.textContent = "Starting…";
@@ -380,8 +482,13 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
         mode,
         format,
         save_replays: saveReplays,
-        seed_base: useRandomSeed ? randomSeedBase() : (isNaN(seed) ? 42 : seed),
-        seed_mode: useRandomSeed ? "random" : "fixed",
+        seed_base: useRandomSeed
+          ? randomSeedBase()
+          : useReplayMap
+            ? (replayMap?.source_seed ?? randomSeedBase())
+            : (isNaN(seed) ? 42 : seed),
+        seed_mode: useRandomSeed ? "random" : useReplayMap ? "replay" : "fixed",
+        replay_map: useReplayMap ? replayMap : undefined,
         is_quick_match: false,
         shape: shape as "round-robin" | "gauntlet",
         challenger_id: challengerId,
@@ -565,7 +672,9 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
 
   onShapeChange(); // initial: hide challenger + compute totals
   refreshSeedInput();
+  refreshReplayLabel();
   refreshSaveReplays();
+  refreshReplaySeedAvailability();
   refreshStartButton();
 
   await loadAgents();

@@ -163,7 +163,8 @@ export const api = {
     format: string;
     save_replays?: boolean;
     seed_base?: number;
-    seed_mode?: "fixed" | "random";
+    seed_mode?: "fixed" | "random" | "replay";
+    replay_map?: any;
     is_quick_match?: boolean;
     shape?: "round-robin" | "gauntlet";
     challenger_id?: string | null;

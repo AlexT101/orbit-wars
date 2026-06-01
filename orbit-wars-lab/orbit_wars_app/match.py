@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import inspect
@@ -18,6 +19,7 @@ from typing import Any, Callable, Literal, Optional
 
 
 _DEBUG_PREFIXES = ("[LINE]", "[DOT]", "[TEXT]")
+_REPLAY_COMET_SPAWN_STEPS = {50, 150, 250, 350, 450}
 
 _KAGGLE_LOGGING_SILENCED = False
 
@@ -171,6 +173,221 @@ def _crashed_replay_skeleton(error: str) -> dict:
     return {"error": error, "steps": [], "rewards": [], "statuses": []}
 
 
+def _replay_map_initial_step(replay_map: dict, num_agents: int) -> list[dict]:
+    """Build a Kaggle initial step from a replay-map snapshot.
+
+    `kaggle_environments.Environment.run()` resets when `steps` has a single
+    initial entry, so replay-map matches use a small custom runner below. This
+    helper only prepares the validated state shape that `make(..., steps=[...])`
+    can ingest.
+    """
+    planets = replay_map.get("planets") or []
+    initial_planets = replay_map.get("initial_planets") or planets
+    if not planets:
+        raise ValueError("replay_map.planets is empty")
+    if len(planets) != len(initial_planets):
+        raise ValueError("replay_map.initial_planets must match planets length")
+    angular_velocity = float(replay_map.get("angular_velocity", 0.0))
+
+    step: list[dict] = []
+    for player in range(num_agents):
+        observation = {
+            "angular_velocity": angular_velocity,
+            "comet_planet_ids": [],
+            "comets": [],
+            "fleets": [],
+            "initial_planets": copy.deepcopy(initial_planets),
+            "next_fleet_id": 0,
+            "planets": copy.deepcopy(planets),
+            "player": player,
+            "remainingOverageTime": 60,
+        }
+        if player == 0:
+            # `step` is a shared observation field; kaggle-envs removes it
+            # from non-zero players' per-position schemas.
+            observation["step"] = 0
+        step.append(
+            {
+                "action": [],
+                "info": {},
+                "observation": observation,
+                "reward": 0,
+                "status": "ACTIVE",
+            }
+        )
+    return step
+
+
+def _get_field(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _set_field(obj: Any, key: str, value: Any) -> None:
+    if isinstance(obj, dict):
+        obj[key] = value
+    else:
+        setattr(obj, key, value)
+
+
+def _ensure_list_field(obj: Any, key: str) -> list:
+    value = _get_field(obj, key)
+    if value is None:
+        value = []
+        _set_field(obj, key, value)
+    return value
+
+
+def _replay_comet_schedule_by_step(replay_map: dict) -> dict[int, dict]:
+    """Normalize replay-observed comet spawns by their engine spawn step."""
+    schedule: dict[int, dict] = {}
+    for group_idx, raw in enumerate(replay_map.get("comet_schedule") or []):
+        spawn_step = int(_get_field(raw, "spawn_step", -1))
+        if spawn_step not in _REPLAY_COMET_SPAWN_STEPS:
+            raise ValueError(
+                "replay_map.comet_schedule entries must use spawn steps "
+                "50, 150, 250, 350, or 450"
+            )
+        if spawn_step in schedule:
+            raise ValueError(
+                f"replay_map.comet_schedule has duplicate spawn step {spawn_step}"
+            )
+
+        raw_paths = _get_field(raw, "paths", None)
+        if not isinstance(raw_paths, list) or len(raw_paths) != 4:
+            raise ValueError(
+                f"replay_map.comet_schedule[{group_idx}].paths must contain 4 paths"
+            )
+        paths: list[list[list[float]]] = []
+        for path_idx, raw_path in enumerate(raw_paths):
+            if not isinstance(raw_path, list) or not raw_path:
+                raise ValueError(
+                    f"replay_map.comet_schedule[{group_idx}].paths[{path_idx}] "
+                    "must not be empty"
+                )
+            path: list[list[float]] = []
+            for point_idx, raw_point in enumerate(raw_path):
+                if not isinstance(raw_point, list) or len(raw_point) < 2:
+                    raise ValueError(
+                        f"replay_map.comet_schedule[{group_idx}].paths"
+                        f"[{path_idx}][{point_idx}] must contain x/y"
+                    )
+                path.append([float(raw_point[0]), float(raw_point[1])])
+            paths.append(path)
+
+        ships = int(float(_get_field(raw, "ships", 0)))
+        if ships <= 0:
+            raise ValueError(
+                f"replay_map.comet_schedule[{group_idx}].ships must be positive"
+            )
+        schedule[spawn_step] = {"paths": paths, "ships": ships}
+    return schedule
+
+
+def _inject_replay_comet_group(obs0: Any, entry: dict) -> dict:
+    """Insert a scheduled comet group in the shape used by the Kaggle engine."""
+    planets = _ensure_list_field(obs0, "planets")
+    if not planets:
+        raise ValueError("cannot inject replay comet without planets")
+    initial_planets = _ensure_list_field(obs0, "initial_planets")
+    comets = _ensure_list_field(obs0, "comets")
+    comet_planet_ids = _ensure_list_field(obs0, "comet_planet_ids")
+
+    next_id = int(max(p[0] for p in planets)) + 1
+    ships = int(entry["ships"])
+    group = {
+        "planet_ids": [],
+        "paths": copy.deepcopy(entry["paths"]),
+        "path_index": -1,
+    }
+    for i in range(4):
+        pid = next_id + i
+        group["planet_ids"].append(pid)
+        comet_planet_ids.append(pid)
+        planet = [pid, -1, -99, -99, 1.0, ships, 1]
+        planets.append(planet)
+        initial_planets.append(planet[:])
+    comets.append(group)
+    return group
+
+
+def _install_replay_comet_schedule(env: Any, replay_map: dict) -> None:
+    """Replay observed comet spawns, falling back to seeded spawns afterward."""
+    schedule = _replay_comet_schedule_by_step(replay_map)
+    if not schedule:
+        return
+
+    from kaggle_environments.envs.orbit_wars import orbit_wars as ow
+
+    original_interpreter = env.interpreter
+
+    def replay_comet_interpreter(state, env_arg):
+        if not state:
+            return original_interpreter(state, env_arg)
+        obs0 = state[0].observation
+        if not _get_field(obs0, "planets") or getattr(env_arg, "done", False):
+            return original_interpreter(state, env_arg)
+
+        step = int(_get_field(obs0, "step", 0))
+        spawn_step = step + 1
+        entry = schedule.get(spawn_step)
+        if entry is None:
+            return original_interpreter(state, env_arg)
+
+        _inject_replay_comet_group(obs0, entry)
+        original_spawn_steps = list(ow.COMET_SPAWN_STEPS)
+        try:
+            ow.COMET_SPAWN_STEPS = [
+                s for s in original_spawn_steps if int(s) != spawn_step
+            ]
+            return original_interpreter(state, env_arg)
+        finally:
+            ow.COMET_SPAWN_STEPS = original_spawn_steps
+
+    env.interpreter = replay_comet_interpreter
+
+
+def _make_replay_map_env(replay_map: dict, num_agents: int, seed: int):
+    """Create an Orbit Wars env whose current state is the replay map."""
+    from kaggle_environments import make
+
+    source_seed = replay_map.get("source_seed")
+    comet_seed = int(source_seed) if source_seed is not None else int(seed)
+    env = make(
+        "orbit_wars",
+        debug=False,
+        info={"seed": comet_seed},
+        # One log row mirrors env.reset(): the first real act logs append after it.
+        logs=[[]],
+        steps=[_replay_map_initial_step(replay_map, num_agents)],
+    )
+    _install_replay_comet_schedule(env, replay_map)
+    return env
+
+
+def _run_env_without_reset(env, agents: list[Any]) -> list[list[Any]]:
+    """Run an already-initialized Kaggle env without calling env.reset()."""
+    from kaggle_environments.errors import DeadlineExceeded, InvalidArgument
+
+    if len(env.state) != len(agents):
+        raise InvalidArgument(
+            f"{len(env.state)} agents were expected, but {len(agents)} was given."
+        )
+
+    runner = env._Environment__agent_runner(agents)
+    start = time.perf_counter()
+    while not env.done and time.perf_counter() - start < env.configuration.runTimeout:
+        actions, logs = runner.act()
+        env.step(actions, logs)
+    elapsed = time.perf_counter() - start
+    if not env.done and elapsed >= env.configuration.runTimeout:
+        raise DeadlineExceeded(
+            f"runtime of {elapsed} exceeded the runTimeout of {env.configuration.runTimeout}"
+        )
+    return env.steps
+
+
 def _per_agent_durations_from_logs(env_logs: list, num_agents: int) -> list[list[float]]:
     """Extract per-agent per-turn durations from `env.logs`.
 
@@ -255,6 +472,7 @@ def run_match_fast(
     seed: int = 0,
     log_dir: Optional[Path] = None,
     log_prefix: str = "",
+    replay_map: Optional[dict] = None,
 ) -> MatchOutcome:
     """Run a single match in fast mode (kaggle-envs in-process).
 
@@ -278,7 +496,11 @@ def run_match_fast(
     from .agent_extract import ensure_extracted
     from .agent_serve import load_agent, _count_args
 
-    env = make("orbit_wars", debug=False)
+    env = (
+        _make_replay_map_env(replay_map, len(agent_ids), seed)
+        if replay_map is not None
+        else make("orbit_wars", debug=False)
+    )
 
     # `submission.tar.gz` agents are extracted to their cached dir; loose
     # source agents are pass-through.
@@ -312,7 +534,10 @@ def run_match_fast(
 
     start = time.monotonic()
     try:
-        env.run(wrapped_agents)
+        if replay_map is not None:
+            _run_env_without_reset(env, wrapped_agents)
+        else:
+            env.run(wrapped_agents)
     except Exception as e:
         duration = time.monotonic() - start
         env_logs = getattr(env, "logs", []) or []
@@ -480,6 +705,7 @@ def run_match(
     seed: int = 0,
     log_dir: Optional[Path] = None,
     log_prefix: str = "",
+    replay_map: Optional[dict] = None,
 ) -> MatchOutcome:
     """Dispatcher: fast (in-process kaggle-envs), faithful (subprocess+HTTP),
     or ultrafast (native Rust engine, no replay).
@@ -492,6 +718,20 @@ def run_match(
         return run_match_fast(
             agent_ids, agent_paths, seed=seed,
             log_dir=log_dir, log_prefix=log_prefix,
+            replay_map=replay_map,
+        )
+    if replay_map is not None and mode == "ultrafast":
+        return MatchOutcome(
+            agent_ids=agent_ids,
+            winner=None,
+            scores=[],
+            turns=0,
+            duration_s=0.0,
+            seed=seed,
+            status="crashed",
+            replay=_crashed_replay_skeleton(
+                "replay maps are supported in fast and faithful modes only"
+            ),
         )
     if mode == "ultrafast":
         return run_match_ultrafast(
@@ -501,6 +741,7 @@ def run_match(
     return run_match_faithful(
         agent_ids, agent_paths, seed=seed,
         log_dir=log_dir, log_prefix=log_prefix,
+        replay_map=replay_map,
     )
 
 
@@ -859,6 +1100,7 @@ def run_match_faithful(
     seed: int = 0,
     log_dir: Optional[Path] = None,
     log_prefix: str = "",
+    replay_map: Optional[dict] = None,
 ) -> MatchOutcome:
     """Run match with each agent in its own subprocess + HTTP server.
 
@@ -894,11 +1136,18 @@ def run_match_faithful(
                 )
 
         urls = [h.url for h in handles]
-        env = make("orbit_wars", debug=False)
+        env = (
+            _make_replay_map_env(replay_map, len(agent_ids), seed)
+            if replay_map is not None
+            else make("orbit_wars", debug=False)
+        )
 
         start = time.monotonic()
         try:
-            env.run(urls)
+            if replay_map is not None:
+                _run_env_without_reset(env, urls)
+            else:
+                env.run(urls)
         except Exception as e:
             duration = time.monotonic() - start
             partial_timings = _per_agent_durations_from_logs(

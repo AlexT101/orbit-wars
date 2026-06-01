@@ -97,6 +97,7 @@ export async function renderTournamentDetail(
   rerunBtn.addEventListener("click", async () => {
     const config = currentConfig || {};
     const useRandomSeed = config.seed_mode === "random";
+    const useReplayMap = config.seed_mode === "replay" && config.replay_map;
     try {
       const resp = await api.startTournament({
         agents: config.agents || [],
@@ -104,8 +105,13 @@ export async function renderTournamentDetail(
         mode: config.mode || "fast",
         format: config.format || "2p",
         save_replays: config.save_replays ?? true,
-        seed_base: useRandomSeed ? randomSeedBase() : (config.seed_base ?? 42),
-        seed_mode: useRandomSeed ? "random" : "fixed",
+        seed_base: useRandomSeed
+          ? randomSeedBase()
+          : useReplayMap
+            ? (config.seed_base ?? config.replay_map?.source_seed ?? randomSeedBase())
+            : (config.seed_base ?? 42),
+        seed_mode: useRandomSeed ? "random" : useReplayMap ? "replay" : "fixed",
+        replay_map: useReplayMap ? config.replay_map : undefined,
         is_quick_match: config.is_quick_match ?? false,
         shape: config.shape || "round-robin",
         challenger_id: config.challenger_id ?? null,
@@ -213,6 +219,10 @@ export async function renderTournamentDetail(
     const totalDuration = matches.reduce((sum, m) => sum + (m.duration_s || 0), 0);
     const avgTurns = matches.length ? totalTurns / matches.length : 0;
     const avgDuration = matches.length ? totalDuration / matches.length : 0;
+    const seedLabel =
+      config.seed_mode === "replay"
+        ? `replay: ${config.replay_map?.source_name || "map"}`
+        : String(config.seed_base ?? "?");
 
     body.innerHTML = `
       <div class="td-meta">
@@ -220,7 +230,7 @@ export async function renderTournamentDetail(
         <div class="td-meta-item"><span class="td-label">Mode</span><span>${config.mode || run.mode || "?"}</span></div>
         <div class="td-meta-item"><span class="td-label">Format</span><span>${format}</span></div>
         <div class="td-meta-item"><span class="td-label">Games/pair</span><span>${config.games_per_pair ?? "?"}</span></div>
-        <div class="td-meta-item"><span class="td-label">Seed</span><span>${config.seed_base ?? "?"}</span></div>
+        <div class="td-meta-item"><span class="td-label">Seed</span><span>${escapeHtml(seedLabel)}</span></div>
         <div class="td-meta-item"><span class="td-label">Agents</span><span>${agents.length}</span></div>
         <div class="td-meta-item"><span class="td-label">Matches</span><span>${matches.length}</span></div>
         <div class="td-meta-item"><span class="td-label">Failed</span><span>${failedMatches}</span></div>
