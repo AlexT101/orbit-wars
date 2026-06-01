@@ -1992,16 +1992,16 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     // this just exercises the function. The `std::hint::black_box` keeps the
     // optimizer from eliding the calls.
 
-    for i in 0..50 {
-        for src in &world.planets {
-            for dst in &world.planets {
-                if src.id == dst.id {
-                    continue;
-                }
-                std::hint::black_box(model.plan_shot(src.id, dst.id, i, 0));
-            }
-        }
-    }
+    // for i in 0..50 {
+    //     for src in &world.planets {
+    //         for dst in &world.planets {
+    //             if src.id == dst.id {
+    //                 continue;
+    //             }
+    //             std::hint::black_box(model.plan_shot(src.id, dst.id, i, 0));
+    //         }
+    //     }
+    // }
 
     if world.step < OPENING_TURNS {
         return vec![run_early_game(world, &model)];
