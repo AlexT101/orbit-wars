@@ -183,6 +183,14 @@ pub fn normalize_arrivals(arrivals: &[ArrivalEvent], horizon: i64) -> Vec<Arriva
 pub struct PlanetTimeline {
     pub owner_at: Rc<Vec<i64>>,
     pub ships_at: Rc<Vec<i64>>,
+    /// Forward (suffix) minimum of `ships_at` within the run of turns we
+    /// continuously own starting at each turn `t`: `owned_suffix_min[t] =
+    /// min{ ships_at[u] : u ≥ t, owned by `player` continuously from t }`, and
+    /// `0` at turns we don't own. This is the maximum a source can ship out at
+    /// launch offset `t` without driving any later owned turn negative —
+    /// withdrawing ships at `t` removes them from every turn `≥ t`. Player-
+    /// specific, like `keep_needed`/`min_owned`.
+    pub owned_suffix_min: Rc<Vec<i64>>,
     /// Minimum garrison that, if kept on the planet, still survives every
     /// arrival through `horizon` (binary-searched). Only meaningful when the
     /// planet currently belongs to `player`.
@@ -353,9 +361,26 @@ pub fn finish_timeline(
         }
     }
 
+    // Forward-min within each continuously-owned run, in one backward sweep:
+    // owned turns accumulate the running min of `ships_at`; a non-owned turn
+    // resets the accumulator so the gap breaks continuity for earlier turns.
+    let len = owner_at.len();
+    let mut owned_suffix_min = vec![0i64; len];
+    let mut acc = i64::MAX;
+    for t in (0..len).rev() {
+        if owner_at[t] == player {
+            acc = acc.min(ships_at[t].max(0));
+            owned_suffix_min[t] = acc;
+        } else {
+            acc = i64::MAX;
+            owned_suffix_min[t] = 0;
+        }
+    }
+
     PlanetTimeline {
         owner_at: Rc::clone(&traj.owner_at),
         ships_at: Rc::clone(&traj.ships_at),
+        owned_suffix_min: Rc::new(owned_suffix_min),
         keep_needed,
         min_owned: if planet.owner == player {
             min_owned.max(0)
@@ -389,6 +414,15 @@ pub fn simulate_planet_timeline(
 pub fn state_at_timeline(timeline: &PlanetTimeline, arrival_turn: i64) -> (i64, i64) {
     let turn = arrival_turn.max(0).min(timeline.horizon) as usize;
     (timeline.owner_at[turn], timeline.ships_at[turn].max(0))
+}
+
+/// Maximum ships withdrawable at launch `offset` without driving any later
+/// owned turn negative — the forward-min of `ships_at` over the owned run
+/// starting at `offset` (see [`PlanetTimeline::owned_suffix_min`]). Returns 0
+/// at offsets the planet isn't owned by `player`. Clamps `offset` into range.
+pub fn available_at_timeline(timeline: &PlanetTimeline, offset: i64) -> i64 {
+    let turn = offset.max(0).min(timeline.horizon) as usize;
+    timeline.owned_suffix_min[turn]
 }
 
 /// Checkpointed re-simulation that writes the post-`start_turn` trajectory into
