@@ -1,8 +1,8 @@
 use super::reference_engine::RefEngine;
-use crate::blockers::{aim_ignoring_comets, aim_with_prediction};
+use crate::aim::{aim_ignoring_comets, aim_with_prediction};
 use crate::constants::EPISODE_STEPS;
 use crate::engine::Configuration;
-use crate::entity_cache::{
+use crate::cache::{
     rot_sibling, AimCacheVerdict, EntityCache, EntityKind, InvariantVerdict,
 };
 
@@ -325,7 +325,7 @@ fn quartet_aim_siblings_match_direct_solve_with_comets() {
 }
 
 /// Compare two aim results to floating tolerance (bearing wrapped).
-fn assert_aim_eq(a: crate::entity_cache::AimResult, b: crate::entity_cache::AimResult, ctx: &str) {
+fn assert_aim_eq(a: crate::cache::AimResult, b: crate::cache::AimResult, ctx: &str) {
     assert_eq!(a.1, b.1, "turns mismatch ({ctx})");
     assert!(
         wrap_pi(a.0 - b.0).abs() < 1e-6,

@@ -1,13 +1,13 @@
 //! Simulation-oriented tests for the parametric blocker tester in
-//! [`crate::blockers`]. For both verdicts of [`aim_with_prediction`] we
+//! [`crate::aim`]. For both verdicts of [`aim_with_prediction`] we
 //! independently re-simulate the fleet trajectory and the per-turn swept-pair
 //! collision against every obstacle, and require the two to agree.
 
 use super::reference_engine::RefEngine;
-use crate::blockers::{aim_with_prediction, lead_target, shot_blocked_exact};
+use crate::aim::{aim_with_prediction, lead_target, shot_blocked_exact};
 use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
 use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
-use crate::entity_cache::{EntityCache, EntityKind};
+use crate::cache::{EntityCache, EntityKind};
 
 fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(

@@ -86,7 +86,7 @@ thread_local! {
     /// that serves multiple games (benchmarks, harness reuse) rebuilds on a new
     /// map instead of reusing stale geometry. Mirrors apollo's `Bot.cache`
     /// (`bots/mine/apollo/src/lib.rs`).
-    static ENTITY_CACHE: RefCell<Option<(GeometryKey, crate::apollo::entity_cache::EntityCache)>> =
+    static CACHE: RefCell<Option<(GeometryKey, crate::apollo::cache::EntityCache)>> =
         RefCell::new(None);
 }
 
@@ -114,14 +114,14 @@ fn geometry_key(state: &GameState) -> GeometryKey {
     }
 }
 
-/// Rebuild-if-needed + per-turn refresh of the persistent [`ENTITY_CACHE`],
+/// Rebuild-if-needed + per-turn refresh of the persistent [`CACHE`],
 /// mirroring apollo's `Bot::refresh_cache`: build once per game, refresh comets
 /// only on a spawn step, then set the current turn and drop the now-unqueryable
 /// prior turn's aim slot. Run once at the top of [`best_move`].
-fn refresh_entity_cache(state: &GameState) {
+fn refresh_cache(state: &GameState) {
     use crate::apollo::constants::COMET_SPAWN_STEPS;
     let key = geometry_key(state);
-    ENTITY_CACHE.with(|cell| {
+    CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let needs_build = match slot.as_ref() {
             Some((k, _)) => *k != key,
@@ -144,8 +144,8 @@ fn refresh_entity_cache(state: &GameState) {
 /// Run `f` with the shared entity cache's `current_turn` set to `turn`. Used by
 /// candidate generation (one call per node, whose step may differ from the real
 /// turn). The cache is interior-mutable for its aim table, so `f` takes `&_`.
-fn with_entity_cache_at<R>(turn: i64, f: impl FnOnce(&crate::apollo::entity_cache::EntityCache) -> R) -> R {
-    ENTITY_CACHE.with(|cell| {
+fn with_cache_at<R>(turn: i64, f: impl FnOnce(&crate::apollo::cache::EntityCache) -> R) -> R {
+    CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let (_, cache) = slot.as_mut().expect("entity cache built in best_move");
         cache.set_current_turn(turn);
@@ -247,7 +247,7 @@ fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: boo
         }
     }
     if apollo_candidates_enabled() {
-        let mut alts = with_entity_cache_at(state.step, |cache| {
+        let mut alts = with_cache_at(state.step, |cache| {
             crate::apollo_bridge::apollo_candidates(state, player, cache)
         });
         if !alts.is_empty() {
@@ -289,7 +289,7 @@ fn enumerate_pair(
     is_root: bool,
 ) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
     if !focused_candidates_enabled() && apollo_candidates_enabled() {
-        let (mut my, mut op) = with_entity_cache_at(state.step, |cache| {
+        let (mut my, mut op) = with_cache_at(state.step, |cache| {
             crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache)
         });
         if !my.is_empty() && !op.is_empty() {
@@ -591,7 +591,7 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng) -> f64 {
         if t < reactive_turns {
             let opp = dominant_enemy(&state, me);
             let (my_act, opp_act) = if apollo {
-                ENTITY_CACHE.with(|cell| {
+                CACHE.with(|cell| {
                     let mut slot = cell.borrow_mut();
                     let (_, cache) = slot.as_mut().expect("entity cache built in best_move");
                     cache.set_current_turn(state.step);
@@ -756,7 +756,7 @@ fn state_hash(state: &GameState) -> u64 {
 pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
     // Build/refresh the persistent shared apollo cache before any candidate
     // generation or rollout reads it.
-    refresh_entity_cache(state);
+    refresh_cache(state);
     let reuse_disabled = std::env::var("OW_NO_REUSE").is_ok();
     let target_hash = state_hash(state);
     let mut reused: Option<Box<Node>> = None;

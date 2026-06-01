@@ -2,8 +2,8 @@
 
 use super::reference_engine::RefEngine;
 use crate::engine::Configuration;
-use crate::entity_cache::EntityCache;
-use crate::hellburner;
+use crate::cache::EntityCache;
+use crate::strategy;
 use crate::world::WorldState;
 
 fn cache_for(state: &RefEngine) -> EntityCache {
@@ -58,7 +58,7 @@ fn plan_runs_on_initial_state() {
     let state = RefEngine::new(42, 2, Configuration::default());
     let cache = cache_for(&state);
     let world = build_world(&state, &cache, 0);
-    let moves = hellburner::plan(&world);
+    let moves = strategy::plan(&world);
     assert_plan_is_legal(&world, &moves);
 }
 
@@ -73,7 +73,7 @@ fn plan_after_early_game_phase() {
     }
     cache.set_current_turn(state.step);
     let world = build_world(&state, &cache, 0);
-    let moves = hellburner::plan(&world);
+    let moves = strategy::plan(&world);
     assert_plan_is_legal(&world, &moves);
 }
 
@@ -82,8 +82,8 @@ fn search_candidates_includes_greedy_plan() {
     let state = RefEngine::new(42, 2, Configuration::default());
     let cache = cache_for(&state);
     let world = build_world(&state, &cache, 0);
-    let greedy = hellburner::plan(&world);
-    let candidates = hellburner::search_candidates(&world);
+    let greedy = strategy::plan(&world);
+    let candidates = strategy::search_candidates(&world);
     assert!(!candidates.is_empty());
     assert!(candidates.iter().any(|moves| moves == &greedy));
 }
@@ -98,6 +98,6 @@ fn plan_returns_empty_when_no_enemies() {
     }
     let cache = cache_for(&state);
     let world = build_world(&state, &cache, 0);
-    let moves = hellburner::plan(&world);
+    let moves = strategy::plan(&world);
     assert!(moves.is_empty());
 }

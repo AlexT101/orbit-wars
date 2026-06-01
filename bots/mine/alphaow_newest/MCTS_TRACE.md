@@ -81,13 +81,13 @@ hash lookup is ~30 ns. Total selection cost per iteration: **~10-30 µs**.
 When `select_and_expand` reaches a node whose `candidates_initialized = false`,
 it lazily populates the candidate lists.
 
-**Policy:** [apollo's hellburner planner](../alphaow/src/apollo/hellburner.rs)
+**Policy:** [apollo's hellburner planner](../alphaow/src/apollo/strategy.rs)
 — a greedy iterative planner over fleet orders.
 
 **Where:** `apollo::hellburner::search_candidates(world)` — also called from
 each player's perspective for `my_candidates` and `opp_candidates`.
 
-`search_candidates` at `hellburner.rs:1778`:
+`search_candidates` at `strategy.rs:1778`:
 
 ```rust
 pub fn search_candidates(world: &WorldState) -> Vec<Vec<FleetOrder>> {
@@ -109,7 +109,7 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<FleetOrder>> {
 }
 ```
 
-`run_strategy` (the inner greedy planner, `hellburner.rs:1594`):
+`run_strategy` (the inner greedy planner, `strategy.rs:1594`):
 
 ```rust
 fn run_strategy(world, model, strategy) -> (Vec<FleetOrder>, PlanState) {
@@ -135,7 +135,7 @@ the "pick best target" step — `score`, `score`, `score / ships`, `production`
 respectively. All 4 use the same `evaluate_target` (timeline simulation +
 defender-fleet projection).
 
-**Per-target evaluation (`evaluate_target`, `hellburner.rs:1077`):**
+**Per-target evaluation (`evaluate_target`, `strategy.rs:1077`):**
 
 1. Run `simulate_planet_timeline` (forward-sim of in-flight fleets and combat
    resolution at the target planet over the horizon, ~5-10 ticks ahead) —
@@ -146,7 +146,7 @@ defender-fleet projection).
    maximises `score_capture` = `production × remaining_horizon × zero_sum_mult`,
    where `zero_sum_mult = 2.0` if enemy-owned, `1.0` if neutral. The 2× weight
    for enemy targets is the **implicit enemy/neutral differentiation** in the
-   scoring (`hellburner.rs:452`).
+   scoring (`strategy.rs:452`).
 4. Returns `(score, FrontlineWin{fleet_orders})`.
 
 **Cost:** dominant phase of an MCTS iteration. For a typical mid-game world
@@ -317,11 +317,11 @@ bulk of the in-play strength gap vs the production MLP build.
 | iteration loop | `src/duct.rs:602` |
 | PUCT formula constants | `src/duct.rs:23` (`EXPLORATION = 0.3`) |
 | Node struct | `src/duct.rs:88` |
-| `search_candidates` entrypoint | `src/apollo/hellburner.rs:1778` |
-| `run_strategy` (greedy planner) | `src/apollo/hellburner.rs:1594` |
-| `evaluate_target` (timeline sim per target) | `src/apollo/hellburner.rs:1077` |
-| `SelectionStrategy::key` | `src/apollo/hellburner.rs:1058` |
-| `zero_sum_mult` (enemy 2x weight) | `src/apollo/hellburner.rs:452` |
+| `search_candidates` entrypoint | `src/apollo/strategy.rs:1778` |
+| `run_strategy` (greedy planner) | `src/apollo/strategy.rs:1594` |
+| `evaluate_target` (timeline sim per target) | `src/apollo/strategy.rs:1077` |
+| `SelectionStrategy::key` | `src/apollo/strategy.rs:1058` |
+| `zero_sum_mult` (enemy 2x weight) | `src/apollo/strategy.rs:452` |
 | `predict()` (value-net dispatch) | `src/value_net.rs:465` |
 | XGB inference | `src/xgb.rs::predict_value` |
 | `summary_features_v2::extract` | `src/value_net.rs:699` |

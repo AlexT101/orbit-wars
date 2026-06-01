@@ -56,7 +56,7 @@ use crate::apollo::constants::{
     CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, NUDGE_SCAN, SUN_RADIUS,
 };
 use crate::apollo::engine::fleet_speed;
-use crate::apollo::entity_cache::{Entity, EntityCache};
+use crate::apollo::cache::{Entity, EntityCache};
 
 /// Aim solver result: `(angle_radians, integer_turns, target_x, target_y,
 /// fractional_flight_time)`. The fifth component is the real-valued flight

@@ -1,5 +1,5 @@
 //! Bridge between alphaow's `GameState` and the vendored apollo engine, so
-//! alphaow's MCTS can use apollo's `hellburner::search_candidates` as its child
+//! alphaow's MCTS can use apollo's `strategy::search_candidates` as its child
 //! candidate generator.
 //!
 //! Conversions:
@@ -16,8 +16,8 @@ use crate::apollo::constants::HORIZON;
 use crate::apollo::engine::{
     CometGroup as ACometGroup, EngineState, Fleet as AFleet, Planet as APlanet, Simulator,
 };
-use crate::apollo::entity_cache::EntityCache;
-use crate::apollo::hellburner;
+use crate::apollo::cache::EntityCache;
+use crate::apollo::strategy;
 use crate::apollo::helpers::{count_players, ArrivalLedger};
 use crate::apollo::world::WorldState;
 use crate::sim::Action;
@@ -155,7 +155,7 @@ fn plan_from_ledger(
     cache: &EntityCache,
 ) -> Vec<Action> {
     let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
-    hellburner::plan(&world)
+    strategy::plan(&world)
         .into_iter()
         .map(|m| (m.from_id, m.angle, m.ships, player))
         .collect()
@@ -169,7 +169,7 @@ fn candidates_from_ledger(
     cache: &EntityCache,
 ) -> Vec<Vec<Action>> {
     let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
-    hellburner::search_candidates(&world)
+    strategy::search_candidates(&world)
         .into_iter()
         .map(|orders| {
             orders
@@ -239,7 +239,7 @@ pub fn apollo_plan(state: &GameState, player: i32, cache: &EntityCache) -> Vec<A
         state.angular_velocity,
         cache,
     );
-    hellburner::plan(&world)
+    strategy::plan(&world)
         .into_iter()
         .map(|m| (m.from_id, m.angle, m.ships, player))
         .collect()
@@ -270,7 +270,7 @@ pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) ->
         cache,
     );
 
-    hellburner::search_candidates(&world)
+    strategy::search_candidates(&world)
         .into_iter()
         .map(|orders| {
             orders

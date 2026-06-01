@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::blockers;
+use crate::aim;
 use crate::constants::{
     CENTER, COMET_RADIUS, COMET_SPAWN_STEPS, EPISODE_STEPS, LAUNCH_CLEARANCE, MAX_SHIP_SPEED,
     ROTATION_LIMIT,
@@ -18,8 +18,8 @@ use crate::constants::{
 use crate::engine::{fleet_speed, CometGroup, Planet};
 
 /// Aim solver result tuple: `(angle, turns, target_x, target_y,
-/// fractional_flight_time)`. See [`crate::blockers::AimResult`].
-pub use crate::blockers::AimResult;
+/// fractional_flight_time)`. See [`crate::aim::AimResult`].
+pub use crate::aim::AimResult;
 
 #[derive(Clone, Copy)]
 struct CachedAim {
@@ -45,7 +45,7 @@ struct CachedAim {
 ///   the target point rotates about center, turns/flight_time are unchanged.
 ///
 /// In both cases only comets can change the verdict turn-to-turn; the
-/// per-turn comet gate ([`crate::blockers::comet_blocks_path`]) handles them.
+/// per-turn comet gate ([`crate::aim::comet_blocks_path`]) handles them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InvariantMode {
     StaticFixed,
@@ -79,10 +79,10 @@ pub enum InvariantVerdict {
     /// Carried-and-comet-cleared result — use it directly, no solve.
     Use(AimResult),
     /// Not invariant-cacheable this turn (mixed kinds, disqualified, or a comet
-    /// gates the carried base): solve normally with [`crate::blockers::aim_with_prediction`].
+    /// gates the carried base): solve normally with [`crate::aim::aim_with_prediction`].
     SingleSolve,
     /// Unknown (cache miss) and potentially cacheable: solve the comet-free base
-    /// with [`crate::blockers::aim_ignoring_comets`] and feed it to
+    /// with [`crate::aim::aim_ignoring_comets`] and feed it to
     /// [`EntityCache::invariant_aim_store`] to populate the entry.
     DualSolve,
 }
@@ -117,7 +117,7 @@ pub struct Entity {
     pub(crate) off_board_turn: i64,
     /// Capsule approximation of the on-board arc as `[ax, ay, bx, by]`: the chord
     /// from the first to the last on-board position. Together with [`Self::bulge`]
-    /// it lets [`crate::blockers::comet_blocks_path`] reject, in O(1) with no
+    /// it lets [`crate::aim::comet_blocks_path`] reject, in O(1) with no
     /// `sqrt`, any comet whose arc can't reach the fleet's swept segment. Unlike
     /// an axis-aligned box this hugs a long *diagonal* arc tightly. Planets store
     /// a degenerate chord (they never use this path).
@@ -132,7 +132,7 @@ pub struct Entity {
     /// planets, `angular_velocity · orbital_radius` for orbiters (chord ≤ arc),
     /// the max on-board step for comets. When the fleet speed exceeds this, the
     /// fleet's monotonic outward radius makes the radially-reachable turns a
-    /// contiguous band, which [`crate::blockers::blocked_on_path`] binary-searches
+    /// contiguous band, which [`crate::aim::blocked_on_path`] binary-searches
     /// instead of scanning every turn.
     pub(crate) max_step: f64,
 }
@@ -159,7 +159,7 @@ pub struct EntityCache {
     pub current_turn: i64,
     pub angular_velocity: f64,
     /// Obstacles in a contiguous `Vec` so the hot per-obstacle scans
-    /// ([`crate::blockers::blocked_on_path`] / `cone_clear_impossible`) iterate
+    /// ([`crate::aim::blocked_on_path`] / `cone_clear_impossible`) iterate
     /// cache-locally over the inline scalar fields instead of chasing `HashMap`
     /// buckets. Id lookups go through [`Self::id_to_idx`].
     pub(crate) entities: Vec<Entity>,
@@ -187,7 +187,7 @@ pub struct EntityCache {
     static_inner_limit: f64,
     /// Ids of every comet entity currently in the cache (≤4 per spawned group).
     /// Maintained on build / [`Self::refresh_comets`] so the per-turn comet gate
-    /// ([`crate::blockers::comet_blocks_path`]) iterates only comets instead of
+    /// ([`crate::aim::comet_blocks_path`]) iterates only comets instead of
     /// scanning the whole entity map. Empty most of the early game.
     pub(crate) comet_ids: Vec<i64>,
 }
@@ -336,7 +336,7 @@ impl EntityCache {
                     return AimCacheVerdict::Hit(Some(result));
                 }
                 let (angle, _turns, _tx, _ty, flight_time) = result;
-                if blockers::shot_still_clear(
+                if aim::shot_still_clear(
                     self,
                     src,
                     target,
@@ -478,7 +478,7 @@ impl EntityCache {
         // a disc-qualified path; only a comet can change the verdict this turn.
         let (angle, _turns, _tx, _ty, flight_time) = derived;
         let v = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
-        if blockers::comet_blocks_path(self, src, target, angle, flight_time, v, launch_turn_offset)
+        if aim::comet_blocks_path(self, src, target, angle, flight_time, v, launch_turn_offset)
         {
             return InvariantVerdict::SingleSolve;
         }
@@ -486,7 +486,7 @@ impl EntityCache {
     }
 
     /// Populate the invariant entry for `(src, target, ships)` from a
-    /// [`crate::blockers::aim_ignoring_comets`] `comet_free` base (the shot clear
+    /// [`crate::aim::aim_ignoring_comets`] `comet_free` base (the shot clear
     /// of sun + planets only). A comet-dodging nudge is turn-specific and would
     /// not reproduce, so the comet-free base — not the with-comet `actual` — is
     /// what carries: a nudge around the sun / a fixed (static) or rigidly
@@ -578,7 +578,7 @@ impl EntityCache {
     /// `≥ ROTATION_LIMIT` (no orbiting body can reach it); `OrbitingRotating`
     /// requires the whole segment to lie within [`Self::static_inner_limit`]
     /// (no static body can reach it). The segment is the launch-ring → arrival
-    /// ray, identical to the one [`crate::blockers::shot_blocked_exact`] sweeps.
+    /// ray, identical to the one [`crate::aim::shot_blocked_exact`] sweeps.
     fn path_disc_qualified(
         &self,
         src: i64,

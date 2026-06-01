@@ -56,7 +56,7 @@ use crate::constants::{
     CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_SHIP_SPEED, NUDGE_SCAN, SUN_RADIUS,
 };
 use crate::engine::fleet_speed;
-use crate::entity_cache::{Entity, EntityCache};
+use crate::cache::{Entity, EntityCache};
 
 /// Aim solver result: `(angle_radians, integer_turns, target_x, target_y,
 /// fractional_flight_time)`. The fifth component is the real-valued flight

@@ -2,12 +2,12 @@
 //! ([bots/external/hellburner/main.py](../../external/hellburner/main.py)).
 //!
 //! Reuses our Rust infra:
-//!   * [`crate::helpers::aim_with_prediction`] — combines hellburner's
+//!   * [`crate::apollo::helpers::aim_with_prediction`] — combines hellburner's
 //!     `intercept_planet` + `first_planet_hit` (returns Some only when the
 //!     shot reaches the target unblocked by sun/planet/comet).
-//!   * [`crate::world::WorldState`] — per-turn snapshot incl. `TimelineCache`
+//!   * [`crate::apollo::world::WorldState`] — per-turn snapshot incl. `TimelineCache`
 //!     which already plays the role of hellburner's `destination_list`.
-//!   * [`crate::helpers::simulate_planet_timeline`] /
+//!   * [`crate::apollo::helpers::simulate_planet_timeline`] /
 //!     [`WorldState::projected_timeline`] — hellburner's `simulate_planet_timeline`.
 //!
 //! Hellburner-specific data we build here:
@@ -21,17 +21,17 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::constants::{
+use crate::apollo::constants::{
     A_S_LOOKAHEAD, HORIZON, MAX_COORD_DELAY, MAX_DISTANCE, OFFSET_LOOKAHEAD, OPENING_TURNS,
     ROTATION_LOOK_AHEAD_TURNS,
 };
-use crate::engine::{MoveAction, Planet};
-use crate::entity_cache::{AimCacheVerdict, InvariantVerdict};
-use crate::helpers::{
+use crate::apollo::engine::{MoveAction, Planet};
+use crate::apollo::cache::{AimCacheVerdict, InvariantVerdict};
+use crate::apollo::helpers::{
     aim_ignoring_comets, aim_with_prediction, dist, simulate_checkpoint_into,
     simulate_planet_timeline, state_at_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
-use crate::world::{merge_arrivals, WorldState};
+use crate::apollo::world::{merge_arrivals, WorldState};
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -72,7 +72,7 @@ impl<'a> HellburnerModel<'a> {
         let mut future_pos: HashMap<i64, [f64; 2]> = HashMap::default();
         for p in &non_comets {
             let pos = state
-                .entity_cache
+                .cache
                 .position(p.id, 1 + ROTATION_LOOK_AHEAD_TURNS)
                 .unwrap_or([p.x, p.y]);
             future_pos.insert(p.id, pos);
@@ -143,7 +143,7 @@ impl<'a> HellburnerModel<'a> {
         launch_turn_offset: i64,
     ) -> Option<AimResult> {
         let ships = ships.max(1);
-        let cache = self.state.entity_cache;
+        let cache = self.state.cache;
         // L1 is keyed by the *absolute* launch turn so the step-scoped shared
         // cache stays correct as the rollout walks `current_turn` forward (a
         // relative-offset key would collide across turns). Falls back to the
@@ -152,19 +152,19 @@ impl<'a> HellburnerModel<'a> {
         let key = (src_id, target_id, ships, abs_launch);
         let l1 = self.state.shot_l1.unwrap_or(&self.shot_cache);
         if let Some(&cached) = l1.borrow().get(&key) {
-            // crate::blockers::counters::bump(&crate::blockers::counters::L1_HIT);
+            // crate::apollo::aim::counters::bump(&crate::apollo::aim::counters::L1_HIT);
             return cached;
         }
         let _lookup = cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset);
         // match _lookup {
         //     AimCacheVerdict::Hit(_) => {
-        //         crate::blockers::counters::bump(&crate::blockers::counters::L2_HIT)
+        //         crate::apollo::aim::counters::bump(&crate::apollo::aim::counters::L2_HIT)
         //     }
         //     AimCacheVerdict::Miss => {
-        //         crate::blockers::counters::bump(&crate::blockers::counters::L2_MISS)
+        //         crate::apollo::aim::counters::bump(&crate::apollo::aim::counters::L2_MISS)
         //     }
         //     AimCacheVerdict::Stale => {
-        //         crate::blockers::counters::bump(&crate::blockers::counters::L2_STALE)
+        //         crate::apollo::aim::counters::bump(&crate::apollo::aim::counters::L2_STALE)
         //     }
         // }
         let result = match _lookup {
@@ -175,11 +175,11 @@ impl<'a> HellburnerModel<'a> {
                 // the per-entity planet sweep, only re-checking comets per turn.
                 match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
                     InvariantVerdict::Use(r) => {
-                        // crate::blockers::counters::bump(&crate::blockers::counters::L3_USE);
+                        // crate::apollo::aim::counters::bump(&crate::apollo::aim::counters::L3_USE);
                         Some(r)
                     }
                     InvariantVerdict::SingleSolve => {
-                        // crate::blockers::counters::bump(&crate::blockers::counters::L3_SINGLE);
+                        // crate::apollo::aim::counters::bump(&crate::apollo::aim::counters::L3_SINGLE);
                         let r = aim_with_prediction(
                             cache,
                             src_id,
@@ -191,7 +191,7 @@ impl<'a> HellburnerModel<'a> {
                         r
                     }
                     InvariantVerdict::DualSolve => {
-                        // crate::blockers::counters::bump(&crate::blockers::counters::L3_DUAL);
+                        // crate::apollo::aim::counters::bump(&crate::apollo::aim::counters::L3_DUAL);
                         // Populate the invariant base with one comet-free solve,
                         // then gate it against just the comets. Comet-clear ⇒ the
                         // base is exactly this turn's shot (no second solve);
@@ -1066,9 +1066,7 @@ fn collect_source_candidates(
                 }
                 // Knowingly sacrificing source: send all.
             } else {
-                // Ignore defender reservation - increases win rate
-                // ships_to_send = (available - half_pressure).max(0);
-                ships_to_send = (available).max(0);
+                ships_to_send = (available - half_pressure).max(0);
                 if ships_to_send == 0 {
                     continue;
                 }
@@ -1866,6 +1864,35 @@ pub fn plan(world: &WorldState) -> Vec<MoveAction> {
 /// Duplicate plans are deduplicated so the rollout doesn't pay for the same
 /// move set twice (different strategies often converge on the same answer
 /// once trial-timeline ownership is the binding constraint).
+/// Public entry point for the focused-plan generator (`src/focused_plan.rs`).
+/// Evaluates a single target via the same offset-sweep + frontline-subset
+/// search used by `run_strategy`, but skips the greedy multi-target loop.
+/// Returns `(orders, max_arrival)` for the cheapest capture across the
+/// offset sweep, or `None` if the target can't be captured / is already
+/// owned by the planner's player.
+///
+/// Only `effective_offset == 0` orders are useful for the focused plan
+/// (those are the fleets that physically launch this turn); callers
+/// should filter on that.
+pub fn evaluate_one_target(world: &WorldState, target_id: i64) -> Option<(Vec<(i64, f64, i64, i64)>, i64)> {
+    let target = world.planets.iter().find(|p| p.id == target_id)?;
+    if target.owner == world.player {
+        return None;
+    }
+    let model = HellburnerModel::build(world);
+    let plan = PlanState::default();
+    let mut defense_cache: SourceDefenseCache = HashMap::default();
+    let mut scratch = FrontlineScratch::default();
+    let (_score, win) = evaluate_target(world, &model, &plan, target, &mut defense_cache, &mut scratch)?;
+    // Map PlannedOrder -> (src_id, angle, ships, effective_offset)
+    let orders: Vec<(i64, f64, i64, i64)> = win
+        .orders
+        .iter()
+        .map(|o| (o.src_id, o.angle, o.ships, o.effective_offset))
+        .collect();
+    Some((orders, win.max_arrival))
+}
+
 pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     if world.enemy_planets.is_empty() {
         return vec![Vec::new()];

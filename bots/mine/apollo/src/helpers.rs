@@ -6,12 +6,12 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::constants::{CENTER, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED, SUN_RADIUS};
 
-use crate::blockers;
-pub use crate::blockers::AimResult;
+use crate::aim;
+pub use crate::aim::AimResult;
 pub use crate::engine::ArrivalEvent;
 use crate::engine::Simulator;
 use crate::engine::{Fleet, Planet};
-use crate::entity_cache::EntityCache;
+use crate::cache::EntityCache;
 
 // ── Basic Helpers ────────────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
 }
 
 /// Public aim entry point. Delegates to the parametric blocker pipeline in
-/// [`crate::blockers`]: lead the target with Newton iteration, then reject
+/// [`crate::aim`]: lead the target with Newton iteration, then reject
 /// the shot if any blocker (sun, static planet, orbiter, comet) covers the
 /// resulting `(angle, flight_time)` pair. Pass `launch_turn_offset = 0` to
 /// launch now; non-zero offsets evaluate source/target/obstacle positions
@@ -70,11 +70,11 @@ pub fn aim_with_prediction(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    blockers::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
+    aim::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
 }
 
 /// Comet-free aim used to compute the turn-invariant base for the invariant-aim
-/// cache; see [`crate::blockers::aim_ignoring_comets`].
+/// cache; see [`crate::aim::aim_ignoring_comets`].
 #[inline]
 pub fn aim_ignoring_comets(
     cache: &EntityCache,
@@ -83,7 +83,7 @@ pub fn aim_ignoring_comets(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    blockers::aim_ignoring_comets(cache, shooter_id, target_id, ships, launch_turn_offset)
+    aim::aim_ignoring_comets(cache, shooter_id, target_id, ships, launch_turn_offset)
 }
 
 /// Returns the engine's player-slot count: `max_owner + 1` across all
@@ -497,16 +497,16 @@ impl ArrivalLedger {
     /// arrivals plus expiry turns and the player-agnostic trajectories.
     /// `O(horizon * |planets|)`. This is the expensive step that gets shared
     /// across players in [`rollout`].
-    pub fn build(parent: &Simulator, horizon: i64, entity_cache: &EntityCache) -> Self {
+    pub fn build(parent: &Simulator, horizon: i64, cache: &EntityCache) -> Self {
         let mut sim = parent.fork();
-        sim.step_n(horizon, Some(entity_cache));
+        sim.step_n(horizon, Some(cache));
         let mut ledger = sim.collect_arrivals();
         let mut expiry_at: HashMap<i64, i64> = HashMap::default();
         let mut trajectories: HashMap<i64, Trajectory> =
             HashMap::with_capacity_and_hasher(parent.planets().len(), Default::default());
         for planet in parent.planets() {
             ledger.entry(planet.id).or_default();
-            let expiry = expiry_within_horizon(entity_cache, planet.id, horizon);
+            let expiry = expiry_within_horizon(cache, planet.id, horizon);
             if let Some(exp) = expiry {
                 expiry_at.insert(planet.id, exp);
             }
@@ -572,9 +572,9 @@ impl TimelineCache {
         parent: &Simulator,
         player: i64,
         horizon: i64,
-        entity_cache: &EntityCache,
+        cache: &EntityCache,
     ) -> Self {
-        let ledger = ArrivalLedger::build(parent, horizon, entity_cache);
+        let ledger = ArrivalLedger::build(parent, horizon, cache);
         Self::from_ledger(parent.planets(), player, &ledger)
     }
 
@@ -634,8 +634,8 @@ impl TimelineCache {
 
 /// Returns the planet's expiry turn iff it falls within `horizon`. Static and
 /// orbiting planets last the whole game, so they always return `None`.
-fn expiry_within_horizon(entity_cache: &EntityCache, planet_id: i64, horizon: i64) -> Option<i64> {
-    let life = entity_cache.remaining_life(planet_id);
+fn expiry_within_horizon(cache: &EntityCache, planet_id: i64, horizon: i64) -> Option<i64> {
+    let life = cache.remaining_life(planet_id);
     if life <= horizon {
         Some(life)
     } else {

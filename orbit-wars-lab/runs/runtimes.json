@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-06-01T16:13:58.114096+00:00",
+  "last_updated": "2026-06-01T16:52:21.947721+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 22735,
@@ -9,10 +9,10 @@
       "last_updated": "2026-05-29T16:48:59.380844+00:00"
     },
     "baselines/random": {
-      "total_turns": 15284,
-      "total_seconds": 1.467848343997552,
-      "avg_ms": 0.09603823239973515,
-      "last_updated": "2026-05-29T16:48:52.029256+00:00"
+      "total_turns": 15375,
+      "total_seconds": 1.471007343997552,
+      "avg_ms": 0.09567527440634484,
+      "last_updated": "2026-06-01T16:52:21.934624+00:00"
     },
     "external/ykhnkf-distance-prioritized": {
       "total_turns": 14990,
@@ -183,16 +183,16 @@
       "last_updated": "2026-05-29T16:49:35.924638+00:00"
     },
     "mine/alphaow_newest": {
-      "total_turns": 11208,
-      "total_seconds": 5699.126018000001,
-      "avg_ms": 508.4873320842256,
-      "last_updated": "2026-06-01T15:47:25.060760+00:00"
+      "total_turns": 19111,
+      "total_seconds": 9700.643983000002,
+      "avg_ms": 507.5947874522527,
+      "last_updated": "2026-06-01T16:52:21.934641+00:00"
     },
     "mine/alphaow_temp": {
-      "total_turns": 11208,
-      "total_seconds": 5667.822091,
-      "avg_ms": 505.69433360099924,
-      "last_updated": "2026-06-01T15:47:25.060792+00:00"
+      "total_turns": 19020,
+      "total_seconds": 9626.000706000003,
+      "avg_ms": 506.0988804416405,
+      "last_updated": "2026-06-01T16:40:33.391527+00:00"
     }
   }
 }

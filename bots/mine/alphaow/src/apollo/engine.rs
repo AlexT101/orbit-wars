@@ -17,7 +17,7 @@ use crate::apollo::constants::{
     BOARD_SIZE, CENTER, COMET_SPEED, EPISODE_STEPS, MAX_PLAYERS, MAX_SHIP_SPEED, ROTATION_LIMIT,
     SUN_RADIUS,
 };
-use crate::apollo::entity_cache::EntityCache;
+use crate::apollo::cache::EntityCache;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Planet {
