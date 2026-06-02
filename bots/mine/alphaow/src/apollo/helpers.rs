@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::apollo::constants::{CENTER, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED, SUN_RADIUS};
+use crate::apollo::constants::{
+    CENTER, EPISODE_STEPS, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED, SUN_RADIUS,
+};
 
 use crate::apollo::aim;
 pub use crate::apollo::aim::AimResult;
@@ -532,6 +534,8 @@ impl ArrivalLedger {
     /// `O(horizon * |planets|)`. This is the expensive step that gets shared
     /// across players in [`rollout`].
     pub fn build(parent: &Simulator, horizon: i64, cache: &EntityCache) -> Self {
+        // Clamp the look-ahead to the game end.
+        let horizon = horizon.min((EPISODE_STEPS - parent.step_count()).max(1));
         let mut sim = parent.fork();
         sim.step_n(horizon, Some(cache));
         let mut ledger = sim.collect_arrivals();
