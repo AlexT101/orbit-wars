@@ -524,12 +524,10 @@ fn blocked_on_path(
     let max_turn = (flight_time.ceil() as i64).max(1);
 
     // The fleet flies one straight ray at constant speed from the launch ring
-    // out to the arrival distance `ring_d`. Precompute that whole segment once.
-    let ring_d = launch_offset + flight_time * v;
+    // outward. `ring_d = launch_offset + flight_time * v` is the fractional
+    // target-contact distance; the precomputed endpoints below tile that ray.
     let sx = lx + launch_offset * ux;
     let sy = ly + launch_offset * uy;
-    let ex = lx + ring_d * ux;
-    let ey = ly + ring_d * uy;
     // Endpoint at the START of the arrival turn (one tick before target arrival).
     // On the arrival turn the target is hit, and the engine resolves the fleet
     // against the lowest-id planet first (then the sun, only if no planet hit).
@@ -555,15 +553,24 @@ fn blocked_on_path(
     // that band is disjoint from this ray span the planet can't be struck at any
     // angle or turn (see the reject in the loop). Max is at an endpoint; min is
     // at the perpendicular foot of center onto the segment (clamped).
+    //
+    // The span runs to `efx,efy` (the END of the arrival turn, `arrival_end_d`),
+    // not just to the target-contact point `ex,ey` (`ring_d`): a lower-id orbiter
+    // wins the arrival-turn tiebreak and is swept over the full arrival tick
+    // (out to `arrival_end_d` in the per-turn loop), so its reachable region can
+    // extend past `ring_d`. Bounding only to `ring_d` could reject such a planet
+    // before the exact swept test and let through a shot the engine kills.
+    // Obstacles whose sweep stops at/before `ring_d` (sun, id >= target_id) are
+    // unaffected — the wider band is merely conservative for them.
     let (ray_d_min, ray_d_max) = {
         let dsx = sx - CENTER;
         let dsy = sy - CENTER;
-        let dex = ex - CENTER;
-        let dey = ey - CENTER;
+        let dex = efx - CENTER;
+        let dey = efy - CENTER;
         let d_end_s = (dsx * dsx + dsy * dsy).sqrt();
         let d_end_e = (dex * dex + dey * dey).sqrt();
-        let segx = ex - sx;
-        let segy = ey - sy;
+        let segx = efx - sx;
+        let segy = efy - sy;
         let l2 = segx * segx + segy * segy;
         let d_min = if l2 > 1e-12 {
             let u = (((CENTER - sx) * segx + (CENTER - sy) * segy) / l2).clamp(0.0, 1.0);
