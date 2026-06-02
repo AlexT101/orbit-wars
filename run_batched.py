@@ -24,6 +24,7 @@ from time import perf_counter
 ROOT = Path(__file__).resolve().parent
 BOTS_DIR = ROOT / "bots"
 MAX_STEPS = 500
+SLOT_ORDERS = ((0, 1), (1, 0))
 
 
 @contextlib.contextmanager
@@ -117,10 +118,22 @@ def run_one_match(bot_paths, seed, match_idx):
     return rewards, steps_run, avg_ms
 
 
+def slot_order_for_seed(seed):
+    return SLOT_ORDERS[seed % len(SLOT_ORDERS)]
+
+
+def reorder_by_input(values, slot_order):
+    by_input = [None] * len(values)
+    for slot_idx, bot_idx in enumerate(slot_order):
+        by_input[bot_idx] = values[slot_idx]
+    return by_input
+
+
 def run_match_job(job):
-    bot_paths, seed, match_idx = job
-    rewards, steps, avg_ms = run_one_match(bot_paths, seed, match_idx)
-    return match_idx, seed, rewards, steps, avg_ms
+    bot_paths, seed, match_idx, slot_order = job
+    slotted_bot_paths = [bot_paths[i] for i in slot_order]
+    rewards, steps, avg_ms = run_one_match(slotted_bot_paths, seed, match_idx)
+    return match_idx, seed, slot_order, rewards, steps, avg_ms
 
 
 def main():
@@ -166,7 +179,9 @@ def main():
     def record_result(result):
         nonlocal draws, sum_steps
 
-        _match_idx, seed, rewards, steps, avg_ms = result
+        _match_idx, seed, slot_order, rewards, steps, avg_ms = result
+        rewards = reorder_by_input(rewards, slot_order)
+        avg_ms = reorder_by_input(avg_ms, slot_order)
         r0, r1 = rewards[0], rewards[1]
         if r0 is None or r1 is None:
             winner = "?"
@@ -192,7 +207,15 @@ def main():
         f"(seeds {args.start_seed}..{args.start_seed + n - 1}, threads={threads})"
     )
 
-    jobs = [(bot_paths, args.start_seed + k, k) for k in range(n)]
+    jobs = [
+        (
+            bot_paths,
+            args.start_seed + k,
+            k,
+            slot_order_for_seed(args.start_seed + k),
+        )
+        for k in range(n)
+    ]
     if threads == 1:
         for job in jobs:
             record_result(run_match_job(job))

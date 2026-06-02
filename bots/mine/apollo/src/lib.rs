@@ -1,11 +1,11 @@
 //! The Python wrapper (`main.py`) instantiates one [`Bot`] at import time and
 //! forwards every observation through `Bot::compute_moves`.
 
-mod blockers;
+mod aim;
 mod constants;
 mod engine;
-mod entity_cache;
-mod hellburner;
+mod cache;
+mod strategy;
 mod helpers;
 mod rollout;
 mod world;
@@ -19,7 +19,7 @@ use pyo3::types::{PyDict, PySequence};
 
 use crate::constants::{COMET_SPAWN_STEPS, HORIZON, TOTAL_OVERAGE_TIME};
 use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
-use crate::entity_cache::EntityCache;
+use crate::cache::EntityCache;
 use crate::helpers::ArrivalLedger;
 use crate::rollout::pick_plan_by_rollout;
 use crate::world::WorldState;
@@ -201,7 +201,8 @@ impl Bot {
         world.remaining_overage_time = obs.remaining_overage_time;
         world.shot_l1 = Some(&shot_l1);
 
-        let moves = crate::hellburner::plan(&world);
+        let moves = crate::strategy::plan(&world);
+        let moves = crate::strategy::redirect_moves(&world, moves);
         self.current_turn += 1;
         Ok(moves
             .into_iter()
@@ -259,7 +260,7 @@ impl Bot {
                 WorldState::from_simulator_with_ledger(player, &initial_sim, &ledger, cache_ref);
             world.remaining_overage_time = obs.remaining_overage_time;
             world.shot_l1 = Some(&shot_l1);
-            (crate::hellburner::search_candidates(&world), ledger)
+            (crate::strategy::search_candidates(&world), ledger)
         };
 
         let cache_mut = self.cache.as_mut().expect("entity cache populated above");
@@ -267,13 +268,32 @@ impl Bot {
             &initial_state,
             player,
             candidates,
-            crate::hellburner::plan,
-            crate::hellburner::search_candidates,
+            crate::strategy::plan,
+            crate::strategy::search_candidates,
             cache_mut,
             obs.remaining_overage_time,
             Some(&initial_ledger),
             Some(&shot_l1),
         );
+
+        // Final reroute pass on the chosen plan only — after the rollout has
+        // scored the untouched policy. Rebuild a WorldState (the rollout's
+        // mutable cache borrow has ended) so `redirect_moves` can re-derive
+        // travel times and project intermediate planets' ownership.
+        let moves = {
+            let cache_ref = self.cache.as_ref().expect("entity cache populated above");
+            let final_sim = Simulator::new(&initial_state);
+            let mut world = WorldState::from_simulator_with_ledger(
+                player,
+                &final_sim,
+                &initial_ledger,
+                cache_ref,
+            );
+            world.remaining_overage_time = obs.remaining_overage_time;
+            world.shot_l1 = Some(&shot_l1);
+            crate::strategy::redirect_moves(&world, moves)
+        };
+
         self.current_turn += 1;
         Ok(moves
             .into_iter()
@@ -311,13 +331,13 @@ impl Bot {
 /// TEMP instrumentation: read the aim hot-path stage counters as a string.
 #[pyfunction]
 fn aim_counters_report() -> String {
-    crate::blockers::counters::report()
+    crate::aim::counters::report()
 }
 
 /// TEMP instrumentation: zero the aim hot-path stage counters.
 #[pyfunction]
 fn aim_counters_reset() {
-    crate::blockers::counters::reset();
+    crate::aim::counters::reset();
 }
 
 #[pymodule]

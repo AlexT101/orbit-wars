@@ -6,12 +6,12 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::constants::{CENTER, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED, SUN_RADIUS};
 
-use crate::blockers;
-pub use crate::blockers::AimResult;
+use crate::aim;
+pub use crate::aim::AimResult;
 pub use crate::engine::ArrivalEvent;
 use crate::engine::Simulator;
 use crate::engine::{Fleet, Planet};
-use crate::entity_cache::EntityCache;
+use crate::cache::EntityCache;
 
 // ── Basic Helpers ────────────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ pub fn launch_point(sx: f64, sy: f64, sr: f64, angle: f64) -> (f64, f64) {
 }
 
 /// Public aim entry point. Delegates to the parametric blocker pipeline in
-/// [`crate::blockers`]: lead the target with Newton iteration, then reject
+/// [`crate::aim`]: lead the target with Newton iteration, then reject
 /// the shot if any blocker (sun, static planet, orbiter, comet) covers the
 /// resulting `(angle, flight_time)` pair. Pass `launch_turn_offset = 0` to
 /// launch now; non-zero offsets evaluate source/target/obstacle positions
@@ -70,11 +70,11 @@ pub fn aim_with_prediction(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    blockers::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
+    aim::aim_with_prediction(cache, shooter_id, target_id, ships, launch_turn_offset)
 }
 
 /// Comet-free aim used to compute the turn-invariant base for the invariant-aim
-/// cache; see [`crate::blockers::aim_ignoring_comets`].
+/// cache; see [`crate::aim::aim_ignoring_comets`].
 #[inline]
 pub fn aim_ignoring_comets(
     cache: &EntityCache,
@@ -83,7 +83,7 @@ pub fn aim_ignoring_comets(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    blockers::aim_ignoring_comets(cache, shooter_id, target_id, ships, launch_turn_offset)
+    aim::aim_ignoring_comets(cache, shooter_id, target_id, ships, launch_turn_offset)
 }
 
 /// Returns the engine's player-slot count: `max_owner + 1` across all
@@ -183,6 +183,14 @@ pub fn normalize_arrivals(arrivals: &[ArrivalEvent], horizon: i64) -> Vec<Arriva
 pub struct PlanetTimeline {
     pub owner_at: Rc<Vec<i64>>,
     pub ships_at: Rc<Vec<i64>>,
+    /// Forward (suffix) minimum of `ships_at` within the run of turns we
+    /// continuously own starting at each turn `t`: `owned_suffix_min[t] =
+    /// min{ ships_at[u] : u ≥ t, owned by `player` continuously from t }`, and
+    /// `0` at turns we don't own. This is the maximum a source can ship out at
+    /// launch offset `t` without driving any later owned turn negative —
+    /// withdrawing ships at `t` removes them from every turn `≥ t`. Player-
+    /// specific, like `keep_needed`/`min_owned`.
+    pub owned_suffix_min: Rc<Vec<i64>>,
     /// Minimum garrison that, if kept on the planet, still survives every
     /// arrival through `horizon` (binary-searched). Only meaningful when the
     /// planet currently belongs to `player`.
@@ -353,9 +361,26 @@ pub fn finish_timeline(
         }
     }
 
+    // Forward-min within each continuously-owned run, in one backward sweep:
+    // owned turns accumulate the running min of `ships_at`; a non-owned turn
+    // resets the accumulator so the gap breaks continuity for earlier turns.
+    let len = owner_at.len();
+    let mut owned_suffix_min = vec![0i64; len];
+    let mut acc = i64::MAX;
+    for t in (0..len).rev() {
+        if owner_at[t] == player {
+            acc = acc.min(ships_at[t].max(0));
+            owned_suffix_min[t] = acc;
+        } else {
+            acc = i64::MAX;
+            owned_suffix_min[t] = 0;
+        }
+    }
+
     PlanetTimeline {
         owner_at: Rc::clone(&traj.owner_at),
         ships_at: Rc::clone(&traj.ships_at),
+        owned_suffix_min: Rc::new(owned_suffix_min),
         keep_needed,
         min_owned: if planet.owner == player {
             min_owned.max(0)
@@ -389,6 +414,15 @@ pub fn simulate_planet_timeline(
 pub fn state_at_timeline(timeline: &PlanetTimeline, arrival_turn: i64) -> (i64, i64) {
     let turn = arrival_turn.max(0).min(timeline.horizon) as usize;
     (timeline.owner_at[turn], timeline.ships_at[turn].max(0))
+}
+
+/// Maximum ships withdrawable at launch `offset` without driving any later
+/// owned turn negative — the forward-min of `ships_at` over the owned run
+/// starting at `offset` (see [`PlanetTimeline::owned_suffix_min`]). Returns 0
+/// at offsets the planet isn't owned by `player`. Clamps `offset` into range.
+pub fn available_at_timeline(timeline: &PlanetTimeline, offset: i64) -> i64 {
+    let turn = offset.max(0).min(timeline.horizon) as usize;
+    timeline.owned_suffix_min[turn]
 }
 
 /// Checkpointed re-simulation that writes the post-`start_turn` trajectory into
@@ -497,16 +531,16 @@ impl ArrivalLedger {
     /// arrivals plus expiry turns and the player-agnostic trajectories.
     /// `O(horizon * |planets|)`. This is the expensive step that gets shared
     /// across players in [`rollout`].
-    pub fn build(parent: &Simulator, horizon: i64, entity_cache: &EntityCache) -> Self {
+    pub fn build(parent: &Simulator, horizon: i64, cache: &EntityCache) -> Self {
         let mut sim = parent.fork();
-        sim.step_n(horizon, Some(entity_cache));
+        sim.step_n(horizon, Some(cache));
         let mut ledger = sim.collect_arrivals();
         let mut expiry_at: HashMap<i64, i64> = HashMap::default();
         let mut trajectories: HashMap<i64, Trajectory> =
             HashMap::with_capacity_and_hasher(parent.planets().len(), Default::default());
         for planet in parent.planets() {
             ledger.entry(planet.id).or_default();
-            let expiry = expiry_within_horizon(entity_cache, planet.id, horizon);
+            let expiry = expiry_within_horizon(cache, planet.id, horizon);
             if let Some(exp) = expiry {
                 expiry_at.insert(planet.id, exp);
             }
@@ -572,9 +606,9 @@ impl TimelineCache {
         parent: &Simulator,
         player: i64,
         horizon: i64,
-        entity_cache: &EntityCache,
+        cache: &EntityCache,
     ) -> Self {
-        let ledger = ArrivalLedger::build(parent, horizon, entity_cache);
+        let ledger = ArrivalLedger::build(parent, horizon, cache);
         Self::from_ledger(parent.planets(), player, &ledger)
     }
 
@@ -634,8 +668,8 @@ impl TimelineCache {
 
 /// Returns the planet's expiry turn iff it falls within `horizon`. Static and
 /// orbiting planets last the whole game, so they always return `None`.
-fn expiry_within_horizon(entity_cache: &EntityCache, planet_id: i64, horizon: i64) -> Option<i64> {
-    let life = entity_cache.remaining_life(planet_id);
+fn expiry_within_horizon(cache: &EntityCache, planet_id: i64, horizon: i64) -> Option<i64> {
+    let life = cache.remaining_life(planet_id);
     if life <= horizon {
         Some(life)
     } else {

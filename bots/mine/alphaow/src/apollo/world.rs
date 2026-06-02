@@ -16,10 +16,10 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::apollo::blockers::AimResult;
+use crate::apollo::aim::AimResult;
 use crate::apollo::constants::{EPISODE_STEPS, HORIZON};
 use crate::apollo::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
-use crate::apollo::entity_cache::EntityCache;
+use crate::apollo::cache::EntityCache;
 
 /// Step-scoped, lock-free L1 aim cache shared across every [`WorldState`] and
 /// `HellburnerModel` built during one `Bot::compute_moves` call. Keyed by the
@@ -41,7 +41,7 @@ pub struct WorldState<'a> {
     pub player: i64,
     pub step: i64,
     pub angular_velocity: f64,
-    pub entity_cache: &'a EntityCache,
+    pub cache: &'a EntityCache,
     /// Optional step-scoped L1 aim cache (see [`ShotL1`]). `None` for tests and
     /// ad-hoc worlds, which fall back to each `HellburnerModel`'s own per-model
     /// cache. Set by the live `Bot` paths so all models in a step share hits.
@@ -80,7 +80,7 @@ pub struct WorldState<'a> {
 
 impl<'a> WorldState<'a> {
     /// Build the per-turn snapshot from the parsed observation + cache.
-    /// `entity_cache.current_turn` should already be set to `step`.
+    /// `cache.current_turn` should already be set to `step`.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         player: i64,
@@ -91,7 +91,7 @@ impl<'a> WorldState<'a> {
         comets: Vec<CometGroup>,
         comet_planet_ids: Vec<i64>,
         angular_velocity: f64,
-        entity_cache: &'a EntityCache,
+        cache: &'a EntityCache,
     ) -> Self {
         let num_players = count_players(&planets, &fleets);
         let next_fleet_id = fleets
@@ -111,7 +111,7 @@ impl<'a> WorldState<'a> {
             comets,
             num_players,
         );
-        Self::from_engine(player, &engine, entity_cache)
+        Self::from_engine(player, &engine, cache)
     }
 
     /// Constructor for callers that hold an `EngineState` (the non-search
@@ -119,10 +119,10 @@ impl<'a> WorldState<'a> {
     /// the `HORIZON`-turn arrival ledger, and snapshot. The rollout/search loop
     /// instead calls [`Self::from_simulator_with_ledger`] directly so the
     /// player-agnostic ledger can be shared across players.
-    pub fn from_engine(player: i64, engine: &EngineState, entity_cache: &'a EntityCache) -> Self {
+    pub fn from_engine(player: i64, engine: &EngineState, cache: &'a EntityCache) -> Self {
         let sim = Simulator::new(engine);
-        let ledger = ArrivalLedger::build(&sim, HORIZON, entity_cache);
-        Self::from_simulator_with_ledger(player, &sim, &ledger, entity_cache)
+        let ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+        Self::from_simulator_with_ledger(player, &sim, &ledger, cache)
     }
 
     /// Shared-ledger constructor used during rollout. Skips the sim walk
@@ -134,7 +134,7 @@ impl<'a> WorldState<'a> {
         player: i64,
         sim: &Simulator,
         ledger: &ArrivalLedger,
-        entity_cache: &'a EntityCache,
+        cache: &'a EntityCache,
     ) -> Self {
         let step = sim.step_count();
         let angular_velocity = sim.angular_velocity();
@@ -206,7 +206,7 @@ impl<'a> WorldState<'a> {
             player,
             step,
             angular_velocity,
-            entity_cache,
+            cache,
             shot_l1: None,
             timeline_cache,
             planets,
@@ -238,14 +238,14 @@ impl<'a> WorldState<'a> {
     }
 
     pub fn is_static(&self, planet_id: i64) -> bool {
-        self.entity_cache
+        self.cache
             .get(planet_id)
             .map(|e| e.is_static())
             .unwrap_or(false)
     }
 
     pub fn comet_life(&self, planet_id: i64) -> i64 {
-        self.entity_cache.remaining_life(planet_id)
+        self.cache.remaining_life(planet_id)
     }
 
     pub fn source_inventory_left(&self, source_id: i64, spent_total: &HashMap<i64, i64>) -> i64 {

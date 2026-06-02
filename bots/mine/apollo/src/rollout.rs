@@ -9,7 +9,7 @@
 use crate::constants::{EPISODE_STEPS, HORIZON, REACTIVE_TURNS};
 use crate::engine::Simulator;
 use crate::engine::{EngineState, Fleet, MoveAction, Planet};
-use crate::entity_cache::EntityCache;
+use crate::cache::EntityCache;
 use crate::helpers::ArrivalLedger;
 use crate::world::{ShotL1, WorldState};
 

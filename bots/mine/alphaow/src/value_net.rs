@@ -112,7 +112,32 @@ fn pack_object(buf: &mut [f32; PER_BLOCK], slot: usize, p: &Planet, ships: i64, 
 /// defender → defender shaves attacker's ships off). Ignores
 /// same-step multi-fleet engine logic for simplicity (the value net is
 /// an approximation anyway).
+///
+/// Two implementations exist:
+///   - BUGGY (default): the original simple combat with NO production
+///     accrual during fleet flight and no same-tick aggregation. This is
+///     what the deployed XGB / MLP models were trained against.
+///   - FIXED (env `ALPHAOW_EXTRAP_FIX=1`): adds production accrual on
+///     owned planets between arrival ticks, groups same-tick arrivals
+///     by owner before combat, and handles the tied-attacker rule.
+///     Use this when REBUILDING the training NPZ via `extract_v2`; do
+///     NOT enable it for the deployed bot until the matching model is
+///     retrained on the fixed features.
 pub fn extrapolate_fleets(state: &GameState) -> HashMap<i64, (i32, i64)> {
+    if use_extrap_fix() {
+        extrapolate_fleets_fixed(state)
+    } else {
+        extrapolate_fleets_buggy(state)
+    }
+}
+
+fn use_extrap_fix() -> bool {
+    use std::sync::OnceLock;
+    static FIX: OnceLock<bool> = OnceLock::new();
+    *FIX.get_or_init(|| std::env::var("ALPHAOW_EXTRAP_FIX").is_ok())
+}
+
+fn extrapolate_fleets_buggy(state: &GameState) -> HashMap<i64, (i32, i64)> {
     let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
     for fleet in &state.fleets {
         if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {
@@ -137,6 +162,68 @@ pub fn extrapolate_fleets(state: &GameState) -> HashMap<i64, (i32, i64)> {
             } else {
                 ships -= f_ships;
             }
+        }
+        *entry = (owner, ships);
+    }
+    result
+}
+
+fn extrapolate_fleets_fixed(state: &GameState) -> HashMap<i64, (i32, i64)> {
+    let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
+    for fleet in &state.fleets {
+        if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {
+            arrivals.entry(pid).or_default().push((dt, fleet.owner, fleet.ships));
+        }
+    }
+    let prod_for: HashMap<i64, i64> = state.planets.iter().map(|p| (p.id, p.production)).collect();
+    let mut result: HashMap<i64, (i32, i64)> = state
+        .planets
+        .iter()
+        .map(|p| (p.id, (p.owner, p.ships)))
+        .collect();
+    for (pid, mut arrs) in arrivals {
+        arrs.sort_by_key(|x| x.0);
+        let entry = result.entry(pid).or_insert((-1, 0));
+        let (mut owner, mut ships) = *entry;
+        let prod = *prod_for.get(&pid).unwrap_or(&0);
+        let mut cur_t = 0i64;
+        let mut i = 0;
+        while i < arrs.len() {
+            let t = arrs[i].0;
+            if owner != -1 && t > cur_t {
+                ships += prod * (t - cur_t);
+            }
+            // Aggregate same-tick arrivals by owner (matches engine
+            // Combat step 1).
+            let mut by_owner: HashMap<i32, i64> = HashMap::new();
+            while i < arrs.len() && arrs[i].0 == t {
+                *by_owner.entry(arrs[i].1).or_insert(0) += arrs[i].2;
+                i += 1;
+            }
+            let mut sorted: Vec<(i32, i64)> = by_owner.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            let (top_owner, top_ships) = sorted[0];
+            let (sv_owner, sv_ships) = if sorted.len() > 1 {
+                let second = sorted[1].1;
+                if top_ships == second {
+                    (-1, 0) // tied attackers all destroyed
+                } else {
+                    (top_owner, top_ships - second)
+                }
+            } else {
+                (top_owner, top_ships)
+            };
+            if sv_ships > 0 {
+                if sv_owner == owner {
+                    ships += sv_ships;
+                } else if sv_ships > ships {
+                    owner = sv_owner;
+                    ships = sv_ships - ships;
+                } else {
+                    ships -= sv_ships;
+                }
+            }
+            cur_t = t;
         }
         *entry = (owner, ships);
     }

@@ -84,6 +84,37 @@ def test_tournament_config_accepts_random_seed_mode():
     assert cfg.seed_mode == "random"
 
 
+def test_tournament_config_accepts_replay_seed_mode_and_map():
+    cfg = TournamentConfig(
+        agents=["baselines/random", "baselines/starter"],
+        seed_mode="replay",
+        replay_map={
+            "planets": [[0, -1, 10, 10, 1, 5, 1]],
+            "initial_planets": [[0, -1, 10, 10, 1, 5, 1]],
+            "angular_velocity": 0.03,
+            "source_seed": 123,
+            "source_name": "sample.json",
+            "num_players": 2,
+            "comet_schedule": [
+                {
+                    "spawn_step": 50,
+                    "paths": [
+                        [[1, 2], [3, 4]],
+                        [[5, 6], [7, 8]],
+                        [[9, 10], [11, 12]],
+                        [[13, 14], [15, 16]],
+                    ],
+                    "ships": 13,
+                }
+            ],
+        },
+    )
+    assert cfg.seed_mode == "replay"
+    assert cfg.replay_map is not None
+    assert cfg.replay_map.source_seed == 123
+    assert cfg.replay_map.comet_schedule[0].spawn_step == 50
+
+
 def test_run_summary_has_is_quick_match_default_false():
     rs = RunSummary(id="2026-04-21-001", started_at="2026-04-21T12:00:00Z")
     assert rs.is_quick_match is False

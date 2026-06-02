@@ -28,6 +28,7 @@ Code acquires at most one of these at a time; the only ordering is
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import threading
@@ -54,6 +55,7 @@ from .trueskill_store import TrueSkillStore
 # started yet; "running" = at least one match dispatched; terminal states match
 # the on-disk RunStatus.
 TournamentStatus = str  # queued | running | completed | aborted
+_COMET_SPAWN_STEPS = {50, 150, 250, 350, 450}
 
 
 def _now_iso() -> str:
@@ -68,6 +70,16 @@ def match_timeout_for(num_players: int) -> float:
     match 2260s. Not user-configurable — it tracks the engine's own deadline.
     """
     return (500 + 60) * max(1, num_players) + 20
+
+
+def side_order_for_seed(seed: int, num_players: int) -> list[int]:
+    """Deterministically map a match seed to engine player slots."""
+    order = list(range(num_players))
+    if num_players == 2:
+        return [1, 0] if seed % 2 else order
+    rng = random.Random(seed)
+    rng.shuffle(order)
+    return order
 
 
 def allocate_run_id(runs_root: Path, extra_taken: tuple[str, ...] = ()) -> str:
@@ -128,6 +140,7 @@ class QueuedMatch:
     save_replays: bool
     replays_dir: str
     logs_dir: str
+    replay_map: Optional[dict] = None
 
 
 @dataclass
@@ -166,6 +179,7 @@ def _execute_match_job(job: QueuedMatch) -> MatchJobResult:
         seed=job.seed,
         log_dir=Path(job.logs_dir) if job.logs_dir else None,
         log_prefix=f"{job.match_counter:03d}",
+        replay_map=job.replay_map,
     )
 
     replay_rel = ""
@@ -302,6 +316,11 @@ class TournamentState:
     # ---- on-disk writers (call under self.lock) ----
 
     def write_config(self) -> None:
+        replay_map = (
+            self.config.replay_map.model_dump()
+            if self.config.replay_map is not None
+            else None
+        )
         (self.run_dir / "config.json").write_text(
             json.dumps(
                 {
@@ -311,6 +330,7 @@ class TournamentState:
                     "agents": self.config.agents,
                     "seed_base": self.config.seed_base,
                     "seed_mode": self.config.seed_mode,
+                    "replay_map": replay_map,
                     "save_replays": self.config.save_replays,
                     "shape": self.config.shape,
                     "challenger_id": self.config.challenger_id,
@@ -512,9 +532,15 @@ class Scheduler:
         `on_match_done(match_result, matches_done, total)` (optional) fires after
         each match is recorded, for progress streaming (CLI).
         """
+        self._validate_replay_map_config(config)
         agents = resolve_agents(config, self._zoo_root)
         pairs = generate_pairs(config, agents)
         total = len(pairs) * config.games_per_pair
+        replay_map = (
+            config.replay_map.model_dump()
+            if config.replay_map is not None
+            else None
+        )
 
         with self._lock:
             run_id = self._alloc_run_id_locked()
@@ -533,19 +559,28 @@ class Scheduler:
             for pair in pairs:
                 for _ in range(config.games_per_pair):
                     mc += 1
+                    seed = rng.randrange(10**9)
+                    match_agents = list(pair)
+                    if not config.is_quick_match:
+                        match_agents = [
+                            match_agents[i]
+                            for i in side_order_for_seed(seed, len(match_agents))
+                        ]
                     pending.append(
                         QueuedMatch(
                             run_id=run_id,
                             match_counter=mc,
-                            agent_ids=[a["id"] for a in pair],
+                            agent_ids=[a["id"] for a in match_agents],
                             agent_paths=[
-                                str(self._zoo_root.parent / a["path"]) for a in pair
+                                str(self._zoo_root.parent / a["path"])
+                                for a in match_agents
                             ],
                             mode=config.mode,
-                            seed=rng.randrange(10**9),
+                            seed=seed,
                             save_replays=config.save_replays,
                             replays_dir=str(replays_dir),
                             logs_dir=str(logs_dir),
+                            replay_map=replay_map,
                         )
                     )
 
@@ -575,6 +610,73 @@ class Scheduler:
         if empty_done:
             self._finalize(ts)
         return run_id
+
+    def _validate_replay_map_config(self, config: TournamentConfig) -> None:
+        if config.replay_map is None:
+            if config.seed_mode == "replay":
+                raise ValueError("seed_mode='replay' requires replay_map")
+            return
+        if config.seed_mode != "replay":
+            raise ValueError("replay_map requires seed_mode='replay'")
+        if config.mode == "ultrafast":
+            raise ValueError("replay maps are supported in fast and faithful modes only")
+        if not config.replay_map.planets:
+            raise ValueError("replay_map.planets must not be empty")
+        if (
+            config.replay_map.initial_planets
+            and len(config.replay_map.initial_planets) != len(config.replay_map.planets)
+        ):
+            raise ValueError("replay_map.initial_planets must match planets length")
+        self._validate_replay_comet_schedule(config.replay_map.comet_schedule)
+        expected_players = 4 if config.format == "4p" else 2
+        source_players = config.replay_map.num_players
+        if source_players is not None and source_players != expected_players:
+            raise ValueError(
+                f"Replay has {source_players} players but tournament format is "
+                f"{config.format}; choose a {expected_players}p replay or change format"
+            )
+
+    def _validate_replay_comet_schedule(self, schedule: list) -> None:
+        seen_steps: set[int] = set()
+        for group_idx, group in enumerate(schedule):
+            spawn_step = int(group.spawn_step)
+            if spawn_step not in _COMET_SPAWN_STEPS:
+                raise ValueError(
+                    "replay_map.comet_schedule entries must use spawn steps "
+                    "50, 150, 250, 350, or 450"
+                )
+            if spawn_step in seen_steps:
+                raise ValueError(
+                    f"replay_map.comet_schedule has duplicate spawn step {spawn_step}"
+                )
+            seen_steps.add(spawn_step)
+            if not math.isfinite(float(group.ships)) or float(group.ships) <= 0:
+                raise ValueError(
+                    f"replay_map.comet_schedule[{group_idx}].ships must be positive"
+                )
+            if len(group.paths) != 4:
+                raise ValueError(
+                    f"replay_map.comet_schedule[{group_idx}].paths must contain 4 paths"
+                )
+            for path_idx, path in enumerate(group.paths):
+                if not path:
+                    raise ValueError(
+                        f"replay_map.comet_schedule[{group_idx}].paths[{path_idx}] "
+                        "must not be empty"
+                    )
+                for point_idx, point in enumerate(path):
+                    if len(point) < 2:
+                        raise ValueError(
+                            f"replay_map.comet_schedule[{group_idx}].paths"
+                            f"[{path_idx}][{point_idx}] must contain x/y"
+                        )
+                    x = float(point[0])
+                    y = float(point[1])
+                    if not math.isfinite(x) or not math.isfinite(y):
+                        raise ValueError(
+                            f"replay_map.comet_schedule[{group_idx}].paths"
+                            f"[{path_idx}][{point_idx}] must contain finite x/y"
+                        )
 
     def stop(self, run_id: str) -> bool:
         """Drop a tournament's queued matches and kill its in-flight ones.

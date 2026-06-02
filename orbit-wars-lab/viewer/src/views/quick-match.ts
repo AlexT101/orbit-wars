@@ -471,6 +471,7 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     games: 1,
     mode: "fast",
     seed: "random",
+    replayMap: null,
     format: "2p",
   };
   let matchState: MatchState = { kind: "idle" };
@@ -697,14 +698,18 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     2,
   );
 
-  mountMatchConfigBar(configEl, (cfg) => {
-    const formatChanged = cfg.format !== config.format;
-    config = cfg;
-    if (formatChanged) {
-      picker.setNumSlots(cfg.format === "4p" ? 4 : 2);
-    }
-    updatePlayState();
-  });
+  mountMatchConfigBar(
+    configEl,
+    (cfg) => {
+      const formatChanged = cfg.format !== config.format;
+      config = cfg;
+      if (formatChanged) {
+        picker.setNumSlots(cfg.format === "4p" ? 4 : 2);
+      }
+      updatePlayState();
+    },
+    showToast,
+  );
 
   function showToast(msg: string) {
     toastEl.textContent = msg;
@@ -878,6 +883,24 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     const agentsList = selection.filter((s): s is string => s !== null);
     if (agentsList.length !== (config.format === "4p" ? 4 : 2)) return;
 
+    if (config.seed === "replay") {
+      const expectedPlayers = config.format === "4p" ? 4 : 2;
+      if (!config.replayMap) {
+        showToast("Choose a replay JSON first.");
+        return;
+      }
+      if (config.mode === "ultrafast") {
+        showToast("Replay maps work in fast and faithful modes.");
+        return;
+      }
+      if (config.replayMap.num_players && config.replayMap.num_players !== expectedPlayers) {
+        showToast(
+          `Replay is ${config.replayMap.num_players}p; switch format or choose a ${expectedPlayers}p replay.`,
+        );
+        return;
+      }
+    }
+
     // Reset right panel to fresh replay wrapper
     rightPanel.innerHTML = "";
     activeReplay = mountEmbeddedReplay(rightPanel);
@@ -895,8 +918,18 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     // Date.now() % 2**31 has tiny entropy — sequential Play clicks in the
     // same ms produce identical seeds. crypto.getRandomValues fixes that.
     // The 42 short-circuit stays for deterministic-seed power-users.
-    const seedBase = config.seed === "random" ? randomSeedBase() : config.seed;
-    const seedMode: "fixed" | "random" = config.seed === "random" ? "random" : "fixed";
+    const seedBase =
+      config.seed === "random"
+        ? randomSeedBase()
+        : config.seed === "replay"
+          ? (config.replayMap?.source_seed ?? randomSeedBase())
+          : config.seed;
+    const seedMode: "fixed" | "random" | "replay" =
+      config.seed === "random"
+        ? "random"
+        : config.seed === "replay"
+          ? "replay"
+          : "fixed";
     const payload = {
       agents: agentsList,
       games_per_pair: config.games,
@@ -905,6 +938,7 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
       seed_base: seedBase,
       seed_mode: seedMode,
       is_quick_match: true,
+      replay_map: config.seed === "replay" ? config.replayMap : undefined,
     };
 
     try {

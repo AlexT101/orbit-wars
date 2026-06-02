@@ -1,7 +1,7 @@
 use super::reference_engine::RefEngine;
 use crate::engine::{Configuration, MoveAction};
 use crate::engine::{Simulator, StepEvent};
-use crate::entity_cache::EntityCache;
+use crate::cache::EntityCache;
 
 /// Build an entity cache matching `engine`'s initial layout, for exercising
 /// the sim's precomputed-position fast path.
@@ -87,6 +87,7 @@ fn simulator_tracks_fleet_landing() {
         from_id: src_id,
         angle,
         ships: src_ships,
+        target: tgt_id,
     }];
 
     let mut engine_run = engine.clone();
@@ -155,6 +156,7 @@ fn collect_arrivals_buckets_by_planet() {
             from_id: id,
             angle,
             ships,
+            target: tgt.id,
         });
     }
 

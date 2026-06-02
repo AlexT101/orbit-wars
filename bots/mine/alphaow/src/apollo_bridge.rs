@@ -1,5 +1,5 @@
 //! Bridge between alphaow's `GameState` and the vendored apollo engine, so
-//! alphaow's MCTS can use apollo's `hellburner::search_candidates` as its child
+//! alphaow's MCTS can use apollo's `strategy::search_candidates` as its child
 //! candidate generator.
 //!
 //! Conversions:
@@ -14,10 +14,11 @@
 
 use crate::apollo::constants::HORIZON;
 use crate::apollo::engine::{
-    CometGroup as ACometGroup, EngineState, Fleet as AFleet, Planet as APlanet, Simulator,
+    CometGroup as ACometGroup, EngineState, Fleet as AFleet, MoveAction, Planet as APlanet,
+    Simulator,
 };
-use crate::apollo::entity_cache::EntityCache;
-use crate::apollo::hellburner;
+use crate::apollo::cache::EntityCache;
+use crate::apollo::strategy;
 use crate::apollo::helpers::{count_players, ArrivalLedger};
 use crate::apollo::world::WorldState;
 use crate::sim::Action;
@@ -155,7 +156,7 @@ fn plan_from_ledger(
     cache: &EntityCache,
 ) -> Vec<Action> {
     let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
-    hellburner::plan(&world)
+    strategy::plan(&world)
         .into_iter()
         .map(|m| (m.from_id, m.angle, m.ships, player))
         .collect()
@@ -169,7 +170,7 @@ fn candidates_from_ledger(
     cache: &EntityCache,
 ) -> Vec<Vec<Action>> {
     let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
-    hellburner::search_candidates(&world)
+    strategy::search_candidates(&world)
         .into_iter()
         .map(|orders| {
             orders
@@ -239,7 +240,7 @@ pub fn apollo_plan(state: &GameState, player: i32, cache: &EntityCache) -> Vec<A
         state.angular_velocity,
         cache,
     );
-    hellburner::plan(&world)
+    strategy::plan(&world)
         .into_iter()
         .map(|m| (m.from_id, m.angle, m.ships, player))
         .collect()
@@ -270,7 +271,7 @@ pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) ->
         cache,
     );
 
-    hellburner::search_candidates(&world)
+    strategy::search_candidates(&world)
         .into_iter()
         .map(|orders| {
             orders
@@ -279,6 +280,89 @@ pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) ->
                 .collect::<Vec<Action>>()
         })
         .collect()
+}
+
+/// Recover the destination planet a launched fleet was aimed at by matching its
+/// launch `angle` against `plan_shot(from, c, ships)` for every non-comet planet
+/// `c`. alphaow's `Action` tuple carries only `(from_id, angle, ships, owner)` —
+/// the `target` that apollo threads through `MoveAction` is dropped at the tuple
+/// boundary — so we re-derive it here (somewhat inefficiently but we only have a few fleets and planets).
+/// when nothing matches, which makes `redirect_moves` leave the fleet untouched.
+fn recover_target(model: &strategy::HellburnerModel, from_id: i64, angle: f64, ships: i64) -> i64 {
+    let mut best: Option<(f64, i64)> = None;
+    for &c in &model.non_comet_ids {
+        if c == from_id {
+            continue;
+        }
+        if let Some((a, _, _, _, _)) = model.plan_shot(from_id, c, ships, 0) {
+            let d = (a - angle).abs();
+            if best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, c));
+            }
+        }
+    }
+    match best {
+        Some((d, c)) if d < 1e-6 => c,
+        _ => -1,
+    }
+}
+
+/// Final no-loss reroute pass over the move set the planner has already chosen,
+/// mirroring apollo's `redirect_moves` call at the tail of `Bot::get_action`.
+/// This runs *after* MCTS/duct/beam have fully committed to a plan — it never
+/// influences the search, it only rewrites the moves we are about to emit. For
+/// each launch `A → B`, if routing through an intermediate ally `C` reaches `B`
+/// no later (`A → C → B`), the fleet is retargeted to `C`.
+pub fn redirect_actions(state: &GameState, player: i32, actions: Vec<Action>) -> Vec<Action> {
+    if actions.is_empty() {
+        return actions;
+    }
+    let mut cache = rollout_cache(state);
+    cache.set_current_turn(state.step);
+
+    let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
+    let initial_planets: Vec<APlanet> =
+        state.planets.iter().map(to_apollo_planet_initial).collect();
+    let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
+    let (comets, comet_planet_ids) = to_apollo_comets(state);
+    let world = WorldState::build(
+        player as i64,
+        state.step,
+        planets,
+        fleets,
+        initial_planets,
+        comets,
+        comet_planet_ids,
+        state.angular_velocity,
+        &cache,
+    );
+    let model = strategy::HellburnerModel::build(&world);
+
+    // Reconstruct apollo MoveActions for our own launches; pass any non-`player`
+    // actions through untouched (best_move returns only `player`'s today).
+    let mut moves: Vec<MoveAction> = Vec::with_capacity(actions.len());
+    let mut passthrough: Vec<Action> = Vec::new();
+    for a in &actions {
+        let (from_id, angle, ships, owner) = *a;
+        if owner != player {
+            passthrough.push(*a);
+            continue;
+        }
+        let target = recover_target(&model, from_id, angle, ships);
+        moves.push(MoveAction {
+            from_id,
+            angle,
+            ships,
+            target,
+        });
+    }
+
+    let mut out: Vec<Action> = strategy::redirect_moves(&world, moves)
+        .into_iter()
+        .map(|m| (m.from_id, m.angle, m.ships, player))
+        .collect();
+    out.extend(passthrough);
+    out
 }
 
 // (focused single-target candidate generator moved to src/focused_plan.rs)

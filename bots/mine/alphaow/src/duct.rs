@@ -25,7 +25,7 @@ const TERMINAL_STEP: i64 = 500;
 const K_ROOT_DEFAULT: usize = 5;
 const K_NON_ROOT_DEFAULT: usize = 4;
 
-fn k_root() -> usize {
+pub(crate) fn k_root() -> usize {
     use std::sync::OnceLock;
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
@@ -35,7 +35,7 @@ fn k_root() -> usize {
             .unwrap_or(K_ROOT_DEFAULT)
     })
 }
-fn k_non_root() -> usize {
+pub(crate) fn k_non_root() -> usize {
     use std::sync::OnceLock;
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
@@ -86,7 +86,7 @@ thread_local! {
     /// that serves multiple games (benchmarks, harness reuse) rebuilds on a new
     /// map instead of reusing stale geometry. Mirrors apollo's `Bot.cache`
     /// (`bots/mine/apollo/src/lib.rs`).
-    static ENTITY_CACHE: RefCell<Option<(GeometryKey, crate::apollo::entity_cache::EntityCache)>> =
+    static CACHE: RefCell<Option<(GeometryKey, crate::apollo::cache::EntityCache)>> =
         RefCell::new(None);
 }
 
@@ -114,14 +114,14 @@ fn geometry_key(state: &GameState) -> GeometryKey {
     }
 }
 
-/// Rebuild-if-needed + per-turn refresh of the persistent [`ENTITY_CACHE`],
+/// Rebuild-if-needed + per-turn refresh of the persistent [`CACHE`],
 /// mirroring apollo's `Bot::refresh_cache`: build once per game, refresh comets
 /// only on a spawn step, then set the current turn and drop the now-unqueryable
 /// prior turn's aim slot. Run once at the top of [`best_move`].
-fn refresh_entity_cache(state: &GameState) {
+fn refresh_cache(state: &GameState) {
     use crate::apollo::constants::COMET_SPAWN_STEPS;
     let key = geometry_key(state);
-    ENTITY_CACHE.with(|cell| {
+    CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let needs_build = match slot.as_ref() {
             Some((k, _)) => *k != key,
@@ -144,8 +144,8 @@ fn refresh_entity_cache(state: &GameState) {
 /// Run `f` with the shared entity cache's `current_turn` set to `turn`. Used by
 /// candidate generation (one call per node, whose step may differ from the real
 /// turn). The cache is interior-mutable for its aim table, so `f` takes `&_`.
-fn with_entity_cache_at<R>(turn: i64, f: impl FnOnce(&crate::apollo::entity_cache::EntityCache) -> R) -> R {
-    ENTITY_CACHE.with(|cell| {
+fn with_cache_at<R>(turn: i64, f: impl FnOnce(&crate::apollo::cache::EntityCache) -> R) -> R {
+    CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let (_, cache) = slot.as_mut().expect("entity cache built in best_move");
         cache.set_current_turn(turn);
@@ -231,7 +231,7 @@ fn focused_candidates_enabled() -> bool {
     })
 }
 
-fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: bool) -> Vec<Vec<Action>> {
+pub(crate) fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: bool) -> Vec<Vec<Action>> {
     // Single-target focused candidate generator (apollo single-target eval
     // + healing fleets). Opt-in via OW_FOCUSED_CANDIDATES=1.
     //
@@ -247,9 +247,12 @@ fn enumerate_alternatives(state: &GameState, player: i32, k: usize, is_root: boo
         }
     }
     if apollo_candidates_enabled() {
-        let mut alts = with_entity_cache_at(state.step, |cache| {
+        let __apollo_t0 = std::time::Instant::now();
+        let mut alts = with_cache_at(state.step, |cache| {
             crate::apollo_bridge::apollo_candidates(state, player, cache)
         });
+        crate::profiling::add(&crate::profiling::APOLLO_CANDIDATES_NS, __apollo_t0);
+        crate::profiling::inc(&crate::profiling::APOLLO_CANDIDATES_CALLS);
         if !alts.is_empty() {
             if alts.len() > k {
                 alts.truncate(k);
@@ -289,7 +292,7 @@ fn enumerate_pair(
     is_root: bool,
 ) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
     if !focused_candidates_enabled() && apollo_candidates_enabled() {
-        let (mut my, mut op) = with_entity_cache_at(state.step, |cache| {
+        let (mut my, mut op) = with_cache_at(state.step, |cache| {
             crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache)
         });
         if !my.is_empty() && !op.is_empty() {
@@ -318,7 +321,7 @@ fn actions_equal(a: &[Action], b: &[Action]) -> bool {
     ax == bx
 }
 
-fn dominant_enemy(state: &GameState, me: i32) -> Option<i32> {
+pub(crate) fn dominant_enemy(state: &GameState, me: i32) -> Option<i32> {
     let mut best: Option<(i32, i64)> = None;
     let mut visit_player = |p: i32| {
         if p == -1 || p == me {
@@ -463,6 +466,7 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     if node.candidates_initialized {
         return;
     }
+    let __ec_t0 = std::time::Instant::now();
     let k = if root { k_root() } else { k_non_root() };
     let opp = dominant_enemy(&node.state, me).unwrap_or(1 - me);
     let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k, root);
@@ -475,6 +479,8 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     node.my_candidates = my_alts;
     node.opp_candidates = opp_alts;
     node.candidates_initialized = true;
+    crate::profiling::add(&crate::profiling::ENSURE_CANDIDATES_NS, __ec_t0);
+    crate::profiling::inc(&crate::profiling::ENSURE_CANDIDATES_CALLS);
 }
 
 /// apollo's hellburner planner as the rollout policy (the strong tactical
@@ -591,7 +597,7 @@ fn rollout(mut state: GameState, me: i32, rng: &mut XorRng) -> f64 {
         if t < reactive_turns {
             let opp = dominant_enemy(&state, me);
             let (my_act, opp_act) = if apollo {
-                ENTITY_CACHE.with(|cell| {
+                CACHE.with(|cell| {
                     let mut slot = cell.borrow_mut();
                     let (_, cache) = slot.as_mut().expect("entity cache built in best_move");
                     cache.set_current_turn(state.step);
@@ -654,7 +660,7 @@ fn use_value_net() -> bool {
     })
 }
 
-fn evaluate(state: &GameState, me: i32) -> f64 {
+pub(crate) fn evaluate(state: &GameState, me: i32) -> f64 {
     if prof_enabled() {
         let t = Instant::now();
         let v = evaluate_inner(state, me);
@@ -695,12 +701,18 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng, is_root: bool) 
         return v;
     }
     ensure_candidates(node, me, is_root);
+    let __sel_t0 = std::time::Instant::now();
     let my_idx = select_my(node, rng);
     let opp_idx = select_opp(node, rng);
+    crate::profiling::add(&crate::profiling::SELECTION_NS, __sel_t0);
+    crate::profiling::inc(&crate::profiling::SELECTION_CALLS);
     let value: f64;
     if !node.children.contains_key(&(my_idx, opp_idx)) {
-        // Expand: apply both actions, tick, create new node, rollout.
+        let __tree_t0 = std::time::Instant::now();
         let mut s = node.state.clone();
+        crate::profiling::add(&crate::profiling::TREE_OPS_NS, __tree_t0);
+        crate::profiling::inc(&crate::profiling::TREE_OPS_CALLS);
+        // Expand: apply both actions, tick, create new node, rollout.
         let __al_t0 = std::time::Instant::now();
         apply_launches(&mut s, &node.my_candidates[my_idx]);
         apply_launches(&mut s, &node.opp_candidates[opp_idx]);
@@ -710,6 +722,7 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng, is_root: bool) 
         crate::profiling::add(&crate::profiling::TICK_NS, __tick_t0);
         crate::profiling::inc(&crate::profiling::TICK_CALLS);
         let rollout_value = rollout(s.clone(), me, rng);
+        let __tree_t1 = std::time::Instant::now();
         let child = Node {
             state: s,
             visits: 1,
@@ -723,6 +736,7 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng, is_root: bool) 
             candidates_initialized: false,
         };
         node.children.insert((my_idx, opp_idx), Box::new(child));
+        crate::profiling::add(&crate::profiling::TREE_OPS_NS, __tree_t1);
         value = rollout_value;
     } else {
         // Recurse.
@@ -730,11 +744,14 @@ fn select_and_expand(node: &mut Node, me: i32, rng: &mut XorRng, is_root: bool) 
         value = select_and_expand(child, me, rng, false);
     }
     // Backprop: update both marginal stats + joint node.
+    let __bp_t0 = std::time::Instant::now();
     node.visits += 1;
     node.my_stats[my_idx].visits += 1;
     node.my_stats[my_idx].sum_value += value;
     node.opp_stats[opp_idx].visits += 1;
     node.opp_stats[opp_idx].sum_value += value;
+    crate::profiling::add(&crate::profiling::BACKPROP_NS, __bp_t0);
+    crate::profiling::inc(&crate::profiling::BACKPROP_CALLS);
     value
 }
 
@@ -756,7 +773,7 @@ fn state_hash(state: &GameState) -> u64 {
 pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
     // Build/refresh the persistent shared apollo cache before any candidate
     // generation or rollout reads it.
-    refresh_entity_cache(state);
+    refresh_cache(state);
     let reuse_disabled = std::env::var("OW_NO_REUSE").is_ok();
     let target_hash = state_hash(state);
     let mut reused: Option<Box<Node>> = None;
@@ -809,6 +826,7 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
             break;
         }
     }
+    crate::profiling::ITERATIONS.fetch_add(iters as u64, std::sync::atomic::Ordering::Relaxed);
 
     if std::env::var("OW_DEBUG").is_ok() {
         // Walk the tree to measure unique node count + max depth.

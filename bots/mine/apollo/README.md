@@ -23,11 +23,11 @@ rollout-based candidate selection, but `main.py` currently uses the faster
 | `main.py` | Python wrapper that exposes the Kaggle `agent` function |
 | `build_submission.py` | Builds a Kaggle-compatible Linux wheel in Docker and bundles a submission tarball |
 | `src/lib.rs` | PyO3 module definition, observation parsing, and `Bot` lifecycle |
-| `src/hellburner.rs` | Main strategy, ported from the open-source `hellburner` bot |
+| `src/strategy.rs` | Main strategy, ported from the open-source `hellburner` bot |
 | `src/rollout.rs` | Rollout/search helpers used by `compute_moves_with_search` |
 | `src/world.rs` | Strategy-agnostic per-turn snapshot built from the engine state |
-| `src/entity_cache.rs` | Cached planet/comet positions and aim-cache data shared across turns |
-| `src/blockers.rs` | Obstacle-aware aiming and collision/blocking logic |
+| `src/cache.rs` | Cached planet/comet positions and aim-cache data shared across turns |
+| `src/aim.rs` | Obstacle-aware aiming and collision/blocking logic |
 | `src/helpers.rs` | Timeline simulation, aiming helpers, and shared utilities |
 | `src/engine.rs` | Shared sim data types, math helpers, and the `Simulator` forward simulator used for rollout/timeline work |
 | `src/tests` | Correctness tests plus ignored throughput/profiling benchmarks |

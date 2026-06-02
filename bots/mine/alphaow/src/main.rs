@@ -5,7 +5,7 @@
 //! pipes observations each turn.
 
 use alphaow_bot::value_net::{self, INPUT_DIM, PER_BLOCK, DIST_BLOCK};
-use alphaow_bot::{duct, mcts, parse_state, profiling};
+use alphaow_bot::{beam, duct, mcts, parse_state, profiling};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
@@ -77,8 +77,14 @@ fn main() -> io::Result<()> {
         let __turn_t0 = std::time::Instant::now();
         let actions = match std::env::var("OW_PLANNER").ok().as_deref() {
             Some("mcts") => mcts::best_move(&state, state.player, budget_ms),
+            Some("beam") => beam::best_move(&state, state.player, budget_ms),
             _ => duct::best_move(&state, state.player, budget_ms),
         };
+        // Final no-loss reroute pass on the chosen plan — runs after the planner
+        // has fully committed, independent of MCTS/duct/beam (apollo's
+        // `redirect_moves` tail, ported via the bridge since `Action` tuples
+        // drop the target the pass needs).
+        let actions = alphaow_bot::apollo_bridge::redirect_actions(&state, state.player, actions);
         if prof_enabled {
             profiling::TURN_TOTAL_NS.fetch_add(
                 __turn_t0.elapsed().as_nanos() as u64,

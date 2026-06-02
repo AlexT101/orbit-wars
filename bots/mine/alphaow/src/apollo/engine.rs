@@ -17,7 +17,7 @@ use crate::apollo::constants::{
     BOARD_SIZE, CENTER, COMET_SPEED, EPISODE_STEPS, MAX_PLAYERS, MAX_SHIP_SPEED, ROTATION_LIMIT,
     SUN_RADIUS,
 };
-use crate::apollo::entity_cache::EntityCache;
+use crate::apollo::cache::EntityCache;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Planet {
@@ -76,6 +76,11 @@ pub struct MoveAction {
     pub from_id: i64,
     pub angle: f64,
     pub ships: i64,
+    /// Destination planet this fleet is aimed at, or `-1` when unknown. The
+    /// engine ignores this field (it spawns fleets from `from_id`/`angle`/`ships`
+    /// only); it carries the intent through to `redirect_moves`, the final
+    /// post-rollout pass that may reroute a fleet through an intermediate ally.
+    pub target: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
