@@ -29,7 +29,7 @@ export interface RunSummary {
   id: string;
   started_at: string;
   finished_at?: string | null;
-  mode: "fast" | "faithful" | "ultrafast";
+  mode: "fast" | "faithful" | "ultrafast" | "value";
   format: "2p" | "4p";
   status: "queued" | "running" | "completed" | "aborted";
   total_matches: number;
@@ -90,6 +90,39 @@ export interface MatchResult {
   error?: string | null;
 }
 
+export interface RunningMatch {
+  run_id: string;
+  match_id: string;
+  agent_ids: string[];
+  mode: RunSummary["mode"];
+  seed: number;
+  started_at: string;
+  elapsed_s: number;
+}
+
+export interface SchedulerTournament {
+  id: string;
+  status: RunSummary["status"] | "stopping";
+  mode: RunSummary["mode"];
+  format: RunSummary["format"];
+  shape?: RunSummary["shape"];
+  challenger_id?: string | null;
+  is_quick_match?: boolean;
+  total_matches: number;
+  matches_done: number;
+  queued: number;
+  running: number;
+  started_at: string;
+}
+
+export interface SchedulerStatus {
+  concurrency: number;
+  running_count: number;
+  queued_total: number;
+  tournaments: SchedulerTournament[];
+  running: RunningMatch[];
+}
+
 async function j<T>(path: string, opts?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, opts);
   if (!r.ok) {
@@ -130,9 +163,11 @@ export const api = {
     mode: string;
     format: string;
     save_replays?: boolean;
+    parallel?: number;
     seed_base?: number;
     seed_mode?: "fixed" | "random" | "replay";
     replay_map?: any;
+    value_model_path?: string;
     is_quick_match?: boolean;
     shape?: "round-robin" | "gauntlet";
     challenger_id?: string | null;

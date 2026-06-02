@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-06-01T21:05:32.643892+00:00",
+  "last_updated": "2026-06-02T21:47:02.365511+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -32,9 +32,9 @@
     },
     "external/hellburner": {
       "2p": {
-        "mu": 724.4120492393665,
-        "sigma": 19.080276491198056,
-        "games_played": 368
+        "mu": 732.994434272587,
+        "sigma": 18.810906153140817,
+        "games_played": 376
       }
     },
     "baselines/starter": {
@@ -186,9 +186,9 @@
     },
     "baselines/hellburner": {
       "2p": {
-        "mu": 608.2742283809135,
-        "sigma": 82.27997765166397,
-        "games_played": 8
+        "mu": 638.9323629916687,
+        "sigma": 76.73963148627425,
+        "games_played": 10
       }
     },
     "external/evogen": {
@@ -200,9 +200,9 @@
     },
     "external/owheuristic": {
       "2p": {
-        "mu": 809.9371353275627,
-        "sigma": 19.02253358025669,
-        "games_played": 322
+        "mu": 806.8163396749012,
+        "sigma": 19.000354098859525,
+        "games_played": 323
       }
     },
     "mine/rl_ppo": {
@@ -214,9 +214,9 @@
     },
     "mine/alphaow_newest": {
       "2p": {
-        "mu": 1043.6899573832816,
-        "sigma": 21.403162061145224,
-        "games_played": 124
+        "mu": 1036.6135233989016,
+        "sigma": 21.256845669529675,
+        "games_played": 125
       }
     },
     "mine/alphaow_temp": {
@@ -224,6 +224,13 @@
         "mu": 1043.0041744715347,
         "sigma": 22.56591001983834,
         "games_played": 81
+      }
+    },
+    "mine/beam": {
+      "2p": {
+        "mu": 599.9999999999999,
+        "sigma": 154.93972291919502,
+        "games_played": 2
       }
     }
   }

@@ -15,6 +15,10 @@
   flex-wrap: wrap;
 }
 
+.config-group-wide {
+  flex: 1 1 100%;
+}
+
 .config-label {
   font-family: var(--font-mono);
   font-size: 0.7rem;
@@ -57,6 +61,11 @@
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 0.7rem;
+}
+
+.config-value-path {
+  width: min(100%, 520px);
+  flex: 1 1 260px;
 }
 
 .config-input:focus {

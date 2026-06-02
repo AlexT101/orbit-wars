@@ -13,7 +13,7 @@ import torch
 from torch.distributions import Categorical
 
 # ==== HARDCODED CONFIG ====
-HERO = "/home/sunrise/orbitwars/pantheow/experimental_arch/train/checkpoints/galaxy_a2_p44_reference_ppo_transformer_v1/latest.pt"
+HERO = "/home/sunrise/orbitwars/pantheow/experimental_arch/train_transformer/checkpoints/galaxy_a2_p44_reference_ppo_transformer_v1/latest.pt"
 OPPONENT = "self"  # "self", .zip, .py, or bot name
 
 HERO_DETERMINISTIC = False
@@ -26,7 +26,7 @@ DEVICE = "cpu"
 
 EXPERIMENTAL_ARCH_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
-TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train"
+TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train_transformer"
 DEFAULT_OUT = EXPERIMENTAL_ARCH_DIR / "viz" / "orbit_wars_game.html"
 DEFAULT_CHECKPOINT_DIR = TRAIN_DIR / "checkpoints" / "galaxy_a2_p44_reference_ppo_transformer_v1"
 

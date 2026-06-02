@@ -84,6 +84,16 @@ def test_tournament_config_accepts_random_seed_mode():
     assert cfg.seed_mode == "random"
 
 
+def test_tournament_config_accepts_value_mode_and_model_path():
+    cfg = TournamentConfig(
+        agents=["baselines/random", "baselines/starter"],
+        mode="value",
+        value_model_path="/tmp/model.json",
+    )
+    assert cfg.mode == "value"
+    assert cfg.value_model_path == "/tmp/model.json"
+
+
 def test_tournament_config_accepts_replay_seed_mode_and_map():
     cfg = TournamentConfig(
         agents=["baselines/random", "baselines/starter"],

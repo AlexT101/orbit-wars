@@ -16,6 +16,12 @@ interface Series {
   production: number[][];
   planets: number[][];
   shipDelta: number[];
+  valueFunction?: {
+    label?: string;
+    modelPath?: string;
+    values: Array<Array<number | null>>;
+    error?: string;
+  };
 }
 
 interface Live {
@@ -229,6 +235,87 @@ function drawDeltaPanel(
   ctx.fillText((curVal >= 0 ? "+" : "") + curVal, left + 4, top);
 }
 
+function drawValuePanel(
+  canvas: HTMLCanvasElement,
+  arrays: Array<Array<number | null>>,
+  step: number,
+  theme: ThemeColors,
+) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const cssW = Math.max(1, Math.floor(rect.width));
+  const cssH = Math.max(1, Math.floor(rect.height));
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = theme.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const padL = 30, padR = 6, padT = 6, padB = 16;
+  const left = padL, right = W - padR, top = padT, bot = H - padB;
+  const innerW = right - left, innerH = bot - top;
+  const total = Math.max(1, arrays[0]?.length ?? 1);
+  const viewedT = Math.max(1, Math.min(step + 1, total));
+  const xOf = (i: number) => left + (i / Math.max(1, viewedT - 1)) * innerW;
+  const yOf = (v: number) => bot - Math.max(0, Math.min(1, v)) * innerH;
+
+  ctx.font = "9px " + readVar("--font-mono", "ui-monospace, monospace");
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const v of [0, 0.5, 1]) {
+    const y = yOf(v);
+    ctx.strokeStyle = v === 0.5 ? theme.gridStrong : theme.grid;
+    ctx.lineWidth = v === 0.5 ? 1.2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(left, y + 0.5); ctx.lineTo(right, y + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = theme.muted;
+    ctx.fillText(v.toFixed(1), left - 4, y);
+  }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (let g = 0; g <= 4; g++) {
+    const x = left + (g / 4) * innerW;
+    const s = Math.round((g / 4) * Math.max(0, viewedT - 1));
+    ctx.fillText(String(s), x, bot + 3);
+  }
+
+  for (let p = 0; p < arrays.length; p++) {
+    const arr = arrays[p];
+    if (!arr) continue;
+    ctx.strokeStyle = PLAYER_COLORS[p] ?? theme.text;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < viewedT; i++) {
+      const v = arr[i];
+      if (typeof v !== "number") {
+        started = false;
+        continue;
+      }
+      const x = xOf(i);
+      const y = yOf(v);
+      if (!started) {
+        ctx.moveTo(x, y);
+        started = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+  }
+
+  const px = xOf(step);
+  ctx.strokeStyle = theme.cursor;
+  ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  ctx.moveTo(px + 0.5, top); ctx.lineTo(px + 0.5, bot);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
 export interface GraphsHandle {
   render: () => void;
 }
@@ -252,6 +339,10 @@ export function mountGraphs(host: HTMLElement): GraphsHandle {
         <div class="qm-graph-title" data-delta-title>Ship gain Δ</div>
         <canvas data-graph="shipDelta"></canvas>
       </div>
+      <div class="qm-graph" data-value-panel hidden>
+        <div class="qm-graph-title" data-value-title>Value function</div>
+        <canvas data-graph="valueFunction"></canvas>
+      </div>
     </div>
     <div class="qm-graphs-empty" data-empty hidden>No replay loaded yet.</div>
   `;
@@ -261,9 +352,12 @@ export function mountGraphs(host: HTMLElement): GraphsHandle {
     production: host.querySelector<HTMLCanvasElement>('canvas[data-graph="production"]')!,
     planets: host.querySelector<HTMLCanvasElement>('canvas[data-graph="planets"]')!,
     shipDelta: host.querySelector<HTMLCanvasElement>('canvas[data-graph="shipDelta"]')!,
+    valueFunction: host.querySelector<HTMLCanvasElement>('canvas[data-graph="valueFunction"]')!,
   };
   const deltaPanel = host.querySelector<HTMLElement>("[data-delta-panel]")!;
   const deltaTitle = host.querySelector<HTMLElement>("[data-delta-title]")!;
+  const valuePanel = host.querySelector<HTMLElement>("[data-value-panel]")!;
+  const valueTitle = host.querySelector<HTMLElement>("[data-value-title]")!;
   const graphsRoot = host.querySelector<HTMLElement>(".qm-graphs")!;
   const emptyEl = host.querySelector<HTMLElement>("[data-empty]")!;
 
@@ -310,6 +404,21 @@ export function mountGraphs(host: HTMLElement): GraphsHandle {
     drawSeriesPanel(canvases.planets, series.planets, step, T, series.numAgents, theme);
     if (series.numAgents >= 2) {
       drawDeltaPanel(canvases.shipDelta, series.shipDelta, step, T, theme);
+    }
+    if (series.valueFunction?.values?.length) {
+      valuePanel.hidden = false;
+      valueTitle.textContent = series.valueFunction.error
+        ? "Value function (error)"
+        : "Value function";
+      valueTitle.title = series.valueFunction.error || series.valueFunction.modelPath || "";
+      drawValuePanel(canvases.valueFunction, series.valueFunction.values, step, theme);
+    } else if (series.valueFunction?.error) {
+      valuePanel.hidden = false;
+      valueTitle.textContent = "Value function (error)";
+      valueTitle.title = series.valueFunction.error;
+    } else {
+      valuePanel.hidden = true;
+      valueTitle.title = "";
     }
   }
 

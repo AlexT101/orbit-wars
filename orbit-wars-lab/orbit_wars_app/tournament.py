@@ -31,6 +31,7 @@ from .pairing import filter_agents_by_tags
 from .scheduler import Scheduler, allocate_run_id
 from .schemas import MatchResult, TournamentConfig
 from .trueskill_store import TrueSkillStore
+from .value_evaluator import default_value_model_path
 
 
 class TournamentCancelled(Exception):
@@ -99,6 +100,7 @@ def _run_match_in_worker(
     replays_dir_str: Optional[str],
     save_replays: bool,
     logs_dir_str: Optional[str] = None,
+    value_model_path: Optional[str] = None,
 ) -> _WorkerResult:
     """Run a single match in a worker process and persist the replay locally.
 
@@ -116,6 +118,7 @@ def _run_match_in_worker(
         seed=seed,
         log_dir=log_dir,
         log_prefix=f"{match_counter:03d}",
+        value_model_path=value_model_path,
     )
 
     replay_rel = ""
@@ -227,7 +230,7 @@ class Tournament:
         )
         sched.start()
         try:
-            if self.config.parallel <= 1 or self.config.mode not in ("fast", "ultrafast"):
+            if self.config.parallel <= 1 or self.config.mode not in ("fast", "ultrafast", "value"):
                 # Sequential path. Faithful mode also takes this branch:
                 # subprocess agents already use OS-level concurrency, and
                 # nesting ProcessPoolExecutor on top would multiply RAM and
@@ -241,6 +244,7 @@ class Tournament:
                         seed=seed,
                         log_dir=logs_dir,
                         log_prefix=f"{mc:03d}",
+                        value_model_path=self.config.value_model_path,
                     )
                     replay_rel = ""
                     if (self.config.save_replays
@@ -284,6 +288,7 @@ class Tournament:
                             str(replays_dir) if self.config.save_replays else None,
                             self.config.save_replays,
                             str(logs_dir),
+                            self.config.value_model_path,
                         )] = (mc, aids, apaths, seed)
 
                     self._check_cancel()
@@ -719,9 +724,9 @@ def _cmd_run(args):
             file=sys.stderr,
         )
         sys.exit(1)
-    if args.parallel > 1 and args.mode not in ("fast", "ultrafast"):
+    if args.parallel > 1 and args.mode not in ("fast", "ultrafast", "value"):
         print(
-            "--parallel >1 only supported in fast/ultrafast modes; falling back to sequential.",
+            "--parallel >1 only supported in fast/ultrafast/value modes; falling back to sequential.",
             file=sys.stderr,
         )
         args.parallel = 1
@@ -735,6 +740,7 @@ def _cmd_run(args):
         parallel=args.parallel,
         seed_base=args.seed,
         save_replays=not args.no_replays,
+        value_model_path=args.value_model_path,
     )
     t = Tournament(config=cfg, runs_root=args.runs, zoo_root=args.zoo)
     run_id = t.run()
@@ -829,9 +835,10 @@ def main():
              "Example: --exclude-tag broken --exclude-tag slow",
     )
     p_run.add_argument("--games-per-pair", type=int, default=3, help="K games per pair (default 3)")
-    p_run.add_argument("--mode", choices=["fast", "faithful", "ultrafast"], default="fast",
+    p_run.add_argument("--mode", choices=["fast", "faithful", "ultrafast", "value"], default="fast",
                        help="fast=in-process kaggle-envs, faithful=subprocess+HTTP "
-                            "(Kaggle protocol), ultrafast=native Rust engine (no replays)")
+                            "(Kaggle protocol), ultrafast=native Rust engine (no replays), "
+                            "value=native Rust engine with replay + XGBoost value trace")
     p_run.add_argument("--format", choices=["2p", "4p"], default="2p",
                        help="Match format — 2-player or 4-player FFA (default 2p)")
     p_run.add_argument("--parallel", type=int, default=1,
@@ -839,6 +846,8 @@ def main():
     p_run.add_argument("--seed", type=int, default=42, help="Base seed for match randomness")
     p_run.add_argument("--no-replays", action="store_true", dest="no_replays",
                        help="Skip writing per-match replay JSON (5-10MB each); ratings still computed")
+    p_run.add_argument("--value-model-path", default=str(default_value_model_path()),
+                       help="XGBoost model path for --mode value")
     p_run.set_defaults(func=_cmd_run)
 
     p_g = sub.add_parser("gauntlet", help="One challenger vs every other agent (× K games)")
@@ -849,7 +858,7 @@ def main():
     p_g.add_argument("--exclude-tag", action="append", default=[], dest="exclude_tag",
                      help="Exclude opponents with this tag")
     p_g.add_argument("--games-per-pair", type=int, default=10, help="K games per opponent (default 10)")
-    p_g.add_argument("--mode", choices=["fast", "faithful", "ultrafast"], default="fast")
+    p_g.add_argument("--mode", choices=["fast", "faithful", "ultrafast", "value"], default="fast")
     p_g.add_argument("--format", choices=["2p", "4p"], default="2p",
                      help="2p: challenger vs 1 opponent. 4p: challenger + 3 opponents per match.")
     p_g.add_argument("--seed", type=int, default=42)
@@ -859,9 +868,10 @@ def main():
     p_h2h.add_argument("agent_a", help="First agent ID (player 0)")
     p_h2h.add_argument("agent_b", help="Second agent ID (player 1)")
     p_h2h.add_argument("--games", type=int, default=10, help="Number of games (default 10)")
-    p_h2h.add_argument("--mode", choices=["fast", "faithful", "ultrafast"], default="fast",
+    p_h2h.add_argument("--mode", choices=["fast", "faithful", "ultrafast", "value"], default="fast",
                        help="fast=in-process, faithful=subprocess+HTTP, "
-                            "ultrafast=native Rust engine (no replays)")
+                            "ultrafast=native Rust engine (no replays), "
+                            "value=native Rust engine with replay + XGBoost value trace")
     p_h2h.add_argument("--seed", type=int, default=42, help="Base seed")
     p_h2h.set_defaults(func=_cmd_head_to_head)
 

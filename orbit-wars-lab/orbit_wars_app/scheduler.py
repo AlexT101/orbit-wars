@@ -49,6 +49,7 @@ from .replay_store import save_replay
 from .runtime_store import RuntimeStore
 from .schemas import MatchResult, RunStatus, TournamentConfig
 from .trueskill_store import TrueSkillStore
+from .value_evaluator import validate_value_model_path
 
 
 # Status values a tournament can be in. "queued" = registered, no match has
@@ -141,6 +142,7 @@ class QueuedMatch:
     replays_dir: str
     logs_dir: str
     replay_map: Optional[dict] = None
+    value_model_path: Optional[str] = None
 
 
 @dataclass
@@ -180,6 +182,7 @@ def _execute_match_job(job: QueuedMatch) -> MatchJobResult:
         log_dir=Path(job.logs_dir) if job.logs_dir else None,
         log_prefix=f"{job.match_counter:03d}",
         replay_map=job.replay_map,
+        value_model_path=job.value_model_path,
     )
 
     replay_rel = ""
@@ -331,6 +334,7 @@ class TournamentState:
                     "seed_base": self.config.seed_base,
                     "seed_mode": self.config.seed_mode,
                     "replay_map": replay_map,
+                    "value_model_path": self.config.value_model_path,
                     "save_replays": self.config.save_replays,
                     "shape": self.config.shape,
                     "challenger_id": self.config.challenger_id,
@@ -533,6 +537,10 @@ class Scheduler:
         each match is recorded, for progress streaming (CLI).
         """
         self._validate_replay_map_config(config)
+        if config.mode == "value":
+            if config.format != "2p":
+                raise ValueError("value mode currently supports 2p XGBoost models only")
+            config.value_model_path = str(validate_value_model_path(config.value_model_path))
         agents = resolve_agents(config, self._zoo_root)
         pairs = generate_pairs(config, agents)
         total = len(pairs) * config.games_per_pair
@@ -581,6 +589,7 @@ class Scheduler:
                             replays_dir=str(replays_dir),
                             logs_dir=str(logs_dir),
                             replay_map=replay_map,
+                            value_model_path=config.value_model_path,
                         )
                     )
 

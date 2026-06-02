@@ -5,6 +5,7 @@
  */
 
 import { api, AgentInfo, Rating, RunSummary, SchedulerStatus } from "../api";
+import { DEFAULT_VALUE_MODEL_PATH } from "../components/match-config-bar";
 import { installHeaderNav } from "../components/header-nav";
 import { navigate } from "../router";
 import { escapeHtml } from "../utils/escape";
@@ -65,9 +66,14 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
                 <span>Mode</span>
                 <div class="seg-group" id="cfg-mode">
                   <button class="config-pill" data-v="ultrafast" title="Native Rust engine, no replays (tournament throughput)">ultrafast</button>
+                  <button class="config-pill" data-v="value" title="Native Rust engine with XGBoost value trace">value</button>
                   <button class="config-pill on" data-v="fast" title="In-process kaggle-environments">fast</button>
                   <button class="config-pill" data-v="faithful" title="Subprocess + HTTP (Kaggle protocol)">faithful</button>
                 </div>
+              </div>
+              <div class="cfg-row" id="cfg-value-model-row" hidden>
+                <span>Value model</span>
+                <input id="cfg-value-model" class="seed-input config-value-path" type="text" spellcheck="false" value="${escapeHtml(DEFAULT_VALUE_MODEL_PATH)}">
               </div>
               <div class="cfg-row">
                 <span>Format</span>
@@ -253,11 +259,13 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     const saveReplaysEl = document.getElementById("cfg-save-replays") as HTMLInputElement;
     const wrap = saveReplaysEl.closest(".create-config-checkbox") as HTMLElement | null;
     const isUltrafast = getMode() === "ultrafast";
+    const valueModelRow = document.getElementById("cfg-value-model-row") as HTMLElement | null;
     saveReplaysEl.disabled = isUltrafast;
     if (isUltrafast) {
       saveReplaysEl.checked = false;
     }
     if (wrap) wrap.style.opacity = isUltrafast ? "0.55" : "";
+    if (valueModelRow) valueModelRow.hidden = getMode() !== "value";
   }
   const getFormat = wireSegGroup("cfg-format");
   const getShape = wireSegGroup("cfg-shape");
@@ -291,12 +299,12 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   }
 
   function refreshReplaySeedAvailability() {
-    const isUltrafast = getMode() === "ultrafast";
+    const isNativeNoReplayMap = getMode() === "ultrafast" || getMode() === "value";
     const replayBtn = document.querySelector<HTMLButtonElement>(
       "#cfg-seed-mode [data-v='replay']",
     );
-    if (replayBtn) replayBtn.hidden = isUltrafast;
-    if (isUltrafast && getSeedMode() === "replay") {
+    if (replayBtn) replayBtn.hidden = isNativeNoReplayMap;
+    if (isNativeNoReplayMap && getSeedMode() === "replay") {
       selectSeedMode("random");
       replayMap = null;
       replayFileInput.value = "";
@@ -400,7 +408,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     .forEach((btn) => btn.addEventListener("click", () => {
       setTimeout(() => {
         const mode = getSeedMode();
-        if (mode === "replay" && getMode() === "ultrafast") {
+        if (mode === "replay" && (getMode() === "ultrafast" || getMode() === "value")) {
           selectSeedMode("random");
           replayMap = null;
           replayFileInput.value = "";
@@ -418,7 +426,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     const file = replayFileInput.files?.[0];
     if (!file) return;
     const statusEl = document.getElementById("create-status")!;
-    if (getMode() === "ultrafast") {
+    if (getMode() === "ultrafast" || getMode() === "value") {
       selectSeedMode("random");
       replayMap = null;
       replayFileInput.value = "";
@@ -477,10 +485,28 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
         statusEl.textContent = "Replay maps work in fast and faithful modes.";
         return;
       }
+      if (mode === "value") {
+        statusEl.hidden = false;
+        statusEl.textContent = "Replay maps work in fast and faithful modes.";
+        return;
+      }
       if (replayMap.num_players && replayMap.num_players !== expectedPlayers) {
         statusEl.hidden = false;
         statusEl.textContent =
           `Replay is ${replayMap.num_players}p; switch format or choose a ${expectedPlayers}p replay.`;
+        return;
+      }
+    }
+    if (mode === "value") {
+      const modelPath = (document.getElementById("cfg-value-model") as HTMLInputElement).value.trim();
+      if (format !== "2p") {
+        statusEl.hidden = false;
+        statusEl.textContent = "Value mode currently supports 2p XGBoost models.";
+        return;
+      }
+      if (!modelPath) {
+        statusEl.hidden = false;
+        statusEl.textContent = "Choose an XGBoost model path for value mode.";
         return;
       }
     }
@@ -494,6 +520,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
         mode,
         format,
         save_replays: saveReplays,
+        parallel,
         seed_base: useRandomSeed
           ? randomSeedBase()
           : useReplayMap
@@ -501,6 +528,9 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
             : (isNaN(seed) ? 42 : seed),
         seed_mode: useRandomSeed ? "random" : useReplayMap ? "replay" : "fixed",
         replay_map: useReplayMap ? replayMap : undefined,
+        value_model_path: mode === "value"
+          ? (document.getElementById("cfg-value-model") as HTMLInputElement).value.trim()
+          : undefined,
         is_quick_match: false,
         shape: shape as "round-robin" | "gauntlet",
         challenger_id: challengerId,
@@ -592,6 +622,71 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
     });
   }
 
+  function activeTournamentName(t: SchedulerStatus["tournaments"][number]): string {
+    if (t.shape === "gauntlet") {
+      const challenger = trimmedAgentName(t.challenger_id);
+      return challenger ? `gauntlet - ${challenger}` : "gauntlet";
+    }
+    return "round robin";
+  }
+
+  async function loadScheduler() {
+    const panelEl = document.getElementById("scheduler-panel")!;
+    const concurrencyEl = document.getElementById("sched-concurrency")!;
+    let status: SchedulerStatus;
+    try {
+      status = await api.getScheduler();
+    } catch (e) {
+      concurrencyEl.textContent = "scheduler unavailable";
+      panelEl.innerHTML = `<div class="loading">Scheduler error: ${escapeHtml((e as Error).message)}</div>`;
+      return;
+    }
+
+    concurrencyEl.textContent =
+      `${status.running_count}/${status.concurrency} running · ${status.queued_total} queued`;
+    const tournaments = status.tournaments.filter((t) => !t.is_quick_match);
+    if (tournaments.length === 0) {
+      panelEl.innerHTML = `<div class="loading">No active tournaments.</div>`;
+      return;
+    }
+
+    const runningByRun = new Map<string, SchedulerStatus["running"]>();
+    for (const match of status.running) {
+      const matches = runningByRun.get(match.run_id) ?? [];
+      matches.push(match);
+      runningByRun.set(match.run_id, matches);
+    }
+
+    panelEl.innerHTML = `
+      <ul class="runs">
+        ${tournaments.map((t) => {
+          const matches = runningByRun.get(t.id) ?? [];
+          const runningChips = matches
+            .map((m) => {
+              const agents = m.agent_ids.map(trimmedAgentName).join(" vs ");
+              return `<span class="sched-match" title="${escapeHtml(agents)}">${escapeHtml(m.match_id)} · ${Math.round(m.elapsed_s)}s</span>`;
+            })
+            .join("");
+          return `
+            <li data-run-id="${escapeHtml(t.id)}">
+              <span class="run-name">${escapeHtml(activeTournamentName(t))}</span>
+              <span class="run-meta">${escapeHtml(t.mode)} &middot; ${escapeHtml(t.format)} &middot; ${t.matches_done}/${t.total_matches} &middot; ${t.queued} queued${t.running ? ` &middot; ${t.running} running` : ""}${runningChips}</span>
+              <span class="run-id">${escapeHtml(formatRunId(t.id))}</span>
+              <span class="run-status status-${escapeHtml(t.status)}">${escapeHtml(t.status)}</span>
+              <span></span>
+            </li>
+          `;
+        }).join("")}
+      </ul>
+    `;
+    panelEl.querySelectorAll<HTMLLIElement>("li").forEach((li) => {
+      li.addEventListener("click", () => {
+        const runId = li.getAttribute("data-run-id");
+        if (runId) navigate({ view: "tournament-detail", runId });
+      });
+    });
+  }
+
   onShapeChange(); // initial: hide challenger + compute totals
   refreshSeedInput();
   refreshReplayLabel();
@@ -600,7 +695,7 @@ export async function renderTournaments(root: HTMLElement): Promise<void> {
   refreshStartButton();
 
   await loadAgents();
-  await loadRuns();
+  await Promise.all([loadRuns(), loadScheduler()]);
 
   if (pollInterval !== null) window.clearInterval(pollInterval);
   pollInterval = window.setInterval(() => {

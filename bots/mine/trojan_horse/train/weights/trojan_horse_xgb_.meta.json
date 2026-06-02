@@ -1,0 +1,20 @@
+{
+  "dataset": "/home/sunrise/orbitwars/pantheow/bots/mine/trojan_horse/train/data/pipeline/combined_46p12e88t11.npz",
+  "features": "summary_v2[46] + extras_v4[12] + engineered[88] + tempo[11]",
+  "feature_set": "summary_v2",
+  "label_mode": "native",
+  "feature_dim": 157,
+  "objective": "binary",
+  "accuracy": 0.9619289340101523,
+  "rmse": null,
+  "baseline_2p_model": null,
+  "config": {
+    "name": "xgb_46p12e88t11_d6_lr008",
+    "max_depth": 6,
+    "learning_rate": 0.08,
+    "n_est": 900
+  },
+  "filter_strong": false,
+  "seed": 42,
+  "val_frac": 0.12
+}
