@@ -28,8 +28,9 @@ use crate::apollo::constants::{
 use crate::apollo::engine::{MoveAction, Planet};
 use crate::apollo::cache::{AimCacheVerdict, InvariantVerdict};
 use crate::apollo::helpers::{
-    aim_ignoring_comets, aim_with_prediction, dist, simulate_checkpoint_into,
-    simulate_planet_timeline, state_at_timeline, AimResult, ArrivalEvent, PlanetTimeline,
+    aim_ignoring_comets, aim_with_prediction, available_at_timeline, dist,
+    simulate_checkpoint_into, simulate_planet_timeline, AimResult, ArrivalEvent,
+    PlanetTimeline,
 };
 use crate::apollo::world::{merge_arrivals, WorldState};
 
@@ -341,17 +342,25 @@ struct PlanState {
 }
 
 impl PlanState {
-    fn ships_available(&self, src: &Planet) -> i64 {
-        (src.ships - self.spent.get(&src.id).copied().unwrap_or(0)).max(0)
+    fn ships_available(&self, world: &WorldState, src: &Planet) -> i64 {
+        self.ships_available_at(world, src, 0)
     }
     /// Rollout-aware available ships at a future launch offset.
     ///
-    /// O(1) in the common case — it reads the prebuilt baseline trajectory the
-    /// arrival ledger already produced. Only when this source has its own
-    /// planned reinforcements queued *this* turn does it pay a single per-call
-    /// planet sim to fold those in. Conservative against `spent`: every prior
+    /// Returns the most this source can ship out at `offset` without driving
+    /// any later turn it still owns negative. Withdrawing ships at `offset`
+    /// removes them from every turn `≥ offset`, so the bound is the forward-min
+    /// of the garrison over the owned run starting at `offset`
+    /// ([`available_at_timeline`]) — not the single-turn garrison, which would
+    /// over-commit whenever a future enemy arrival shrinks the planet.
+    ///
+    /// O(1) in the common case — it reads the prebuilt baseline trajectory's
+    /// precomputed forward-min. Only when this source has its own planned
+    /// reinforcements queued *this* turn does it pay a single per-call planet
+    /// sim to fold those in. Conservative against `spent`: every prior
     /// commitment from this source is subtracted regardless of when those ships
-    /// are scheduled to leave.
+    /// are scheduled to leave (so a commit at any offset correctly debits all
+    /// offsets, keeping the greedy planner from going negative).
     fn ships_available_at(&self, world: &WorldState, src: &Planet, offset: i64) -> i64 {
         let offset = offset.max(0);
         let spent = self.spent.get(&src.id).copied().unwrap_or(0);
@@ -360,21 +369,28 @@ impl PlanState {
             .get(&src.id)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
-        let (owner, ships) = if planned.is_empty() {
+        let available = if planned.is_empty() {
             match world.timeline_cache.baseline(src.id) {
-                Some(b) => state_at_timeline(b, offset),
-                // No cached trajectory: fall back to linear growth.
-                None => (src.owner, src.ships + src.production * offset),
+                Some(b) => available_at_timeline(b, offset),
+                // No cached trajectory: fall back to linear growth. A purely
+                // growing series has its minimum at `offset`, so the point
+                // value is already the forward-min.
+                None if src.owner == world.player => src.ships + src.production * offset,
+                None => 0,
             }
         } else {
-            // This source also has reinforcements we've planned this turn
-            let tl = world.projected_timeline(src.id, offset, planned, &[]);
-            state_at_timeline(&tl, offset)
+            // This source also has reinforcements we've planned this turn.
+            // Sim the full horizon (not just up to `offset`) so the forward-min
+            // sees every later turn.
+            let tl = world.projected_timeline(
+                src.id,
+                world.timeline_cache.horizon,
+                planned,
+                &[],
+            );
+            available_at_timeline(&tl, offset)
         };
-        if owner != world.player {
-            return 0;
-        }
-        (ships - spent).max(0)
+        (available - spent).max(0)
     }
     fn commit(&mut self, src_id: i64, target_id: i64, ships: i64, arrival_turn: i64, owner: i64) {
         *self.spent.entry(src_id).or_insert(0) += ships;
@@ -816,6 +832,12 @@ fn evaluate_frontline_strategy(
     // on the source and `offset` — not on the subset mask or coordination target
     // — so it's hoisted out of the inner subset scan into this flat row-major
     // table, indexed `[i*stride + d]`.
+    //
+    // The grown fleet is capped at `ships_available_at(offset + d)`: launching
+    // later still can't field more than the source actually owns at the later
+    // turn, so an enemy arrival shrinking the garrison between `offset` and
+    // `offset + d` bounds the growth (matching the forward-min availability
+    // model rather than reintroducing the old point-read assumption).
     let delay_stride = (MAX_COORD_DELAY + A_S_LOOKAHEAD + 1) as usize;
     scratch.delay_table.clear();
     for i in 0..n {
@@ -823,11 +845,17 @@ fn evaluate_frontline_strategy(
             let c = &scratch.candidates[i];
             (c.id, c.ships_max, c.production)
         };
+        let src = *world.planet(cid);
         for d in 0..(delay_stride as i64) {
-            let ships_try = c_ships_max + c_production * d;
-            let entry = model
-                .plan_shot(cid, target.id, ships_try, offset + d)
-                .map(|(a, t, _, _, _)| ((offset + d + t).max(1), a, ships_try));
+            let cap = plan.ships_available_at(world, &src, offset + d);
+            let ships_try = (c_ships_max + c_production * d).min(cap);
+            let entry = if ships_try > 0 {
+                model
+                    .plan_shot(cid, target.id, ships_try, offset + d)
+                    .map(|(a, t, _, _, _)| ((offset + d + t).max(1), a, ships_try))
+            } else {
+                None
+            };
             scratch.delay_table.push(entry);
         }
     }
@@ -1202,7 +1230,7 @@ fn send_reinforcements(
         let Some(target_id) = model.reinforcement_target.get(&p.id).copied() else {
             continue;
         };
-        let available = plan.ships_available(p);
+        let available = plan.ships_available(world, p);
         if available <= 0 {
             continue;
         }
@@ -1245,6 +1273,7 @@ fn send_reinforcements(
             from_id: p.id,
             angle,
             ships,
+            target: target_id,
         });
     }
     out
@@ -1625,6 +1654,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<MoveAction
             from_id: *source_id,
             angle,
             ships: *fleet_size,
+            target: target_planet.id,
         });
     }
     moves
@@ -1808,6 +1838,7 @@ fn run_strategy(
                     from_id: o.src_id,
                     angle: o.angle,
                     ships: o.ships,
+                    target: target_id,
                 });
             }
             if let Some(outs) = model.outbound_edges.get(&o.src_id) {
@@ -1854,6 +1885,103 @@ pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     // cheap and deterministic. Multi-strategy search happens one level up,
     // in `search_candidates`.
     let (moves, _) = run_strategy(world, &model, STRATEGIES[0]);
+    moves
+}
+
+/// Final post-processing applied to the chosen move set *after* any rollout
+/// selection — never inside the rollout itself, so the policy the rollout scores
+/// is untouched. This only rewrites the moves we are about to return, and it is a
+/// strict no-loss reroute: for each launch-this-turn fleet `A → B`, if routing
+/// through an intermediate planet `C` reaches `B` in the same number of turns or
+/// fewer (`A → C → B`, measured via `plan_shot`), we retarget the fleet to `C`.
+/// We re-plan every turn, so the strategy naturally decides what to do with the
+/// ships once they arrive at `C` — no state is carried across turns.
+///
+/// `C` must be projected to be owned by us on the turn the fleet *arrives* there
+/// (so the ships reinforce rather than fight), accounting for the arrivals of
+/// every other move in this same final plan.
+pub fn redirect_moves(world: &WorldState, mut moves: Vec<MoveAction>) -> Vec<MoveAction> {
+    if moves.is_empty() {
+        return moves;
+    }
+    let model = HellburnerModel::build(world);
+    let player = world.player;
+    let horizon = world.timeline_cache.horizon;
+
+    // Direct A→B travel time per move, plus a PlanState capturing every move's
+    // friendly arrival so each candidate C's ownership check sees the full plan.
+    let mut plan = PlanState::default();
+    let mut direct: Vec<Option<i64>> = Vec::with_capacity(moves.len());
+    for mv in &moves {
+        if mv.target < 0 || !model.non_comet_ids.contains(&mv.target) {
+            direct.push(None);
+            continue;
+        }
+        match model.plan_shot(mv.from_id, mv.target, mv.ships, 0) {
+            Some((_, turns_ab, _, _, _)) => {
+                plan.commit(mv.from_id, mv.target, mv.ships, turns_ab, player);
+                direct.push(Some(turns_ab));
+            }
+            None => direct.push(None),
+        }
+    }
+
+    for (i, mv) in moves.iter_mut().enumerate() {
+        let Some(turns_ab) = direct[i] else {
+            continue;
+        };
+        let a = mv.from_id;
+        let b = mv.target;
+        let ships = mv.ships;
+        // (total_turns, ships_c, turns_ac, c_id, angle_ac). Selection order:
+        // minimize total turns; then the one holding the most ships when the fleet
+        // arrives; then prefer the intermediate closest to A (smallest turns_ac);
+        // finally smallest id so the pick stays deterministic regardless
+        // of HashSet iteration order.
+        let mut best: Option<(i64, i64, i64, i64, f64)> = None;
+        for &c in &model.non_comet_ids {
+            if c == a || c == b {
+                continue;
+            }
+            let Some((angle_ac, turns_ac, _, _, _)) = model.plan_shot(a, c, ships, 0) else {
+                continue;
+            };
+            // A→C alone must be shorter than A→B (C→B costs ≥ 1 turn), and the
+            // arrival turn must fall inside the timeline horizon to check it.
+            if turns_ac >= turns_ab || turns_ac < 0 || turns_ac > horizon {
+                continue;
+            }
+            // C must be friendly when the fleet arrives, given the full plan.
+            let tl = target_timeline(world, c, &[], &plan);
+            if tl.owner_at[turns_ac as usize] != player {
+                continue;
+            }
+            // C→B is launched at the arrival turn (offset = turns_ac), so its
+            // geometry/obstacles are evaluated at that future turn.
+            let Some((_, turns_cb, _, _, _)) = model.plan_shot(c, b, ships, turns_ac) else {
+                continue;
+            };
+            let total = turns_ac + turns_cb;
+            if total <= turns_ab {
+                let ships_c = tl.ships_at[turns_ac as usize];
+                // Lexicographic minimize on (total, -ships_c, turns_ac, c): the
+                // negated ship count makes "most ships on arrival" rank first.
+                let take = match best {
+                    None => true,
+                    Some((bt, b_tac, b_ships, bc, _)) => {
+                        (total,-ships_c, turns_ac, c) < (bt, -b_ships, b_tac, bc)
+                    }
+                };
+                if take {
+                    best = Some((total, turns_ac, ships_c, c, angle_ac));
+                }
+            }
+        }
+        if let Some((_, _, _, c, angle_ac)) = best {
+            mv.angle = angle_ac;
+            mv.target = c;
+        }
+    }
     moves
 }
 

@@ -76,6 +76,11 @@ pub struct MoveAction {
     pub from_id: i64,
     pub angle: f64,
     pub ships: i64,
+    /// Destination planet this fleet is aimed at, or `-1` when unknown. The
+    /// engine ignores this field (it spawns fleets from `from_id`/`angle`/`ships`
+    /// only); it carries the intent through to `redirect_moves`, the final
+    /// post-rollout pass that may reroute a fleet through an intermediate ally.
+    pub target: i64,
 }
 
 #[derive(Clone, Copy, Debug)]

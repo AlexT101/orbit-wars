@@ -79,6 +79,11 @@ fn main() -> io::Result<()> {
             Some("mcts") => mcts::best_move(&state, state.player, budget_ms),
             _ => duct::best_move(&state, state.player, budget_ms),
         };
+        // Final no-loss reroute pass on the chosen plan — runs after the planner
+        // has fully committed, independent of MCTS/duct/beam (apollo's
+        // `redirect_moves` tail, ported via the bridge since `Action` tuples
+        // drop the target the pass needs).
+        let actions = alphaow_bot::apollo_bridge::redirect_actions(&state, state.player, actions);
         if prof_enabled {
             profiling::TURN_TOTAL_NS.fetch_add(
                 __turn_t0.elapsed().as_nanos() as u64,
