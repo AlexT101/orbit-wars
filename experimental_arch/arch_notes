@@ -8,22 +8,24 @@ Let ACTIONS_DIM = 2 for encoder geometry tensors:
     action bin 1 is 100%, sending every ship currently on the source planet to
     the selected target.
 
-The policy action space is separate and smaller. For each source row it emits
-one of 45 choices:
-    choice 0: noop.
-    choice 1..44: send 100% of ships to target slot choice - 1.
+The policy action space is separate from the encoder geometry tensor. The
+reference-PPO pipeline uses one categorical:
+    action 0: global noop.
+    action 1 + source_slot * 44 + target_slot: send 100% of ships from source
+        to target.
 
 Launch actions are invalid if there are insufficient ships at the source planet.
 Launch actions are invalid if the source planet is not under ally control.
-The noop action remains valid so each source row can choose to do nothing.
+The global noop action remains valid.
 
 An action (i, j, count) is invalid if the trajectory caused from sending `count` ships from i to j, 
 is not "clean" - i.e. the ships don't arrive at the destination in the future - this could be
 because they intersect with another planet or intersect the sun.
 (I don't see any other reason for obstruction.)
 
-The output action space is therefore (44, 45), one categorical distribution per
-source slot. The policy valid action mask is also (44, 45).
+The copied reference PPO output action space is therefore one categorical with
+1 + 44 * 44 = 1937 logits. `features.discrete_action_mask` builds this from the
+Rust feature `mask[:, :, SEND_ALL_ACTION]` and prepends the global noop.
 
 A planet token (TOKEN_DIM = 11, see features.rs::fill_token):
     * is_mine          (0/1)
@@ -68,6 +70,19 @@ Each frame also contains an asymmetric distances matrix D of dims (44, 44, ACTIO
 where D[i][j][action_idx] is the number of turns required to send the ships from i to j, 
 starting at this frame. Probably we keep this number as a float instead of one hot.
 
+The current PyTorch PPO policy architecture is copied from rl_orbit_wars'
+EntityTransformerPolicy. It encodes current-frame planet tokens and a global
+token, runs a 3-layer / 4-head transformer over `[global, planets...]`, then
+scores source-target pairs with:
+    encoded_src, encoded_tgt, encoded_src - encoded_tgt, encoded_src * encoded_tgt,
+    current-frame dx/dy/dist/inv_dist,
+    globals.
+
+The future-frame tensors remain in the feature dict for experimentation and
+validation, but the closest rl_orbit_wars transformer port consumes first-frame
+geometry in the action head. The original global noop head is preserved; the
+ship-fraction head has length 1 because our only launch action is send-all.
+
 For invalid actions probably just leave this at 0 and let valid action mask handle it.
 So this is looking like (NUM_FRAMES, 44, 44, ACTIONS_DIM).
 
@@ -108,6 +123,10 @@ reshape each with its paired `*_shape`. The rest are plain Python objects.
     reachable_mask uint8, flat          reshape (4, 44, 44, 2) 1 = clean launch reaches target
     reachable_mask_shape tuple (4, 44, 44, 2)
 
-Python training converts `mask` into `valid_actions_mask` with shape (44, 45):
-    valid_actions_mask[:, 0]    is the per-source noop.
-    valid_actions_mask[:, 1:]   is the all-in target legality matrix.
+Python training converts `mask` into a flat discrete mask with shape (1937,):
+    action_mask[0]    is global noop.
+    action_mask[1:]   is the all-in source-target legality matrix flattened as
+                      source-major `(44, 44)`.
+
+The legacy SB3 helper path can still build `valid_actions_mask` with shape
+(44, 46), but it is not used by `train/train.py`.

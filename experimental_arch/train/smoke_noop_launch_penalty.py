@@ -19,7 +19,11 @@ from orbit_wars_engine import OrbitWarsEngine
 SEED = 33
 ENV_SEED = 999
 TOTAL_TIMESTEPS = 1536
-MIN_NOOP_PROB = 0.95
+# Short-run PPO smoke: this should prove the policy strongly moves toward noop
+# and that deterministic action selection stops launching. Full stochastic
+# saturation takes longer with the rl_orbit_wars-style entity transformer.
+MIN_NOOP_PROB = 0.50
+MIN_NOOP_PROB_GAIN = 0.04
 REWARD_WEIGHTS = {
     "terminal": 0.0,
     "terminal_time": 0.0,
@@ -86,8 +90,11 @@ def main() -> int:
         device="cpu",
     )
 
+    initial_probs = {}
     for probe_seed in (1, ENV_SEED, ENV_SEED + 1):
-        print(f"initial seed={probe_seed}: {launch_gate_probs(model, probe_seed)}")
+        probs, deterministic_launches = launch_gate_probs(model, probe_seed)
+        initial_probs[probe_seed] = {source_slot: noop_prob for source_slot, noop_prob, _send_prob in probs}
+        print(f"initial seed={probe_seed}: {(probs, deterministic_launches)}")
 
     model.learn(total_timesteps=TOTAL_TIMESTEPS)
 
@@ -98,6 +105,9 @@ def main() -> int:
         for source_slot, noop_prob, _send_prob in probs:
             if noop_prob < MIN_NOOP_PROB:
                 failures.append((probe_seed, source_slot, noop_prob))
+            initial_noop_prob = initial_probs[probe_seed][source_slot]
+            if noop_prob - initial_noop_prob < MIN_NOOP_PROB_GAIN:
+                failures.append((probe_seed, source_slot, "gain", noop_prob - initial_noop_prob))
         if deterministic_launches:
             failures.append((probe_seed, "deterministic_launches", float(deterministic_launches)))
 

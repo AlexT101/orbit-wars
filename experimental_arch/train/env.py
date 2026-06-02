@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,7 @@ import numpy as np
 from orbit_wars_engine import OrbitWarsEngine
 
 from features import action_space, decode_action, encode_features, flat_action_mask, observation_space
-from opponents import BotOpponent, ModelOpponent, Opponent
+from opponents import BotOpponent, ModelOpponent, Opponent, get_opponent
 
 
 def scores_from_obs(obs: dict[str, Any], num_players: int = 2) -> list[int]:
@@ -23,6 +24,128 @@ def scores_from_obs(obs: dict[str, Any], num_players: int = 2) -> list[int]:
         if 0 <= owner < num_players:
             scores[owner] += int(fleet[6])
     return scores
+
+
+@dataclass(frozen=True)
+class RewardWeights:
+    mode: str = "engine"
+    terminal: float = 1.0
+    terminal_time: float = 1.0
+    production_income: float = 0.0002
+    launch_penalty: float = -0.00004
+
+    def as_engine_dict(self) -> dict[str, float]:
+        if self.mode == "terminal":
+            return {
+                "terminal": self.terminal,
+                "terminal_time": 0.0,
+                "production_income": 0.0,
+                "launch_penalty": 0.0,
+            }
+        if self.mode in {"engine", "default", "shaped"}:
+            return {
+                "terminal": self.terminal,
+                "terminal_time": self.terminal_time,
+                "production_income": self.production_income,
+                "launch_penalty": self.launch_penalty,
+            }
+        raise ValueError(f"unknown reward mode: {self.mode!r}")
+
+
+@dataclass
+class StepResult:
+    obs: dict[str, Any]
+    reward: float
+    done: bool
+    info: dict[str, Any]
+
+
+class OrbitWarsDuelEnv:
+    """Reference-style two-player training wrapper backed by OrbitWarsEngine."""
+
+    def __init__(
+        self,
+        seed: int | None = None,
+        opponent: str | Opponent = "nearest",
+        reward_weights: RewardWeights | None = None,
+    ) -> None:
+        self.seed = seed
+        self.reward_weights = reward_weights or RewardWeights()
+        self.opponent = get_opponent(opponent)
+        self.engine = OrbitWarsEngine(
+            num_players=2,
+            reward_weights=self.reward_weights.as_engine_dict(),
+        )
+        self.player = 0
+        self.turn = 0
+        self.obs_pair: list[dict[str, Any]] | None = None
+
+    def _obs_for_player(self, player: int) -> dict[str, Any]:
+        assert self.obs_pair is not None, "call reset() first"
+        obs = dict(self.obs_pair[player])
+        obs.setdefault("player", player)
+        obs.setdefault("step", self.turn)
+        return obs
+
+    def reset(self, seed: int | None = None) -> dict[str, Any]:
+        if seed is not None:
+            self.seed = seed
+        if self.seed is None:
+            self.seed = int(np.random.randint(1, 2**31 - 1))
+        if hasattr(self.opponent, "reset"):
+            self.opponent.reset()
+        self.obs_pair = self.engine.reset(int(self.seed))["observations"]
+        self.turn = 0
+        return self._obs_for_player(self.player)
+
+    def current_obs(self) -> dict[str, Any]:
+        return self._obs_for_player(self.player)
+
+    def encoded(self):
+        from features import encode_obs
+
+        return encode_obs(self.current_obs(), player=self.player)
+
+    def _opponent_moves(self, obs: dict[str, Any]) -> list[list[float]]:
+        if hasattr(self.opponent, "act"):
+            return self.opponent.act(obs)
+        return self.opponent(obs)
+
+    def step(self, action_index: int) -> StepResult:
+        from features import decode_move
+
+        return self.step_moves(decode_move(self._obs_for_player(self.player), action_index))
+
+    def step_moves(self, my_moves: list[list[float]]) -> StepResult:
+        assert self.obs_pair is not None, "call reset() first"
+        opponent_player = 1 - self.player
+        actions = [[] for _ in range(2)]
+        actions[self.player] = my_moves
+        actions[opponent_player] = self._opponent_moves(self._obs_for_player(opponent_player))
+        out = self.engine.step(actions)
+        self.obs_pair = out["observations"]
+        self.turn += 1
+
+        next_obs = self._obs_for_player(self.player)
+        scores = scores_from_obs(next_obs, num_players=2)
+        components = {
+            name: float(values[self.player])
+            for name, values in (out.get("reward_components") or {}).items()
+        }
+        return StepResult(
+            obs=next_obs,
+            reward=float(out["reward"][self.player]),
+            done=bool(out["done"]),
+            info={
+                "seed": self.seed,
+                "raw_rewards": [float(x) for x in scores],
+                "reward_components": components,
+                "stats": {
+                    "own_score": float(scores[self.player]),
+                    "enemy_score": float(scores[opponent_player]),
+                },
+            },
+        )
 
 
 class OrbitWarsEnv(gym.Env):

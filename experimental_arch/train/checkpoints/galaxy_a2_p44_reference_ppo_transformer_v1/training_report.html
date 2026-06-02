@@ -1,0 +1,367 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="5">
+  <title>Orbit Wars RL Training</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 28px; background: #f7f7f4; color: #202124; }
+    header { display: flex; justify-content: space-between; align-items: baseline; gap: 24px; border-bottom: 1px solid #d8d8d0; padding-bottom: 14px; }
+    h1 { margin: 0; font-size: 24px; }
+    h2 { font-size: 15px; margin: 0 0 8px; }
+    .subtle { color: #5f6368; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 18px; margin-top: 18px; }
+    .chart, .panel { background: #ffffff; border: 1px solid #d8d8d0; border-radius: 8px; padding: 14px; }
+    svg { width: 100%; height: 260px; display: block; background: #fbfbf8; border-radius: 6px; }
+    .axis { stroke: #b8b8ad; stroke-width: 1; }
+    .gridline { stroke: #e4e4dc; stroke-width: 1; }
+    .marker { stroke: #111827; stroke-width: 1.5; stroke-dasharray: 5 5; opacity: 0.7; }
+    .marker-label { fill: #111827; font-size: 10px; }
+    .tick { fill: #74766f; font-size: 10px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 12px; color: #3c4043; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 999px; margin-right: 5px; vertical-align: -1px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #ecece5; }
+    th { color: #5f6368; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Orbit Wars RL Training</h1>
+      <div class="subtle">Auto-refreshes every 5 seconds from /home/sunrise/orbitwars/pantheow/experimental_arch/train/checkpoints/galaxy_a2_p44_reference_ppo_transformer_v1</div>
+    </div>
+    <div class="subtle">step 25600 · hellburner 0.0% · heuristic 0.0% · nearest 6.2% · noop 81.2% · random 31.2% · self 40.6% · snapshot_sample 0.0%</div>
+  </header>
+  <p class="subtle">No BC log yet.</p>
+  <main class="grid">
+    <section class="chart">
+<h2>BC Pretrain Loss</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">0.0000</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.2500</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">0.5000</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">0.7500</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">1.000</text>
+</svg>
+<div class="legend"></div>
+</section>
+    <section class="chart">
+<h2>BC Pretrain Accuracy</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">0.0000</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.2500</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">0.5000</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">0.7500</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">1.000</text>
+</svg>
+<div class="legend"></div>
+</section>
+    <section class="chart">
+<h2>Return</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">-2.161</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">-1.763</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">-1.365</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">-0.9672</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">-0.5693</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">34304</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="70.2,208.3 80.4,202.0 90.5,185.5 100.7,178.3 110.9,172.3 121.1,152.1 131.3,136.0 141.4,129.9 151.6,116.8 161.8,105.9 172.0,100.9 182.1,95.7 192.3,86.6 202.5,83.9 212.7,81.0 222.9,81.3 233.0,78.2 243.2,74.8 253.4,68.2 263.6,61.5 273.8,56.7 283.9,53.8 294.1,50.3 304.3,56.2 314.5,58.0 324.7,61.0 334.8,60.4 345.0,64.9 355.2,62.9 365.4,64.2 375.6,62.4 385.7,64.3 395.9,67.7 406.1,70.5 416.3,76.8 426.4,82.1 436.6,88.1 446.8,89.9 457.0,98.0 467.2,102.3 477.3,107.7 487.5,113.7 497.7,116.4 507.9,113.6 518.1,111.4 528.2,103.2 538.4,97.1 548.6,91.5 558.8,84.8 569.0,75.6 579.1,75.1 589.3,70.5 599.5,67.5 609.7,65.0 619.9,60.5 630.0,51.7 640.2,43.9 650.4,41.7 660.6,39.8 670.7,37.7 680.9,38.9 691.1,40.2 701.3,42.7 711.5,45.8 721.6,57.0 731.8,65.1 742.0,68.9" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>mean_return_25: -0.9300</span></div>
+</section>
+    <section class="chart">
+<h2>Reward Mean</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">-0.0085</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">-0.0065</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">-0.0045</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">-0.0024</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">-0.0004</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">34304</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="70.2,208.3 80.4,197.1 90.5,169.2 100.7,156.4 110.9,178.4 121.1,132.3 131.3,139.9 141.4,136.0 151.6,109.4 161.8,96.0 172.0,82.5 182.1,93.5 192.3,54.0 202.5,90.1 212.7,88.8 222.9,79.2 233.0,97.4 243.2,83.0 253.4,75.7 263.6,69.0 273.8,91.6 283.9,84.1 294.1,62.0 304.3,92.6 314.5,63.4 324.7,103.8 334.8,101.5 345.0,85.9 355.2,81.9 365.4,74.2 375.6,101.2 385.7,85.5 395.9,99.4 406.1,80.0 416.3,114.6 426.4,130.1 436.6,130.8 446.8,147.1 457.0,145.4 467.2,143.1 477.3,152.0 487.5,148.1 497.7,113.4 507.9,112.0 518.1,105.9 528.2,75.7 538.4,73.2 548.6,53.4 558.8,66.3 569.0,49.6 579.1,86.8 589.3,79.8 599.5,97.4 609.7,101.3 619.9,62.2 630.0,90.2 640.2,76.5 650.4,89.0 660.6,68.4 670.7,38.0 680.9,37.7 691.1,58.0 701.3,104.4 711.5,98.2 721.6,113.6 731.8,111.5 742.0,94.7" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>reward_mean: -0.0033</span></div>
+</section>
+    <section class="chart">
+<h2>Entropy</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">-0.3429</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.9002</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">2.143</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">3.386</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">4.629</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">34304</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="70.2,107.9 80.4,85.6 90.5,85.5 100.7,74.4 110.9,83.2 121.1,64.4 131.3,72.4 141.4,66.5 151.6,65.7 161.8,62.0 172.0,63.4 182.1,60.4 192.3,49.3 202.5,60.1 212.7,53.8 222.9,58.5 233.0,61.6 243.2,60.9 253.4,44.9 263.6,44.8 273.8,52.2 283.9,45.2 294.1,45.2 304.3,68.3 314.5,56.8 324.7,68.9 334.8,55.3 345.0,61.1 355.2,44.5 365.4,47.6 375.6,42.9 385.7,61.4 395.9,60.8 406.1,64.9 416.3,73.1 426.4,62.2 436.6,58.0 446.8,71.0 457.0,77.4 467.2,78.3 477.3,77.5 487.5,77.9 497.7,64.7 507.9,63.1 518.1,55.2 528.2,45.8 538.4,59.2 548.6,56.8 558.8,60.4 569.0,55.7 579.1,70.0 589.3,54.4 599.5,71.9 609.7,59.1 619.9,55.7 630.0,61.1 640.2,50.7 650.4,37.7 660.6,38.1 670.7,40.0 680.9,37.7 691.1,60.5 701.3,80.5 711.5,87.3 721.6,114.3 731.8,100.8 742.0,74.8" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,203.5 80.4,204.1 90.5,203.5 100.7,204.0 110.9,203.9 121.1,204.2 131.3,204.1 141.4,204.8 151.6,205.0 161.8,204.9 172.0,205.1 182.1,205.6 192.3,205.7 202.5,205.5 212.7,206.2 222.9,206.0 233.0,205.9 243.2,206.0 253.4,206.5 263.6,206.6 273.8,206.8 283.9,207.0 294.1,207.1 304.3,206.8 314.5,206.8 324.7,206.6 334.8,206.6 345.0,206.2 355.2,206.2 365.4,206.2 375.6,206.1 385.7,205.4 395.9,205.5 406.1,205.3 416.3,205.1 426.4,205.4 436.6,205.6 446.8,205.0 457.0,204.8 467.2,204.6 477.3,204.3 487.5,204.2 497.7,203.9 507.9,203.1 518.1,202.9 528.2,202.9 538.4,202.4 548.6,203.2 558.8,203.8 569.0,204.3 579.1,204.7 589.3,205.6 599.5,205.0 609.7,205.5 619.9,205.6 630.0,205.5 640.2,205.7 650.4,206.2 660.6,206.2 670.7,206.2 680.9,206.3 691.1,205.9 701.3,205.9 711.5,206.0 721.6,205.8 731.8,206.2 742.0,206.6" fill="none" stroke="#27ae60" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,185.6 80.4,173.4 90.5,176.7 100.7,167.6 110.9,172.2 121.1,160.3 131.3,166.5 141.4,159.7 151.6,158.6 161.8,157.2 172.0,158.1 182.1,154.1 192.3,146.2 202.5,154.1 212.7,149.7 222.9,152.0 233.0,152.5 243.2,152.8 253.4,141.0 263.6,139.7 273.8,144.9 283.9,141.2 294.1,140.9 304.3,157.4 314.5,150.6 324.7,156.6 334.8,147.3 345.0,151.5 355.2,141.1 365.4,143.0 375.6,141.8 385.7,154.7 395.9,153.1 406.1,156.8 416.3,163.1 426.4,155.1 436.6,152.3 446.8,163.4 457.0,167.5 467.2,165.6 477.3,165.8 487.5,164.7 497.7,155.6 507.9,153.9 518.1,148.7 528.2,142.5 538.4,151.1 548.6,147.0 558.8,148.7 569.0,146.2 579.1,155.2 589.3,144.5 599.5,157.7 609.7,148.0 619.9,146.1 630.0,150.1 640.2,146.3 650.4,137.6 660.6,139.7 670.7,140.7 680.9,139.3 691.1,152.6 701.3,165.1 711.5,168.9 721.6,187.6 731.8,178.7 742.0,161.3" fill="none" stroke="#eb5757" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,124.6 80.4,109.8 90.5,107.3 100.7,104.0 110.9,110.0 121.1,101.3 131.3,105.3 141.4,105.7 151.6,106.3 161.8,104.0 172.0,103.7 182.1,103.7 192.3,98.7 202.5,102.6 212.7,98.2 222.9,102.3 233.0,105.4 243.2,104.2 253.4,98.1 263.6,100.5 273.8,102.9 283.9,98.7 294.1,98.7 304.3,108.3 314.5,102.3 324.7,109.9 334.8,104.5 345.0,107.0 355.2,98.6 365.4,99.5 375.6,95.6 385.7,103.6 395.9,105.3 406.1,106.5 416.3,109.2 426.4,104.9 436.6,102.6 446.8,105.6 457.0,108.6 467.2,111.9 477.3,111.0 487.5,112.4 497.7,107.5 507.9,107.5 518.1,103.4 528.2,99.5 538.4,105.6 548.6,106.9 558.8,109.1 569.0,107.2 579.1,113.5 589.3,106.4 599.5,112.4 609.7,107.7 619.9,106.3 630.0,108.3 640.2,100.2 650.4,94.6 660.6,93.3 670.7,94.2 680.9,93.0 691.1,105.8 701.3,115.5 711.5,118.1 721.6,129.7 731.8,123.9 742.0,113.3" fill="none" stroke="#9b51e0" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,208.3 80.4,208.3 90.5,208.3 100.7,208.3 110.9,208.3 121.1,208.3 131.3,208.3 141.4,208.3 151.6,208.3 161.8,208.3 172.0,208.3 182.1,208.3 192.3,208.3 202.5,208.3 212.7,208.3 222.9,208.3 233.0,208.3 243.2,208.3 253.4,208.3 263.6,208.3 273.8,208.3 283.9,208.3 294.1,208.3 304.3,208.3 314.5,208.3 324.7,208.3 334.8,208.3 345.0,208.3 355.2,208.3 365.4,208.3 375.6,208.3 385.7,208.3 395.9,208.3 406.1,208.3 416.3,208.3 426.4,208.3 436.6,208.3 446.8,208.3 457.0,208.3 467.2,208.3 477.3,208.3 487.5,208.3 497.7,208.3 507.9,208.3 518.1,208.3 528.2,208.3 538.4,208.3 548.6,208.3 558.8,208.3 569.0,208.3 579.1,208.3 589.3,208.3 599.5,208.3 609.7,208.3 619.9,208.3 630.0,208.3 640.2,208.3 650.4,208.3 660.6,208.3 670.7,208.3 680.9,208.3 691.1,208.3 701.3,208.3 711.5,208.3 721.6,208.3 731.8,208.3 742.0,208.3" fill="none" stroke="#f2994a" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,206.4 80.4,206.4 90.5,206.4 100.7,206.4 110.9,206.4 121.1,206.4 131.3,206.4 141.4,206.4 151.6,206.4 161.8,206.4 172.0,206.4 182.1,206.4 192.3,206.4 202.5,206.5 212.7,206.5 222.9,206.5 233.0,206.5 243.2,206.5 253.4,206.5 263.6,206.5 273.8,206.5 283.9,206.5 294.1,206.5 304.3,206.5 314.5,206.5 324.7,206.5 334.8,206.6 345.0,206.6 355.2,206.6 365.4,206.6 375.6,206.6 385.7,206.6 395.9,206.6 406.1,206.6 416.3,206.6 426.4,206.6 436.6,206.6 446.8,206.6 457.0,206.7 467.2,206.7 477.3,206.7 487.5,206.7 497.7,206.7 507.9,206.7 518.1,206.7 528.2,206.7 538.4,206.7 548.6,206.7 558.8,206.7 569.0,206.7 579.1,206.8 589.3,206.8 599.5,206.8 609.7,206.8 619.9,206.8 630.0,206.8 640.2,206.8 650.4,206.8 660.6,206.8 670.7,206.8 680.9,206.8 691.1,206.8 701.3,206.9 711.5,206.9 721.6,206.9 731.8,206.9 742.0,206.9" fill="none" stroke="#00a3a3" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>entropy: 3.353</span><span><i style="background:#27ae60"></i>entropy_launch: 0.0426</span><span><i style="background:#eb5757"></i>entropy_source: 1.181</span><span><i style="background:#9b51e0"></i>entropy_target: 2.387</span><span><i style="background:#f2994a"></i>entropy_send: 0.0000</span><span><i style="background:#00a3a3"></i>ent_coef: 0.0367</span></div>
+</section>
+    <section class="chart">
+<h2>PPO Stability</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">-0.0500</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.2125</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">0.4750</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">0.7375</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">1.000</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">34304</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="70.2,212.6 80.4,212.6 90.5,212.6 100.7,212.6 110.9,212.6 121.1,212.6 131.3,212.6 141.4,212.6 151.6,212.6 161.8,212.6 172.0,212.6 182.1,212.6 192.3,212.6 202.5,212.6 212.7,212.6 222.9,212.6 233.0,212.6 243.2,212.6 253.4,212.6 263.6,212.6 273.8,212.5 283.9,212.5 294.1,212.5 304.3,212.5 314.5,212.2 324.7,211.5 334.8,211.4 345.0,211.4 355.2,211.4 365.4,211.7 375.6,212.4 385.7,211.8 395.9,211.8 406.1,211.8 416.3,211.8 426.4,211.8 436.6,212.6 446.8,212.6 457.0,212.6 467.2,212.4 477.3,212.3 487.5,212.3 497.7,212.3 507.9,212.3 518.1,212.4 528.2,212.6 538.4,212.0 548.6,211.6 558.8,211.6 569.0,211.6 579.1,211.6 589.3,212.2 599.5,212.6 609.7,212.6 619.9,212.6 630.0,212.6 640.2,212.6 650.4,212.6 660.6,212.6 670.7,212.6 680.9,212.6 691.1,212.6 701.3,212.6 711.5,212.6 721.6,212.6 731.8,212.6 742.0,212.6" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,212.6 80.4,212.6 90.5,212.6 100.7,212.6 110.9,212.6 121.1,212.6 131.3,212.6 141.4,212.6 151.6,212.6 161.8,212.5 172.0,212.5 182.1,212.5 192.3,212.5 202.5,212.5 212.7,212.6 222.9,212.6 233.0,212.5 243.2,212.5 253.4,212.5 263.6,212.5 273.8,212.5 283.9,212.6 294.1,212.6 304.3,212.6 314.5,212.5 324.7,212.5 334.8,212.5 345.0,212.5 355.2,212.5 365.4,212.5 375.6,212.5 385.7,212.5 395.9,212.5 406.1,212.5 416.3,212.5 426.4,212.5 436.6,212.5 446.8,212.5 457.0,212.5 467.2,212.5 477.3,212.5 487.5,212.5 497.7,212.5 507.9,212.5 518.1,212.5 528.2,212.5 538.4,212.5 548.6,212.5 558.8,212.5 569.0,212.5 579.1,212.5 589.3,212.5 599.5,212.5 609.7,212.6 619.9,212.6 630.0,212.6 640.2,212.6 650.4,212.6 660.6,212.6 670.7,212.6 680.9,212.6 691.1,212.5 701.3,212.5 711.5,212.5 721.6,212.5 731.8,212.5 742.0,212.6" fill="none" stroke="#27ae60" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,252.6 80.4,218.5 90.5,210.1 100.7,186.5 110.9,169.5 121.1,147.1 131.3,116.8 141.4,86.1 151.6,69.7 161.8,59.5 172.0,40.0 182.1,41.2 192.3,42.9 202.5,44.7 212.7,41.7 222.9,38.8 233.0,37.2 243.2,44.8 253.4,41.8 263.6,41.4 273.8,41.3 283.9,40.9 294.1,31.8 304.3,36.6 314.5,35.5 324.7,36.6 334.8,38.1 345.0,40.4 355.2,36.5 365.4,49.5 375.6,49.3 385.7,47.7 395.9,42.9 406.1,45.8 416.3,34.8 426.4,34.3 436.6,34.7 446.8,39.1 457.0,39.8 467.2,37.8 477.3,37.1 487.5,36.4 497.7,32.1 507.9,30.9 518.1,34.0 528.2,41.1 538.4,44.4 548.6,44.7 558.8,41.9 569.0,39.5 579.1,35.4 589.3,33.3 599.5,33.5 609.7,32.9 619.9,33.2 630.0,32.5 640.2,31.6 650.4,31.4 660.6,31.5 670.7,31.2 680.9,30.6 691.1,40.1 701.3,41.0 711.5,47.5 721.6,47.9 731.8,47.3 742.0,42.1" fill="none" stroke="#eb5757" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>clip_frac: 0.0000</span><span><i style="background:#27ae60"></i>approx_kl: 0.0001</span><span><i style="background:#eb5757"></i>explained_var: 0.9039</span></div>
+</section>
+    <section class="chart">
+<h2>Action Rates</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">0.0000</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.2500</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">0.5000</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">0.7500</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">1.000</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">34304</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="70.2,160.9 80.4,177.7 90.5,182.4 100.7,186.4 110.9,179.2 121.1,190.6 131.3,186.1 141.4,185.7 151.6,185.3 161.8,192.8 172.0,192.9 182.1,192.3 192.3,198.6 202.5,194.2 212.7,192.9 222.9,189.4 233.0,187.2 243.2,187.0 253.4,192.4 263.6,193.9 273.8,190.4 283.9,194.9 294.1,195.0 304.3,185.6 314.5,192.0 324.7,181.6 334.8,189.7 345.0,189.4 355.2,198.3 365.4,197.9 375.6,203.7 385.7,194.7 395.9,190.5 406.1,188.7 416.3,182.3 426.4,187.3 436.6,190.1 446.8,187.1 457.0,183.1 467.2,181.2 477.3,182.0 487.5,177.3 497.7,183.5 507.9,184.6 518.1,190.9 528.2,195.9 538.4,187.0 548.6,185.3 558.8,181.9 569.0,184.3 579.1,174.0 589.3,186.3 599.5,180.0 609.7,185.3 619.9,185.0 630.0,183.5 640.2,191.4 650.4,196.5 660.6,198.9 670.7,199.0 680.9,202.8 691.1,189.7 701.3,179.1 711.5,177.2 721.6,162.9 731.8,167.8 742.0,180.9" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,85.1 80.4,68.3 90.5,63.6 100.7,59.6 110.9,66.8 121.1,55.4 131.3,59.9 141.4,60.3 151.6,60.7 161.8,53.2 172.0,53.1 182.1,53.7 192.3,47.4 202.5,51.8 212.7,53.1 222.9,56.6 233.0,58.8 243.2,59.0 253.4,53.6 263.6,52.1 273.8,55.6 283.9,51.1 294.1,51.0 304.3,60.4 314.5,54.0 324.7,64.4 334.8,56.3 345.0,56.6 355.2,47.7 365.4,48.1 375.6,42.3 385.7,51.3 395.9,55.5 406.1,57.3 416.3,63.7 426.4,58.7 436.6,55.9 446.8,58.9 457.0,62.9 467.2,64.8 477.3,64.0 487.5,68.7 497.7,62.5 507.9,61.4 518.1,55.1 528.2,50.1 538.4,59.0 548.6,60.7 558.8,64.1 569.0,61.7 579.1,72.0 589.3,59.7 599.5,66.0 609.7,60.7 619.9,61.0 630.0,62.5 640.2,54.6 650.4,49.5 660.6,47.1 670.7,47.0 680.9,43.2 691.1,56.3 701.3,66.9 711.5,68.8 721.6,83.1 731.8,78.2 742.0,65.1" fill="none" stroke="#27ae60" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>noop_rate: 0.2074</span><span><i style="background:#27ae60"></i>launch_rate: 0.7926</span></div>
+</section>
+    <section class="chart">
+<h2>Average Send Bin</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">0.0000</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.7500</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">1.500</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">2.250</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">3.000</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">34304</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="70.2,222.0 80.4,222.0 90.5,222.0 100.7,222.0 110.9,222.0 121.1,222.0 131.3,222.0 141.4,222.0 151.6,222.0 161.8,222.0 172.0,222.0 182.1,222.0 192.3,222.0 202.5,222.0 212.7,222.0 222.9,222.0 233.0,222.0 243.2,222.0 253.4,222.0 263.6,222.0 273.8,222.0 283.9,222.0 294.1,222.0 304.3,222.0 314.5,222.0 324.7,222.0 334.8,222.0 345.0,222.0 355.2,222.0 365.4,222.0 375.6,222.0 385.7,222.0 395.9,222.0 406.1,222.0 416.3,222.0 426.4,222.0 436.6,222.0 446.8,222.0 457.0,222.0 467.2,222.0 477.3,222.0 487.5,222.0 497.7,222.0 507.9,222.0 518.1,222.0 528.2,222.0 538.4,222.0 548.6,222.0 558.8,222.0 569.0,222.0 579.1,222.0 589.3,222.0 599.5,222.0 609.7,222.0 619.9,222.0 630.0,222.0 640.2,222.0 650.4,222.0 660.6,222.0 670.7,222.0 680.9,222.0 691.1,222.0 701.3,222.0 711.5,222.0 721.6,222.0 731.8,222.0 742.0,222.0" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>avg_send_bin: 0.0000</span></div>
+</section>
+    <section class="chart">
+<h2>Evaluation Win Rate</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">0.0000</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.2500</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">0.5000</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">0.7500</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">1.000</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">25600</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="401.0,222.0 742.0,222.0" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="222.0" r="3.2" fill="#2f80ed"></circle>
+<circle cx="742.0" cy="222.0" r="3.2" fill="#2f80ed"></circle>
+<polyline points="401.0,222.0 742.0,222.0" fill="none" stroke="#27ae60" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="222.0" r="3.2" fill="#27ae60"></circle>
+<circle cx="742.0" cy="222.0" r="3.2" fill="#27ae60"></circle>
+<polyline points="401.0,203.4 742.0,209.6" fill="none" stroke="#eb5757" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="203.4" r="3.2" fill="#eb5757"></circle>
+<circle cx="742.0" cy="209.6" r="3.2" fill="#eb5757"></circle>
+<polyline points="401.0,24.0 742.0,61.1" fill="none" stroke="#9b51e0" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="24.0" r="3.2" fill="#9b51e0"></circle>
+<circle cx="742.0" cy="61.1" r="3.2" fill="#9b51e0"></circle>
+<polyline points="401.0,116.8 742.0,160.1" fill="none" stroke="#f2994a" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="116.8" r="3.2" fill="#f2994a"></circle>
+<circle cx="742.0" cy="160.1" r="3.2" fill="#f2994a"></circle>
+<polyline points="401.0,141.6 742.0,141.6" fill="none" stroke="#00a3a3" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="141.6" r="3.2" fill="#00a3a3"></circle>
+<circle cx="742.0" cy="141.6" r="3.2" fill="#00a3a3"></circle>
+<polyline points="401.0,215.8 742.0,222.0" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="215.8" r="3.2" fill="#2f80ed"></circle>
+<circle cx="742.0" cy="222.0" r="3.2" fill="#2f80ed"></circle>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>win_rate_hellburner: 0.0000</span><span><i style="background:#27ae60"></i>win_rate_heuristic: 0.0000</span><span><i style="background:#eb5757"></i>win_rate_nearest: 0.0625</span><span><i style="background:#9b51e0"></i>win_rate_noop: 0.8125</span><span><i style="background:#f2994a"></i>win_rate_random: 0.3125</span><span><i style="background:#00a3a3"></i>win_rate_self: 0.4062</span><span><i style="background:#2f80ed"></i>win_rate_snapshot_sample: 0.0000</span></div>
+</section>
+    <section class="chart">
+<h2>Evaluation Aggregate</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">0.0000</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">0.2500</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">0.5000</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">0.7500</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">1.000</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">25600</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="401.0,163.7 742.0,176.9" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="163.7" r="3.2" fill="#2f80ed"></circle>
+<circle cx="742.0" cy="176.9" r="3.2" fill="#2f80ed"></circle>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>eval_score: 0.2277</span></div>
+</section>
+    <section class="chart">
+<h2>Evaluation Margin</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">-13082</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">-8439</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">-3796</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">846.53</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">5489</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">25600</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="401.0,135.4 742.0,127.7" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="135.4" r="3.2" fill="#2f80ed"></circle>
+<circle cx="742.0" cy="127.7" r="3.2" fill="#2f80ed"></circle>
+<polyline points="401.0,116.5 742.0,110.7" fill="none" stroke="#27ae60" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="116.5" r="3.2" fill="#27ae60"></circle>
+<circle cx="742.0" cy="110.7" r="3.2" fill="#27ae60"></circle>
+<polyline points="401.0,115.4 742.0,120.9" fill="none" stroke="#eb5757" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="115.4" r="3.2" fill="#eb5757"></circle>
+<circle cx="742.0" cy="120.9" r="3.2" fill="#eb5757"></circle>
+<polyline points="401.0,37.7 742.0,73.5" fill="none" stroke="#9b51e0" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="37.7" r="3.2" fill="#9b51e0"></circle>
+<circle cx="742.0" cy="73.5" r="3.2" fill="#9b51e0"></circle>
+<polyline points="401.0,81.9 742.0,117.3" fill="none" stroke="#f2994a" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="81.9" r="3.2" fill="#f2994a"></circle>
+<circle cx="742.0" cy="117.3" r="3.2" fill="#f2994a"></circle>
+<polyline points="401.0,95.1 742.0,81.6" fill="none" stroke="#00a3a3" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="95.1" r="3.2" fill="#00a3a3"></circle>
+<circle cx="742.0" cy="81.6" r="3.2" fill="#00a3a3"></circle>
+<polyline points="401.0,208.3 742.0,202.2" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<circle cx="401.0" cy="208.3" r="3.2" fill="#2f80ed"></circle>
+<circle cx="742.0" cy="202.2" r="3.2" fill="#2f80ed"></circle>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>avg_margin_hellburner: -4235</span><span><i style="background:#27ae60"></i>avg_margin_heuristic: -2641</span><span><i style="background:#eb5757"></i>avg_margin_nearest: -3596</span><span><i style="background:#9b51e0"></i>avg_margin_noop: 846.62</span><span><i style="background:#f2994a"></i>avg_margin_random: -3261</span><span><i style="background:#00a3a3"></i>avg_margin_self: 86.56</span><span><i style="background:#2f80ed"></i>avg_margin_snapshot_sample: -11226</span></div>
+</section>
+    <section class="chart">
+<h2>Reward Components</h2>
+<svg viewBox="0 0 760 260" role="img">
+<line class="axis" x1="60" y1="222" x2="742" y2="222"></line>
+<line class="axis" x1="60" y1="24" x2="60" y2="222"></line>
+<line class="gridline" x1="60" y1="222.0" x2="742" y2="222.0"></line>
+<text class="tick" x="52" y="226.0" text-anchor="end">-0.0048</text>
+<line class="gridline" x1="60" y1="172.5" x2="742" y2="172.5"></line>
+<text class="tick" x="52" y="176.5" text-anchor="end">-0.0034</text>
+<line class="gridline" x1="60" y1="123.0" x2="742" y2="123.0"></line>
+<text class="tick" x="52" y="127.0" text-anchor="end">-0.0020</text>
+<line class="gridline" x1="60" y1="73.5" x2="742" y2="73.5"></line>
+<text class="tick" x="52" y="77.5" text-anchor="end">-0.0005</text>
+<line class="gridline" x1="60" y1="24.0" x2="742" y2="24.0"></line>
+<text class="tick" x="52" y="28.0" text-anchor="end">0.0009</text>
+<text class="tick" x="60" y="248" text-anchor="middle">0</text>
+<text class="tick" x="742" y="248" text-anchor="middle">34304</text>
+<line class="marker" x1="60.0" y1="24" x2="60.0" y2="222"></line>
+<text class="marker-label" x="65.0" y="36" transform="rotate(90 65.0,36)">PPO start</text>
+<polyline points="70.2,123.1 80.4,105.9 90.5,100.1 100.7,97.2 110.9,112.1 121.1,96.7 131.3,100.5 141.4,99.0 151.6,90.1 161.8,90.1 172.0,82.5 182.1,87.4 192.3,69.7 202.5,82.6 212.7,78.3 222.9,78.3 233.0,83.2 243.2,76.3 253.4,75.4 263.6,74.8 273.8,81.9 283.9,81.9 294.1,74.2 304.3,82.8 314.5,73.9 324.7,89.3 334.8,89.4 345.0,79.0 355.2,79.2 365.4,74.1 375.6,88.6 385.7,84.2 395.9,88.6 406.1,80.0 416.3,92.6 426.4,103.0 436.6,100.6 446.8,105.7 457.0,103.3 467.2,103.3 477.3,103.3 487.5,107.6 497.7,95.0 507.9,92.6 518.1,95.0 528.2,80.5 538.4,80.5 548.6,71.8 558.8,80.3 569.0,67.6 579.1,80.6 589.3,78.6 599.5,83.9 609.7,94.2 619.9,76.9 630.0,85.6 640.2,81.1 650.4,86.1 660.6,81.8 670.7,68.9 680.9,68.0 691.1,68.0 701.3,89.5 711.5,85.2 721.6,89.7 731.8,93.0 742.0,84.5" fill="none" stroke="#2f80ed" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,137.0 80.4,112.1 90.5,96.5 100.7,96.7 110.9,118.0 121.1,106.0 131.3,108.3 141.4,107.0 151.6,99.8 161.8,102.1 172.0,100.7 182.1,106.5 192.3,87.9 202.5,98.2 212.7,94.3 222.9,89.1 233.0,96.4 243.2,89.9 253.4,88.4 263.6,88.8 273.8,93.9 283.9,95.7 294.1,91.1 304.3,103.4 314.5,92.5 324.7,109.1 334.8,110.5 345.0,98.8 355.2,99.8 365.4,88.7 375.6,100.4 385.7,96.7 395.9,103.1 406.1,92.6 416.3,96.6 426.4,107.7 436.6,107.6 446.8,119.4 457.0,111.9 467.2,115.2 477.3,113.9 487.5,119.5 497.7,114.7 507.9,109.8 518.1,108.9 528.2,96.9 538.4,103.0 548.6,96.5 558.8,103.1 569.0,91.4 579.1,99.2 589.3,97.7 599.5,104.2 609.7,109.4 619.9,96.3 630.0,102.0 640.2,91.0 650.4,96.9 660.6,95.5 670.7,88.1 680.9,88.0 691.1,83.2 701.3,100.6 711.5,90.3 721.6,97.9 731.8,95.4 742.0,89.7" fill="none" stroke="#27ae60" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,182.7 80.4,208.3 90.5,189.2 100.7,173.2 110.9,169.0 121.1,129.3 131.3,134.3 141.4,131.3 151.6,108.8 161.8,87.0 172.0,76.3 182.1,81.6 192.3,60.4 202.5,89.7 212.7,96.0 222.9,87.3 233.0,101.6 243.2,94.1 253.4,85.7 263.6,76.2 273.8,96.9 283.9,84.2 294.1,64.3 304.3,88.0 314.5,65.3 324.7,92.1 334.8,87.2 345.0,86.5 355.2,79.6 365.4,84.5 375.6,97.8 385.7,82.9 395.9,92.4 406.1,83.2 416.3,117.0 426.4,118.1 436.6,121.7 446.8,128.4 457.0,135.9 467.2,129.2 477.3,143.5 487.5,127.9 497.7,94.8 507.9,100.1 518.1,89.7 528.2,72.1 538.4,62.5 548.6,48.8 558.8,52.6 569.0,52.5 579.1,86.1 589.3,79.4 599.5,93.2 609.7,83.4 619.9,56.8 630.0,83.2 640.2,78.6 650.4,85.9 660.6,61.6 670.7,37.7 680.9,38.2 691.1,72.7 701.3,101.3 711.5,106.8 721.6,117.3 731.8,113.3 742.0,103.2" fill="none" stroke="#eb5757" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+<polyline points="70.2,55.2 80.4,55.3 90.5,55.3 100.7,55.4 110.9,55.3 121.1,55.4 131.3,55.3 141.4,55.3 151.6,55.4 161.8,55.4 172.0,55.4 182.1,55.4 192.3,55.4 202.5,55.4 212.7,55.4 222.9,55.4 233.0,55.4 243.2,55.4 253.4,55.4 263.6,55.4 273.8,55.4 283.9,55.4 294.1,55.4 304.3,55.4 314.5,55.4 324.7,55.4 334.8,55.4 345.0,55.4 355.2,55.4 365.4,55.4 375.6,55.4 385.7,55.4 395.9,55.4 406.1,55.4 416.3,55.4 426.4,55.4 436.6,55.4 446.8,55.3 457.0,55.4 467.2,55.4 477.3,55.3 487.5,55.3 497.7,55.3 507.9,55.3 518.1,55.4 528.2,55.4 538.4,55.3 548.6,55.4 558.8,55.3 569.0,55.4 579.1,55.3 589.3,55.4 599.5,55.3 609.7,55.3 619.9,55.4 630.0,55.3 640.2,55.4 650.4,55.4 660.6,55.4 670.7,55.4 680.9,55.4 691.1,55.4 701.3,55.4 711.5,55.4 721.6,55.3 731.8,55.3 742.0,55.3" fill="none" stroke="#9b51e0" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+</svg>
+<div class="legend"><span><i style="background:#2f80ed"></i>reward_terminal: -0.0009</span><span><i style="background:#27ae60"></i>reward_terminal_time: -0.0010</span><span><i style="background:#eb5757"></i>reward_production_income: -0.0014</span><span><i style="background:#9b51e0"></i>reward_launch_penalty: -0.0000</span></div>
+</section>
+    <section class="panel">
+      <h2>Latest Metrics</h2>
+      <table><tr><th>approx_kl</th><td>1.7e-05</td></tr><tr><th>avg_send_bin</th><td>0</td></tr><tr><th>clip_frac</th><td>0</td></tr><tr><th>entropy</th><td>5.3485</td></tr><tr><th>episode</th><td>116</td></tr><tr><th>explained_var</th><td>0.866796</td></tr><tr><th>launch_rate</th><td>0.996094</td></tr><tr><th>loss</th><td>-0.21045</td></tr><tr><th>lr</th><td>7.4e-05</td></tr><tr><th>mean_return_25</th><td>-0.8512</td></tr><tr><th>noop_rate</th><td>0.003906</td></tr><tr><th>reward_launch_penalty</th><td>-4e-05</td></tr><tr><th>reward_mean</th><td>0.003651</td></tr><tr><th>reward_production_income</th><td>0.002724</td></tr><tr><th>reward_terminal</th><td>0.000959</td></tr><tr><th>reward_terminal_time</th><td>8e-06</td></tr><tr><th>sps</th><td>3.1</td></tr><tr><th>step</th><td>34304</td></tr></table>
+    </section>
+    <section class="panel">
+      <h2>Latest BC Metrics</h2>
+      <p>No metrics yet.</p>
+    </section>
+  </main>
+</body>
+</html>
