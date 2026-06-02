@@ -87,6 +87,7 @@ fn simulator_tracks_fleet_landing() {
         from_id: src_id,
         angle,
         ships: src_ships,
+        target: tgt_id,
     }];
 
     let mut engine_run = engine.clone();
@@ -155,6 +156,7 @@ fn collect_arrivals_buckets_by_planet() {
             from_id: id,
             angle,
             ships,
+            target: tgt.id,
         });
     }
 

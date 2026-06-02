@@ -202,6 +202,7 @@ impl Bot {
         world.shot_l1 = Some(&shot_l1);
 
         let moves = crate::strategy::plan(&world);
+        let moves = crate::strategy::redirect_moves(&world, moves);
         self.current_turn += 1;
         Ok(moves
             .into_iter()
@@ -274,6 +275,25 @@ impl Bot {
             Some(&initial_ledger),
             Some(&shot_l1),
         );
+
+        // Final reroute pass on the chosen plan only — after the rollout has
+        // scored the untouched policy. Rebuild a WorldState (the rollout's
+        // mutable cache borrow has ended) so `redirect_moves` can re-derive
+        // travel times and project intermediate planets' ownership.
+        let moves = {
+            let cache_ref = self.cache.as_ref().expect("entity cache populated above");
+            let final_sim = Simulator::new(&initial_state);
+            let mut world = WorldState::from_simulator_with_ledger(
+                player,
+                &final_sim,
+                &initial_ledger,
+                cache_ref,
+            );
+            world.remaining_overage_time = obs.remaining_overage_time;
+            world.shot_l1 = Some(&shot_l1);
+            crate::strategy::redirect_moves(&world, moves)
+        };
+
         self.current_turn += 1;
         Ok(moves
             .into_iter()
