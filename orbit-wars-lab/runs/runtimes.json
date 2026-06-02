@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-06-01T21:05:32.649789+00:00",
+  "last_updated": "2026-06-02T14:59:45.006612+00:00",
   "runtimes": {
     "baselines/nearest-sniper": {
       "total_turns": 22735,
@@ -27,10 +27,10 @@
       "last_updated": "2026-05-29T16:49:34.243064+00:00"
     },
     "external/hellburner": {
-      "total_turns": 79097,
-      "total_seconds": 1127.3091840040195,
-      "avg_ms": 14.25223692433366,
-      "last_updated": "2026-05-29T16:44:30.697202+00:00"
+      "total_turns": 79348,
+      "total_seconds": 1127.9563920040196,
+      "avg_ms": 14.215309673892468,
+      "last_updated": "2026-06-02T14:39:08.947018+00:00"
     },
     "baselines/starter": {
       "total_turns": 20921,
@@ -159,10 +159,10 @@
       "last_updated": "2026-05-29T07:14:29.840421+00:00"
     },
     "mine/apollo": {
-      "total_turns": 37887,
-      "total_seconds": 384.95255900000024,
-      "avg_ms": 10.160544751497882,
-      "last_updated": "2026-06-01T21:05:32.637192+00:00"
+      "total_turns": 38138,
+      "total_seconds": 385.72451200000023,
+      "avg_ms": 10.113915569772937,
+      "last_updated": "2026-06-02T14:39:08.947037+00:00"
     },
     "external/evogen": {
       "total_turns": 67174,
@@ -183,16 +183,28 @@
       "last_updated": "2026-05-29T16:49:35.924638+00:00"
     },
     "mine/alphaow_newest": {
-      "total_turns": 19353,
-      "total_seconds": 9870.016255,
-      "avg_ms": 509.9992897741953,
-      "last_updated": "2026-06-01T20:38:01.271010+00:00"
+      "total_turns": 27716,
+      "total_seconds": 14123.501456000002,
+      "avg_ms": 509.5793569057585,
+      "last_updated": "2026-06-02T14:59:44.993726+00:00"
     },
     "mine/alphaow_temp": {
       "total_turns": 19020,
       "total_seconds": 9626.000706000003,
       "avg_ms": 506.0988804416405,
       "last_updated": "2026-06-01T16:40:33.391527+00:00"
+    },
+    "mine/prometheus": {
+      "total_turns": 3543,
+      "total_seconds": 1800.4485019999997,
+      "avg_ms": 508.17061868473036,
+      "last_updated": "2026-06-02T14:39:08.947045+00:00"
+    },
+    "mine/alphaow_fixed": {
+      "total_turns": 4820,
+      "total_seconds": 2444.849143,
+      "avg_ms": 507.2301126556017,
+      "last_updated": "2026-06-02T14:59:44.993707+00:00"
     }
   }
 }

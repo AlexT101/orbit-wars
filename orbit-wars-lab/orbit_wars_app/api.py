@@ -59,8 +59,11 @@ def _replays_root() -> Path:
 
 
 @router.get("/agents", response_model=list[AgentInfo])
-def list_agents() -> list[AgentInfo]:
-    return scan_zoo(_zoo_root())
+def list_agents(include_disabled: bool = False) -> list[AgentInfo]:
+    agents = scan_zoo(_zoo_root())
+    if include_disabled:
+        return agents
+    return [agent for agent in agents if not agent.disabled]
 
 
 @router.get("/agents/{agent_id:path}", response_model=AgentInfo)
@@ -73,9 +76,18 @@ def get_agent(agent_id: str) -> AgentInfo:
 
 
 @router.get("/ratings", response_model=list[Rating])
-def get_ratings(format: Literal["2p", "4p"] = "2p") -> list[Rating]:
+def get_ratings(
+    format: Literal["2p", "4p"] = "2p",
+    include_disabled: bool = False,
+) -> list[Rating]:
     store = TrueSkillStore(_runs_root() / "trueskill.json")
-    return store.leaderboard(format=format)  # type: ignore[arg-type]
+    ratings = store.leaderboard(format=format)  # type: ignore[arg-type]
+    if not include_disabled:
+        disabled_ids = {agent.id for agent in scan_zoo(_zoo_root()) if agent.disabled}
+        ratings = [rating for rating in ratings if rating.agent_id not in disabled_ids]
+        for rank, rating in enumerate(ratings, start=1):
+            rating.rank = rank
+    return ratings
 
 
 @router.get("/runtimes")

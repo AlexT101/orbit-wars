@@ -135,10 +135,19 @@ async function j<T>(path: string, opts?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listAgents: () => j<AgentInfo[]>("/agents"),
+  listAgents: (opts?: { includeDisabled?: boolean }) => {
+    const qs = opts?.includeDisabled ? "?include_disabled=true" : "";
+    return j<AgentInfo[]>(`/agents${qs}`);
+  },
   getAgent: (id: string) => j<AgentInfo>(`/agents/${id}`),
-  getRatings: (format: "2p" | "4p" = "2p") =>
-    j<Rating[]>(`/ratings?format=${format}`),
+  getRatings: (
+    format: "2p" | "4p" = "2p",
+    opts?: { includeDisabled?: boolean },
+  ) => {
+    const params = new URLSearchParams({ format });
+    if (opts?.includeDisabled) params.set("include_disabled", "true");
+    return j<Rating[]>(`/ratings?${params.toString()}`);
+  },
   listRuns: (opts?: { excludeQuickMatch?: boolean }) => {
     const qs = opts?.excludeQuickMatch ? "?exclude_quick_match=true" : "";
     return j<RunSummary[]>(`/runs${qs}`);

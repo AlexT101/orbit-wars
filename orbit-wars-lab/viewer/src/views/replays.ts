@@ -253,7 +253,7 @@ export async function renderReplays(
     }
   }
 
-  const agentDirectoryLoad = api.listAgents()
+  const agentDirectoryLoad = api.listAgents({ includeDisabled: true })
     .then((agents) => {
       indexAgents(agents);
     })
