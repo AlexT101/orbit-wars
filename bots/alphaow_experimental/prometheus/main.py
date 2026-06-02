@@ -1,55 +1,152 @@
-"""Kaggle entry point for alphaow. Spawns the Rust binary once and pipes
-one JSON observation per turn.
+"""prometheus — the alphaow Rust bot, fully self-contained in this folder
+(crate, src/, and trained weights all live here).
 
-Binary path resolution: $ALPHAOW_BOT_BIN, then <this dir>/target/release/alphaow-bot.
-If missing, attempts `cargo build --release` once.
+Two value nets ship with the bot and main.py routes them automatically:
+
+  * **2P**: train/weights/xgb_46p12e88t11_latest.json
+  * **4P**: train/weights/xgb_4p_v2_rank4_latest.json
+
+The Rust runtime picks the 2P or 4P net per game; main.py points it at
+both via ALPHAOW_VALUE_NET_PATH_2P / ALPHAOW_VALUE_NET_PATH_4P (and sets
+the legacy ALPHAOW_VALUE_NET_PATH to the 2P net) when the caller hasn't.
+
+Strips any caller-set OW_* tuning env so this wrapper is a stable deploy
+regardless of parent process experiments.
+
+This single file serves BOTH layouts — `_locate()` auto-detects which:
+
+  * **dev**: this wrapper sits at the crate root, so the binary is at
+    `target/release/alphaow-bot` and the weights under `train/weights/`.
+    Builds the binary on demand if missing.
+
+  * **Kaggle submission**: `main.py`, `alphaow-bot`, and the two value-net
+    JSONs are bundled flat in one dir. `build_submission.py` copies THIS
+    file into the archive verbatim — do not fork a second copy.
 """
 
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 import threading
 
 _PROC = None
 _LOCK = threading.Lock()
-
-# Value nets bundled with the bot. main.py points the Rust runtime at both
-# when the caller hasn't set them, so mixed 2P/4P runs route automatically.
-_DEFAULT_VALUE_NET_2P = "train/weights/xgb_46p12e88t11_latest.json"
-_DEFAULT_VALUE_NET_4P_CANDIDATES = (
-    "train/weights/xgb_4p_v2_rank4_latest.json",
-    "train/weights/xgb_4p_v1_latest.json",
-)
+_BIN_NAME = "alphaow-bot"
+# Value-net filenames, identical in the flat bundle and under train/weights/.
+_NET_2P_NAME = "xgb_46p12e88t11_latest.json"
+_NET_4P_NAME = "xgb_4p_v2_rank4_latest.json"
 
 
-def _here():
+def _pump_stderr(pipe):
+    # Forward the binary's stderr into our own stderr line by line. Kaggle
+    # captures the agent process's stderr (that's how panics show up in the
+    # logs), but it wraps sys.stderr in an object with no real file
+    # descriptor, so we can't hand the fd to Popen directly. Pump it here.
+    # Harmless in dev: normal play emits nothing (OW_DEBUG/OW_PROFILE are
+    # stripped below), so only genuine panics surface.
+    try:
+        for line in iter(pipe.readline, b""):
+            try:
+                sys.stderr.write(line.decode("utf-8", "replace"))
+                sys.stderr.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _bin_in(d):
+    """Return the alphaow-bot path inside dir `d`, or None. Prefers the
+    platform-native name — cargo emits `alphaow-bot.exe` on Windows and a
+    plain `alphaow-bot` on Linux/macOS (and in the Kaggle bundle)."""
+    names = (_BIN_NAME + ".exe", _BIN_NAME) if sys.platform == "win32" else (_BIN_NAME,)
+    for n in names:
+        p = os.path.join(d, n)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _wrapper_dir():
     try:
         return os.path.dirname(os.path.abspath(__file__))
     except NameError:
-        env = os.environ.get("ALPHAOW_BOT_DIR")
-        if env:
-            return env
-        for cand in (os.getcwd(), os.path.join(os.getcwd(), "alphaow")):
-            if os.path.isfile(os.path.join(cand, "Cargo.toml")):
-                return cand
-        return os.getcwd()
+        # Some sandboxes (kaggle_environments) exec this file without setting
+        # __file__. Caller falls back to other candidates.
+        return None
 
 
-def _binary_path():
-    env = os.environ.get("ALPHAOW_BOT_BIN")
-    if env and os.path.isfile(env):
-        return env
-    return os.path.join(_here(), "target/release/alphaow-bot")
+def _opt(path):
+    """Return path if it's an existing file, else None."""
+    return path if path and os.path.isfile(path) else None
 
 
-def _build_if_needed(path):
+def _locate():
+    """Resolve (binary, net_2p, net_4p, run_cwd, build_cwd) for whichever
+    layout we're running under.
+
+    Returns:
+      binary    — path to the alphaow-bot executable.
+      net_2p    — path to the 2-player value-net JSON, or None if not found.
+      net_4p    — path to the 4-player value-net JSON, or None if not found.
+      run_cwd   — cwd to spawn the binary in. Dev uses the crate dir so the
+                  binary can resolve cargo-local defaults; the flat bundle
+                  uses the bundle dir.
+      build_cwd — crate dir to `cargo build` in when the binary is missing
+                  (dev only), or None when building isn't possible/needed.
+    """
+    # Explicit binary override always wins (dev experiments).
+    env_bin = os.environ.get("ALPHAOW_BOT_BIN")
+    if env_bin and os.path.isfile(env_bin):
+        d = os.path.dirname(env_bin)
+        return (env_bin, _opt(os.path.join(d, _NET_2P_NAME)),
+                _opt(os.path.join(d, _NET_4P_NAME)), d, None)
+
+    wd = _wrapper_dir()
+
+    # Flat-bundle layout (Kaggle): the binary and both JSONs sit next to
+    # main.py. Try the wrapper dir, the Kaggle agent mount, then cwd.
+    for d in (wd, "/kaggle_simulations/agent", os.getcwd()):
+        if d:
+            b = _bin_in(d)
+            if b:
+                return (b, _opt(os.path.join(d, _NET_2P_NAME)),
+                        _opt(os.path.join(d, _NET_4P_NAME)), d, None)
+
+    # Dev layout: prometheus is self-contained, so this wrapper sits at the
+    # crate root — binary under target/release, weights under train/weights/.
+    crate = wd or os.getcwd()
+    release = os.path.join(crate, "target", "release")
+    # Use the existing binary if built; otherwise point at the name cargo will
+    # produce on this platform so _build_if_needed writes there.
+    binary = _bin_in(release) or os.path.join(
+        release, _BIN_NAME + (".exe" if sys.platform == "win32" else "")
+    )
+    wdir = os.path.join(crate, "train", "weights")
+    return (binary, _opt(os.path.join(wdir, _NET_2P_NAME)),
+            _opt(os.path.join(wdir, _NET_4P_NAME)), crate, crate)
+
+
+def _build_if_needed(path, build_cwd):
     if os.path.isfile(path):
         return
+    if not build_cwd:
+        raise RuntimeError(f"binary not found at {path} and no build tree to build it from")
     cargo = shutil.which("cargo")
     if not cargo:
         raise RuntimeError(f"binary not found at {path} and cargo not on PATH")
-    subprocess.check_call([cargo, "build", "--release"], cwd=_here())
+    subprocess.check_call([cargo, "build", "--release"], cwd=build_cwd)
+
+
+def _ensure_executable(path):
+    try:
+        st = os.stat(path).st_mode
+        os.chmod(path, st | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError:
+        pass
 
 
 def _norm(o):
@@ -70,38 +167,48 @@ def _ensure():
     global _PROC
     if _PROC is not None and _PROC.poll() is None:
         return _PROC
-    bin_path = _binary_path()
-    _build_if_needed(bin_path)
+    binary, net_2p, net_4p, run_cwd, build_cwd = _locate()
+    _build_if_needed(binary, build_cwd)
+    _ensure_executable(binary)
     env = dict(os.environ)
-    # Match alphaow_newest's stable baseline: parent experiment knobs should not
-    # leak into this bot unless explicitly represented by this wrapper.
+    # Strip OW_* tuning overrides so this wrapper is a stable baseline
+    # regardless of parent env used by experiments.
     for k in (
-        "OW_PLANNER", "OW_PUCT_C",
+        "OW_PLANNER", "OW_PUCT_C", "OW_K_ROOT", "OW_K_NON_ROOT",
         "OW_ROLLOUT", "OW_ROLLOUT_DEPTH", "OW_ROLLOUT_REACTIVE",
         "OW_ROLLOUT_NOISE", "OW_DUCT_ENUMERATE", "OW_NO_COOP", "OW_NO_REUSE",
-        "OW_FOCUSED_CANDIDATES", "OW_SELECTION", "OW_EXP3_ETA", "OW_EXP3_GAMMA",
+        "OW_FOCUSED_CANDIDATES", "OW_SELECTION", "OW_EXP3_ETA",
+        "OW_EXP3_GAMMA", "OW_DEBUG", "OW_PROFILE",
     ):
         env.pop(k, None)
+    # **No rollouts** — leaf-eval only. The XGB value net is strong enough
+    # that the (very slow) depth-8 apollo replan rollout doesn't pay for
+    # itself; skipping it buys many more MCTS iterations per turn.
     env["OW_ROLLOUT"] = "none"
     env["OW_ROLLOUT_DEPTH"] = "0"
-    default_net_2p = os.path.join(_here(), _DEFAULT_VALUE_NET_2P)
-    if os.path.isfile(default_net_2p):
-        env.setdefault("ALPHAOW_VALUE_NET_PATH_2P", default_net_2p)
-        env.setdefault("ALPHAOW_VALUE_NET_PATH", default_net_2p)
-    for rel in _DEFAULT_VALUE_NET_4P_CANDIDATES:
-        default_net_4p = os.path.join(_here(), rel)
-        if os.path.isfile(default_net_4p):
-            env.setdefault("ALPHAOW_VALUE_NET_PATH_4P", default_net_4p)
-            break
+    # Use the full per-turn think budget. The Rust binary defaults to 500ms
+    # (main.rs); the harness allows ~1000ms with extra buffer on top, so spend
+    # it — DUCT is anytime, so more wall time = strictly more search.
+    env.setdefault("ALPHAOW_BUDGET_MS", "1000")
+    # Point the runtime at both bundled nets unless the caller set their own,
+    # so mixed 2P/4P runs route automatically.
+    if net_2p:
+        env.setdefault("ALPHAOW_VALUE_NET_PATH_2P", net_2p)
+        env.setdefault("ALPHAOW_VALUE_NET_PATH", net_2p)
+    if net_4p:
+        env.setdefault("ALPHAOW_VALUE_NET_PATH_4P", net_4p)
     _PROC = subprocess.Popen(
-        [bin_path],
+        [binary],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        cwd=_here(),
+        stderr=subprocess.PIPE,
+        cwd=run_cwd,
         env=env,
         bufsize=0,
     )
+    threading.Thread(
+        target=_pump_stderr, args=(_PROC.stderr,), daemon=True
+    ).start()
     return _PROC
 
 
