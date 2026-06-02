@@ -1245,6 +1245,7 @@ fn send_reinforcements(
             from_id: p.id,
             angle,
             ships,
+            target: target_id,
         });
     }
     out
@@ -1625,6 +1626,7 @@ fn run_early_game(world: &WorldState, model: &HellburnerModel) -> Vec<MoveAction
             from_id: *source_id,
             angle,
             ships: *fleet_size,
+            target: target_planet.id,
         });
     }
     moves
@@ -1808,6 +1810,7 @@ fn run_strategy(
                     from_id: o.src_id,
                     angle: o.angle,
                     ships: o.ships,
+                    target: target_id,
                 });
             }
             if let Some(outs) = model.outbound_edges.get(&o.src_id) {
@@ -1854,6 +1857,103 @@ pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     // cheap and deterministic. Multi-strategy search happens one level up,
     // in `search_candidates`.
     let (moves, _) = run_strategy(world, &model, STRATEGIES[0]);
+    moves
+}
+
+/// Final post-processing applied to the chosen move set *after* any rollout
+/// selection — never inside the rollout itself, so the policy the rollout scores
+/// is untouched. This only rewrites the moves we are about to return, and it is a
+/// strict no-loss reroute: for each launch-this-turn fleet `A → B`, if routing
+/// through an intermediate planet `C` reaches `B` in the same number of turns or
+/// fewer (`A → C → B`, measured via `plan_shot`), we retarget the fleet to `C`.
+/// We re-plan every turn, so the strategy naturally decides what to do with the
+/// ships once they arrive at `C` — no state is carried across turns.
+///
+/// `C` must be projected to be owned by us on the turn the fleet *arrives* there
+/// (so the ships reinforce rather than fight), accounting for the arrivals of
+/// every other move in this same final plan.
+pub fn redirect_moves(world: &WorldState, mut moves: Vec<MoveAction>) -> Vec<MoveAction> {
+    if moves.is_empty() {
+        return moves;
+    }
+    let model = HellburnerModel::build(world);
+    let player = world.player;
+    let horizon = world.timeline_cache.horizon;
+
+    // Direct A→B travel time per move, plus a PlanState capturing every move's
+    // friendly arrival so each candidate C's ownership check sees the full plan.
+    let mut plan = PlanState::default();
+    let mut direct: Vec<Option<i64>> = Vec::with_capacity(moves.len());
+    for mv in &moves {
+        if mv.target < 0 || !model.non_comet_ids.contains(&mv.target) {
+            direct.push(None);
+            continue;
+        }
+        match model.plan_shot(mv.from_id, mv.target, mv.ships, 0) {
+            Some((_, turns_ab, _, _, _)) => {
+                plan.commit(mv.from_id, mv.target, mv.ships, turns_ab, player);
+                direct.push(Some(turns_ab));
+            }
+            None => direct.push(None),
+        }
+    }
+
+    for (i, mv) in moves.iter_mut().enumerate() {
+        let Some(turns_ab) = direct[i] else {
+            continue;
+        };
+        let a = mv.from_id;
+        let b = mv.target;
+        let ships = mv.ships;
+        // (total_turns, ships_c, turns_ac, c_id, angle_ac). Selection order:
+        // minimize total turns; then the one holding the most ships when the fleet
+        // arrives; then prefer the intermediate closest to A (smallest turns_ac);
+        // finally smallest id so the pick stays deterministic regardless
+        // of HashSet iteration order.
+        let mut best: Option<(i64, i64, i64, i64, f64)> = None;
+        for &c in &model.non_comet_ids {
+            if c == a || c == b {
+                continue;
+            }
+            let Some((angle_ac, turns_ac, _, _, _)) = model.plan_shot(a, c, ships, 0) else {
+                continue;
+            };
+            // A→C alone must be shorter than A→B (C→B costs ≥ 1 turn), and the
+            // arrival turn must fall inside the timeline horizon to check it.
+            if turns_ac >= turns_ab || turns_ac < 0 || turns_ac > horizon {
+                continue;
+            }
+            // C must be friendly when the fleet arrives, given the full plan.
+            let tl = target_timeline(world, c, &[], &plan);
+            if tl.owner_at[turns_ac as usize] != player {
+                continue;
+            }
+            // C→B is launched at the arrival turn (offset = turns_ac), so its
+            // geometry/obstacles are evaluated at that future turn.
+            let Some((_, turns_cb, _, _, _)) = model.plan_shot(c, b, ships, turns_ac) else {
+                continue;
+            };
+            let total = turns_ac + turns_cb;
+            if total <= turns_ab {
+                let ships_c = tl.ships_at[turns_ac as usize];
+                // Lexicographic minimize on (total, -ships_c, turns_ac, c): the
+                // negated ship count makes "most ships on arrival" rank first.
+                let take = match best {
+                    None => true,
+                    Some((bt, b_tac, b_ships, bc, _)) => {
+                        (total,-ships_c, turns_ac, c) < (bt, -b_ships, b_tac, bc)
+                    }
+                };
+                if take {
+                    best = Some((total, turns_ac, ships_c, c, angle_ac));
+                }
+            }
+        }
+        if let Some((_, _, _, c, angle_ac)) = best {
+            mv.angle = angle_ac;
+            mv.target = c;
+        }
+    }
     moves
 }
 
