@@ -1,5 +1,4 @@
-"""prometheus — the alphaow Rust bot, fully self-contained in this folder
-(crate, src/, and trained weights all live here).
+"""prometheus — Rust bot
 
 Two value nets ship with the bot and main.py routes them automatically:
 
@@ -10,9 +9,6 @@ The Rust runtime picks the 2P or 4P net per game; main.py points it at
 both via ALPHAOW_VALUE_NET_PATH_2P / ALPHAOW_VALUE_NET_PATH_4P (and sets
 the legacy ALPHAOW_VALUE_NET_PATH to the 2P net) when the caller hasn't.
 
-Strips any caller-set OW_* tuning env so this wrapper is a stable deploy
-regardless of parent process experiments.
-
 This single file serves BOTH layouts — `_locate()` auto-detects which:
 
   * **dev**: this wrapper sits at the crate root, so the binary is at
@@ -20,8 +16,7 @@ This single file serves BOTH layouts — `_locate()` auto-detects which:
     Builds the binary on demand if missing.
 
   * **Kaggle submission**: `main.py`, `alphaow-bot`, and the two value-net
-    JSONs are bundled flat in one dir. `build_submission.py` copies THIS
-    file into the archive verbatim — do not fork a second copy.
+    JSONs are bundled flat in one dir.
 """
 
 import json
@@ -41,12 +36,6 @@ _NET_4P_NAME = "xgb_4p_v2_rank4_latest.json"
 
 
 def _pump_stderr(pipe):
-    # Forward the binary's stderr into our own stderr line by line. Kaggle
-    # captures the agent process's stderr (that's how panics show up in the
-    # logs), but it wraps sys.stderr in an object with no real file
-    # descriptor, so we can't hand the fd to Popen directly. Pump it here.
-    # Harmless in dev: normal play emits nothing (OW_DEBUG/OW_PROFILE are
-    # stripped below), so only genuine panics surface.
     try:
         for line in iter(pipe.readline, b""):
             try:
@@ -74,8 +63,6 @@ def _wrapper_dir():
     try:
         return os.path.dirname(os.path.abspath(__file__))
     except NameError:
-        # Some sandboxes (kaggle_environments) exec this file without setting
-        # __file__. Caller falls back to other candidates.
         return None
 
 
@@ -181,17 +168,10 @@ def _ensure():
         "OW_EXP3_GAMMA", "OW_DEBUG", "OW_PROFILE",
     ):
         env.pop(k, None)
-    # **No rollouts** — leaf-eval only. The XGB value net is strong enough
-    # that the (very slow) depth-8 apollo replan rollout doesn't pay for
-    # itself; skipping it buys many more MCTS iterations per turn.
     env["OW_ROLLOUT"] = "none"
     env["OW_ROLLOUT_DEPTH"] = "0"
-    # Use the full per-turn think budget. The Rust binary defaults to 500ms
-    # (main.rs); the harness allows ~1000ms with extra buffer on top, so spend
-    # it — DUCT is anytime, so more wall time = strictly more search.
-    env.setdefault("ALPHAOW_BUDGET_MS", "1000")
-    # Point the runtime at both bundled nets unless the caller set their own,
-    # so mixed 2P/4P runs route automatically.
+    env.setdefault("ALPHAOW_BUDGET_MS", "500")
+
     if net_2p:
         env.setdefault("ALPHAOW_VALUE_NET_PATH_2P", net_2p)
         env.setdefault("ALPHAOW_VALUE_NET_PATH", net_2p)
