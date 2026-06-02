@@ -328,22 +328,93 @@ impl Bot {
     }
 }
 
-/// TEMP instrumentation: read the aim hot-path stage counters as a string.
-#[pyfunction]
-fn aim_counters_report() -> String {
-    crate::aim::counters::report()
+/// Cache-build `current_step` for a benchmark obs. The obs planets are the
+/// snapshot at `obs["step"]`; treated as the cache's `initial_planets`, that
+/// snapshot already sits at the cache's turn-1 slot, so `current_step = 1`
+/// reproduces the engine's per-turn positions for any mid-game step (and keeps
+/// the full look-ahead horizon, unlike building at the real step near game end).
+///
+/// The sole exception is **game step 0**: the engine's launch tick does not
+/// rotate planets (the game-start seam, `current_angle = init + ω·0`), so the
+/// obs planets are the true initial positions and the target is static on the
+/// first flight turn. `current_step = 0` engages apollo's matching
+/// `positions[0] == positions[1]` seam so the binding reproduces that. Defaults
+/// to 1 when `step` is absent (pure-geometry use).
+fn obs_current_step(obs: &Bound<'_, PyDict>) -> PyResult<i64> {
+    let step = match obs.get_item("step")? {
+        Some(s) => extract_i64(&s)?,
+        None => return Ok(1),
+    };
+    Ok(if step == 0 { 0 } else { 1 })
 }
 
-/// TEMP instrumentation: zero the aim hot-path stage counters.
+/// True iff the obs carries a `player` field and the `source` planet is not
+/// owned by that player (or is absent). Used by the benchmark bindings to
+/// decline launches the engine could never spawn a fleet for. Returns `false`
+/// (don't decline) when `player` isn't present, preserving pure-geometry use.
+fn source_unowned(planets: &[Planet], source: i64, obs: &Bound<'_, PyDict>) -> PyResult<bool> {
+    let Some(player) = obs.get_item("player")? else {
+        return Ok(false);
+    };
+    let player = extract_i64(&player)?;
+    let owned = planets.iter().any(|p| p.id == source && p.owner == player);
+    Ok(!owned)
+}
+
+/// Standalone aim entry point for the Kaggle aim benchmark
+/// (`benchmark-for-aiming-implementation.ipynb`).
+///
+/// The benchmark hands us a *current* board snapshot and asks for the launch
+/// angle from `source` to `target` with `fleet_size` ships, or `None` if the
+/// shot can't connect. It only populates the fields the example aimer reads
+/// (`planets`, `angular_velocity`, optionally `comets`/`comet_planet_ids`), so
+/// this deliberately does **not** go through [`Observation::from_dict`], which
+/// requires `player`/`initial_planets`/`fleets`/etc.
+///
+/// The snapshot's planets are fed to [`EntityCache::build`] as `initial_planets`
+/// with `current_step = 1`. [`crate::cache::build_planet_entity`] uses
+/// `effective = (t - 1).max(0)`, so `positions[1]` is the observed position and
+/// `positions[1 + t]` is that position rotated by `ω·t` — the exact, seam-free
+/// model the engine uses mid-game (`current_step = 0` would under-rotate the
+/// first lead turn through the game-start 0/1 seam). Comet `path_index` already
+/// locates "now", so querying at `launch_turn_offset = 0` reads the present and
+/// offset `t` reads `t` turns ahead for every entity kind.
 #[pyfunction]
-fn aim_counters_reset() {
-    crate::aim::counters::reset();
+#[pyo3(signature = (obs, source, target, fleet_size))]
+fn aim_angle(
+    obs: &Bound<'_, PyDict>,
+    source: i64,
+    target: i64,
+    fleet_size: i64,
+) -> PyResult<Option<f64>> {
+    let planets = parse_planets(&get_item(obs, "planets")?)?;
+    let angular_velocity: f64 = get_item(obs, "angular_velocity")?.extract()?;
+
+    // The engine only spawns a fleet from a planet the launching player owns; an
+    // unowned source can never hit (no fleet is created), so decline. This
+    // mirrors the ownership filter the strategy applies before it ever calls the
+    // aimer in a real game — the geometry solver itself is never handed an
+    // unowned source. Only enforced when `player` is present so a pure-geometry
+    // obs still works.
+    if source_unowned(&planets, source, obs)? {
+        return Ok(None);
+    }
+
+    // Comets are optional in the benchmark obs — default to none.
+    let (comets, comet_planet_ids) = match (obs.get_item("comets")?, obs.get_item("comet_planet_ids")?) {
+        (Some(c), Some(ids)) => (parse_comets(&c)?, ids.extract::<Vec<i64>>()?),
+        _ => (Vec::new(), Vec::new()),
+    };
+
+    let cache = EntityCache::build(&planets, &comets, &comet_planet_ids, angular_velocity, obs_current_step(obs)?);
+
+    Ok(crate::aim::aim_with_prediction(&cache, source, target, fleet_size, 0)
+        .map(|(angle, _turns, _tx, _ty, _flight_time)| angle))
 }
 
 #[pymodule]
 fn apollo_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bot>()?;
-    m.add_function(wrap_pyfunction!(aim_counters_report, m)?)?;
-    m.add_function(wrap_pyfunction!(aim_counters_reset, m)?)?;
+    m.add_function(wrap_pyfunction!(aim_angle, m)?)?;
     Ok(())
 }

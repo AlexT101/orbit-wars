@@ -76,7 +76,6 @@ fn rollout_score_throughput() {
             None,
         );
 
-        crate::aim::counters::reset();
         for _ in 0..iters_per_seed {
             let t = Instant::now();
             let _ = rollout_score(
@@ -92,10 +91,6 @@ fn rollout_score_throughput() {
             total += t.elapsed();
             runs += 1;
         }
-        println!(
-            "  seed {seed} TIMED-LOOP counters ({iters_per_seed} iters): {}",
-            crate::aim::counters::report()
-        );
     }
 
     let dt = total.as_secs_f64();

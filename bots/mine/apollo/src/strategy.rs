@@ -153,34 +153,18 @@ impl<'a> HellburnerModel<'a> {
         let key = (src_id, target_id, ships, abs_launch);
         let l1 = self.state.shot_l1.unwrap_or(&self.shot_cache);
         if let Some(&cached) = l1.borrow().get(&key) {
-            // crate::aim::counters::bump(&crate::aim::counters::L1_HIT);
             return cached;
         }
-        let _lookup = cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset);
-        // match _lookup {
-        //     AimCacheVerdict::Hit(_) => {
-        //         crate::aim::counters::bump(&crate::aim::counters::L2_HIT)
-        //     }
-        //     AimCacheVerdict::Miss => {
-        //         crate::aim::counters::bump(&crate::aim::counters::L2_MISS)
-        //     }
-        //     AimCacheVerdict::Stale => {
-        //         crate::aim::counters::bump(&crate::aim::counters::L2_STALE)
-        //     }
-        // }
-        let result = match _lookup {
+        let lookup = cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset);
+        let result = match lookup {
             AimCacheVerdict::Hit(r) => r,
             AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
                 // L3 — cross-turn invariant fast path for disc-qualified
                 // static→static / orbiting→orbiting shots. Skips lead_target and
                 // the per-entity planet sweep, only re-checking comets per turn.
                 match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
-                    InvariantVerdict::Use(r) => {
-                        // crate::aim::counters::bump(&crate::aim::counters::L3_USE);
-                        Some(r)
-                    }
+                    InvariantVerdict::Use(r) => Some(r),
                     InvariantVerdict::SingleSolve => {
-                        // crate::aim::counters::bump(&crate::aim::counters::L3_SINGLE);
                         let r = aim_with_prediction(
                             cache,
                             src_id,
@@ -192,7 +176,6 @@ impl<'a> HellburnerModel<'a> {
                         r
                     }
                     InvariantVerdict::DualSolve => {
-                        // crate::aim::counters::bump(&crate::aim::counters::L3_DUAL);
                         // Populate the invariant base with one comet-free solve,
                         // then gate it against just the comets. Comet-clear ⇒ the
                         // base is exactly this turn's shot (no second solve);
