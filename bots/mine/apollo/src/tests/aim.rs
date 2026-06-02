@@ -47,13 +47,12 @@ fn ground_truth_collision(
         )
     };
 
-    // Simulate full per-turn chords up to `floor(flight_time)`, plus a partial
-    // chord ending at exactly `flight_time` for the turn containing target
-    // arrival. Stopping at `flight_time` matters because once the fleet
-    // reaches its target it is consumed by the engine — a swept-pair
-    // intersection at `s > (flight_time − floor(flight_time))` of the
-    // arrival turn happens *after* the fleet has ceased to exist and is
-    // therefore not a real collision the aimer needs to predict.
+    // Simulate full per-turn chords through the arrival turn `last_t`. The engine
+    // moves the fleet a *full* tick each turn (it isn't truncated at the target's
+    // arrival fraction) and resolves it against the lowest-id planet hit anywhere
+    // in the tick. So a lower-id obstacle struck even *past* the target on the
+    // arrival tick still kills the fleet — sweep the full tick and let the
+    // id/sun skips below model the arrival-turn tiebreak.
     let full_turns = flight_time.floor() as i64;
     let frac = flight_time - full_turns as f64;
     let last_t = if frac > 1e-9 {
@@ -63,18 +62,16 @@ fn ground_truth_collision(
     };
 
     for t in 1..=last_t {
-        let s_end = if t == last_t && frac > 1e-9 {
-            frac
-        } else {
-            1.0
-        };
+        let s_end = 1.0;
         let a = fleet_at((t - 1) as f64);
         let b = fleet_at((t - 1) as f64 + s_end);
 
         // Sun is a stationary disk at the board center; it isn't represented
         // as an Entity but the blocker table seeds it explicitly, so we have
-        // to test it explicitly here too.
-        if swept_pair_hit(a, b, (CENTER, CENTER), (CENTER, CENTER), SUN_RADIUS) {
+        // to test it explicitly here too. The engine checks the sun only after
+        // the planet loop and only when no planet was hit that tick, so on the
+        // arrival turn the target wins and the sun can't block — skip it there.
+        if t != last_t && swept_pair_hit(a, b, (CENTER, CENTER), (CENTER, CENTER), SUN_RADIUS) {
             return Some((t, -1));
         }
 
@@ -85,6 +82,14 @@ fn ground_truth_collision(
             // planet every turn, so an orbiting source that sweeps back into a
             // slow fleet's path is a real collision the aimer must predict.
             if bid == target_id {
+                continue;
+            }
+            // Engine id-order tiebreak: on the arrival turn (`last_t`) the target
+            // is resolved before any higher-id planet (planets are swept in id
+            // order, first hit wins), so any planet — static or moving — with
+            // id >= target_id cannot consume the fleet there. The aimer is allowed
+            // to ignore it, so the ground truth must too.
+            if t == last_t && bid >= target_id {
                 continue;
             }
             let Some([q0x, q0y]) = cache.position(bid, t - 1) else {
