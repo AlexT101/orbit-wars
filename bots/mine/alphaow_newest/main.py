@@ -58,12 +58,6 @@ _WEIGHTS_NAME = "xgb_top10_d6.json"
 
 
 def _pump_stderr(pipe):
-    # Forward the binary's stderr into our own stderr line by line. Kaggle
-    # captures the agent process's stderr (that's how panics show up in the
-    # logs), but it wraps sys.stderr in an object with no real file
-    # descriptor, so we can't hand the fd to Popen directly. Pump it here.
-    # Harmless in dev: normal play emits nothing (OW_DEBUG/OW_PROFILE are
-    # stripped below), so only genuine panics surface.
     try:
         for line in iter(pipe.readline, b""):
             try:
@@ -91,8 +85,6 @@ def _wrapper_dir():
     try:
         return os.path.dirname(os.path.abspath(__file__))
     except NameError:
-        # Some sandboxes (kaggle_environments) exec this file without setting
-        # __file__. Caller falls back to other candidates.
         return None
 
 
@@ -194,16 +186,9 @@ def _ensure():
         "OW_EXP3_GAMMA", "OW_DEBUG", "OW_PROFILE",
     ):
         env.pop(k, None)
-    # **No rollouts** — leaf-eval only. The XGB value net is strong enough
-    # that the (very slow) depth-8 apollo replan rollout doesn't pay for
-    # itself; skipping it buys many more MCTS iterations per turn. Proven
-    # 8W-2L vs production MLP.
     env["OW_ROLLOUT"] = "none"
     env["OW_ROLLOUT_DEPTH"] = "0"
-    # Use the full per-turn think budget. The Rust binary defaults to 500ms
-    # (main.rs); the harness allows ~1000ms with extra buffer on top, so spend
-    # it — DUCT is anytime, so more wall time = strictly more search.
-    env.setdefault("ALPHAOW_BUDGET_MS", "1000")
+    env.setdefault("ALPHAOW_BUDGET_MS", "500")
     # Default to the v4 XGB model unless the caller set their own.
     if weights:
         env.setdefault("ALPHAOW_VALUE_NET_PATH", weights)
