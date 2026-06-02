@@ -27,6 +27,17 @@ from rl_orbit_wars.orbit_wars_rl.model import build_policy
 from rl_orbit_wars.orbit_wars_rl.ppo import _stack_encoded
 from rl_orbit_wars.orbit_wars_rl.visualization import append_jsonl, write_training_report
 
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+CYAN = "\033[36m"
+
+
+def _c(text: str, code: str) -> str:
+    return f"{code}{text}{RESET}"
+
 
 def _bot_entry(name_or_path: str) -> Path:
     path = Path(name_or_path)
@@ -86,6 +97,7 @@ def collect(
     label_counts: dict[int, int] = {}
     seen_steps = 0
     skipped_noops = 0
+    skipped_invalid = 0
     teacher_agent = _load_agent(teacher_name)
     episode = 0
     opponent_idx = 0
@@ -109,7 +121,12 @@ def collect(
             if not keep:
                 skipped_noops += 1
         if keep:
-            observations.append(encode_obs(obs))
+            encoded = encode_obs(obs)
+            if label < 0 or label >= len(encoded.action_mask) or not bool(encoded.action_mask[label]):
+                skipped_invalid += 1
+                keep = False
+        if keep:
+            observations.append(encoded)
             labels.append(label)
             label_counts[label] = label_counts.get(label, 0) + 1
 
@@ -129,6 +146,7 @@ def collect(
         "samples": len(labels),
         "seen_steps": seen_steps,
         "skipped_noops": skipped_noops,
+        "skipped_invalid": skipped_invalid,
         "max_noop_fraction": max_noop_fraction,
         "noop_fraction": label_counts.get(0, 0) / max(1, len(labels)),
         "unique_labels": len(label_counts),
@@ -150,8 +168,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
         "--opponents",
-        default="noop,nearest",
-        help="Comma-separated scripted opponents for data collection. Default avoids random.",
+        default="random,nearest,baselines/starter",
+        help="Comma-separated scripted opponents for data collection.",
     )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--out", default="rl_orbit_wars/checkpoints/bc_teacher.pt")
@@ -201,7 +219,14 @@ def main() -> int:
         **collection_stats,
     }
     append_jsonl(bc_metrics_path, collection_row)
-    print(json.dumps({"collection": collection_stats}))
+    print(
+        f"{_c('bc collect', BOLD + CYAN)} teacher={_c(args.teacher, BLUE)} "
+        f"samples={collection_stats['samples']} seen={collection_stats['seen_steps']} "
+        f"noop={collection_stats['noop_fraction']:.1%} "
+        f"skipped_noop={collection_stats['skipped_noops']} "
+        f"skipped_invalid={collection_stats.get('skipped_invalid', 0)}",
+        flush=True,
+    )
 
     model = build_policy(
         args.model,
@@ -244,7 +269,11 @@ def main() -> int:
             **collection_stats,
         }
         append_jsonl(bc_metrics_path, row)
-        print(json.dumps({"epoch": row["epoch"], "loss": row["loss"], "accuracy": row["accuracy"]}))
+        print(
+            f"{_c('bc', BOLD + CYAN)} epoch={row['epoch']:>3}/{args.epochs} "
+            f"loss={row['loss']:.4f} acc={_c(f'{row['accuracy']:.1%}', GREEN)}",
+            flush=True,
+        )
         write_training_report(log_dir)
         final_loss = row["loss"]
         final_accuracy = row["accuracy"]

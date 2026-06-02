@@ -78,44 +78,69 @@ def load_agent(main_path: Path, mod_name: str):
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
-    return module.agent
+    return module
+
+
+def cleanup_agent_module(module):
+    proc = getattr(module, "_PROC", None)
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                proc.kill()
+                proc.wait(timeout=1.0)
+    except Exception:
+        pass
+    try:
+        module._PROC = None
+    except Exception:
+        pass
 
 
 def run_one_match(bot_paths, seed, match_idx):
     from engine_parity_checker.candidates.rust import RustEngine
 
-    agents = [
+    modules = [
         load_agent(path, f"bot_{i}_match_{match_idx}_main")
         for i, path in enumerate(bot_paths)
     ]
-    engine = RustEngine()
-    obs = engine.reset(seed, len(agents))
+    agents = [module.agent for module in modules]
+    try:
+        engine = RustEngine()
+        obs = engine.reset(seed, len(agents))
 
-    total_time = [0.0] * len(agents)
-    call_counts = [0] * len(agents)
+        total_time = [0.0] * len(agents)
+        call_counts = [0] * len(agents)
 
-    done = False
-    steps_run = 0
-    for _ in range(MAX_STEPS):
-        actions = []
-        for i in range(len(agents)):
-            start = perf_counter()
-            action = agents[i](obs[i].as_dict())
-            total_time[i] += perf_counter() - start
-            call_counts[i] += 1
-            actions.append(action)
-        obs, done = engine.step(actions)
-        steps_run += 1
-        if done:
-            break
+        done = False
+        steps_run = 0
+        for _ in range(MAX_STEPS):
+            actions = []
+            for i in range(len(agents)):
+                start = perf_counter()
+                action = agents[i](obs[i].as_dict())
+                total_time[i] += perf_counter() - start
+                call_counts[i] += 1
+                actions.append(action)
+            obs, done = engine.step(actions)
+            steps_run += 1
+            if done:
+                break
 
-    snap = engine.snapshot()
-    rewards = snap.rewards if snap.rewards is not None else [None] * len(agents)
-    avg_ms = [
-        (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
-        for i in range(len(agents))
-    ]
-    return rewards, steps_run, avg_ms
+        snap = engine.snapshot()
+        rewards = snap.rewards if snap.rewards is not None else [None] * len(agents)
+        avg_ms = [
+            (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
+            for i in range(len(agents))
+        ]
+        return rewards, steps_run, avg_ms
+    finally:
+        for module in modules:
+            cleanup_agent_module(module)
 
 
 def slot_order_for_seed(seed):

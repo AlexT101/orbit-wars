@@ -1,0 +1,2 @@
+{"kind": "start", "state": {"chunks": 0, "phase_index": 0, "steps_requested": 0}, "time": 1779996716.6228852}
+{"kind": "phase_chunk_start", "phase": {"gate_opponents": ["random", "nearest", "baselines/starter"], "index": 0, "name": "starter", "reward_mode": "shaped", "threshold": 0.98, "train_opponents": ["random", "nearest", "baselines/starter"]}, "state": {"chunks": 0, "phase_index": 0, "steps_requested": 0}}

@@ -7,7 +7,6 @@ import copy
 import hashlib
 import importlib.util
 import inspect
-import logging
 import os
 import shutil
 import sys
@@ -20,46 +19,6 @@ from typing import Any, Callable, Literal, Optional
 
 _DEBUG_PREFIXES = ("[LINE]", "[DOT]", "[TEXT]")
 _REPLAY_COMET_SPAWN_STEPS = {50, 150, 250, 350, 450}
-
-_KAGGLE_LOGGING_SILENCED = False
-
-
-def silence_kaggle_environments_logging() -> None:
-    """Mute kaggle-environments' chatty import-time INFO logging.
-
-    On first import, ``kaggle_environments`` registers every bundled env, which
-    loads ``.../envs/open_spiel_env/open_spiel_env.py``. At *module* scope that
-    file does (see the installed package):
-
-        _log = logging.getLogger(__name__)   # ...open_spiel_env.open_spiel_env
-        _log.setLevel(logging.INFO)          # explicit level, ignores parent
-        _log.addHandler(logging.StreamHandler(sys.stdout))  # its own handler
-
-    then logs the full OpenSpiel game registry (~50 lines). Because that child
-    logger has an *explicit* level and its *own* stdout handler, raising the
-    parent ``kaggle_environments`` logger's level does nothing — the child's
-    level wins and its handler bypasses parent propagation. (That's why the
-    earlier parent-level approach never worked, and why each spawn-based pebble
-    worker re-spammed on its first import.)
-
-    A logger-level filter, unlike ``setLevel``, survives the module's own
-    ``setLevel``/``addHandler`` calls and gates records *before* they reach the
-    handler — including the one-shot logging that fires during import. So this
-    MUST run before the first ``import kaggle_environments`` to kill the startup
-    spam. We drop everything below WARNING, keeping genuine warnings/errors.
-
-    Idempotent and per-process (the module flag does not cross the spawn
-    boundary, which is exactly what we want — each worker silences itself).
-    """
-    global _KAGGLE_LOGGING_SILENCED
-    if _KAGGLE_LOGGING_SILENCED:
-        return
-    logging.getLogger(
-        "kaggle_environments.envs.open_spiel_env.open_spiel_env"
-    ).addFilter(lambda record: record.levelno >= logging.WARNING)
-    # Belt-and-suspenders for any other submodule that relies on propagation.
-    logging.getLogger("kaggle_environments").setLevel(logging.WARNING)
-    _KAGGLE_LOGGING_SILENCED = True
 
 
 def _parse_debug_lines(text: str, *, player: int, step: int) -> list[dict]:
@@ -489,8 +448,6 @@ def run_match_fast(
         )
     import contextlib
     import io as _io
-
-    silence_kaggle_environments_logging()
     from kaggle_environments import make
 
     from .agent_extract import ensure_extracted

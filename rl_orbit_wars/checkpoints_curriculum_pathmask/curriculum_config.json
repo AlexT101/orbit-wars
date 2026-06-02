@@ -1,0 +1,329 @@
+{
+  "args": {
+    "bots_per_phase": 2,
+    "carry": 3,
+    "checkpoint_dir": "rl_orbit_wars/checkpoints_curriculum_pathmask",
+    "chunk_steps": 10000,
+    "device": "cpu",
+    "dry_run": false,
+    "end_gate_threshold": 0.65,
+    "entropy_coef": 0.08,
+    "entropy_coef_final": 0.025,
+    "eval_workers": 8,
+    "gate_games": 16,
+    "gate_mode": "min",
+    "gate_threshold": null,
+    "hidden": 128,
+    "ignore_bot": [],
+    "init_checkpoint": "rl_orbit_wars/checkpoints/bc_hellburner_transformer.pt",
+    "inner_eval_every_updates": 0,
+    "inner_eval_games": 8,
+    "learning_rate": 3e-05,
+    "lr_schedule": "cosine",
+    "lr_warmup_steps": 10000,
+    "max_runtime_hours": 0.0,
+    "minibatch_size": 256,
+    "model": "entity_transformer",
+    "ppo_epochs": 1,
+    "pretrain_batch_size": 256,
+    "pretrain_epochs": 4,
+    "pretrain_if_missing": true,
+    "pretrain_learning_rate": 0.0003,
+    "pretrain_max_noop_fraction": 0.08,
+    "pretrain_opponents": "random,nearest,baselines/starter",
+    "pretrain_samples": 20000,
+    "pretrain_teacher": "hellburner",
+    "ratings_json": null,
+    "rollout_steps": 512,
+    "seed": 7,
+    "snapshot_every_updates": 20,
+    "snapshot_pool_size": 4,
+    "snapshot_start_phase": 4,
+    "start_gate_threshold": 0.98,
+    "total_budget_steps": 300000,
+    "transformer_heads": 4,
+    "transformer_layers": 3,
+    "use_snapshots": false
+  },
+  "ignored": [
+    "mine/apollo_backup"
+  ],
+  "ladder": [
+    {
+      "mu": 227.51537502907,
+      "name": "random",
+      "source_name": "baselines/random"
+    },
+    {
+      "mu": 357.33075525380195,
+      "name": "nearest",
+      "source_name": "baselines/nearest-sniper"
+    },
+    {
+      "mu": 375.25215292632345,
+      "name": "baselines/starter",
+      "source_name": "baselines/starter"
+    },
+    {
+      "mu": 546.1966441756399,
+      "name": "external/sigmaborov-reinforce",
+      "source_name": "external/sigmaborov-reinforce"
+    },
+    {
+      "mu": 569.9010758200627,
+      "name": "external/peaking-bot",
+      "source_name": "external/peaking-bot"
+    },
+    {
+      "mu": 624.6160663153348,
+      "name": "external/yuriygreben-architect",
+      "source_name": "external/yuriygreben-architect"
+    },
+    {
+      "mu": 626.9749404966219,
+      "name": "external/structured-v4",
+      "source_name": "external/structured-v4"
+    },
+    {
+      "mu": 631.7687496885535,
+      "name": "external/pilkwang-structured",
+      "source_name": "external/pilkwang-structured"
+    },
+    {
+      "mu": 632.3453479196331,
+      "name": "external/ykhnkf-distance-prioritized",
+      "source_name": "external/ykhnkf-distance-prioritized"
+    },
+    {
+      "mu": 634.5315638870542,
+      "name": "external/smart-baseline",
+      "source_name": "external/smart-baseline"
+    },
+    {
+      "mu": 669.720096986768,
+      "name": "external/heuristic",
+      "source_name": "external/heuristic"
+    },
+    {
+      "mu": 672.5188707544976,
+      "name": "external/obnext",
+      "source_name": "external/obnext"
+    },
+    {
+      "mu": 687.5579747625959,
+      "name": "external/sim-search",
+      "source_name": "external/sim-search"
+    },
+    {
+      "mu": 709.8857192554057,
+      "name": "external/marco-dg",
+      "source_name": "external/marco-dg"
+    },
+    {
+      "mu": 711.1075754816321,
+      "name": "external/owproto",
+      "source_name": "external/owproto"
+    },
+    {
+      "mu": 727.1547437737192,
+      "name": "external/tamrazov-starwars",
+      "source_name": "external/tamrazov-starwars"
+    },
+    {
+      "mu": 752.2565312541658,
+      "name": "external/ppo",
+      "source_name": "external/ppo"
+    },
+    {
+      "mu": 758.1596660415727,
+      "name": "external/hellburner",
+      "source_name": "external/hellburner"
+    },
+    {
+      "mu": 789.1713630307494,
+      "name": "mine/bruteforcer",
+      "source_name": "mine/bruteforcer"
+    },
+    {
+      "mu": 830.6435778648433,
+      "name": "mine/apollo_bf",
+      "source_name": "mine/apollo_bf"
+    },
+    {
+      "mu": 835.6250803027045,
+      "name": "mine/apollo",
+      "source_name": "mine/apollo"
+    }
+  ],
+  "phases": [
+    {
+      "gate_opponents": [
+        "random",
+        "nearest",
+        "baselines/starter"
+      ],
+      "index": 0,
+      "name": "starter",
+      "reward_mode": "shaped",
+      "threshold": 0.98,
+      "train_opponents": [
+        "random",
+        "nearest",
+        "baselines/starter"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/sigmaborov-reinforce",
+        "external/peaking-bot"
+      ],
+      "index": 1,
+      "name": "rating_546_569",
+      "reward_mode": "shaped",
+      "threshold": 0.9433,
+      "train_opponents": [
+        "random",
+        "nearest",
+        "baselines/starter",
+        "external/sigmaborov-reinforce",
+        "external/peaking-bot"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/yuriygreben-architect",
+        "external/structured-v4"
+      ],
+      "index": 2,
+      "name": "rating_624_626",
+      "reward_mode": "shaped",
+      "threshold": 0.9067,
+      "train_opponents": [
+        "baselines/starter",
+        "external/sigmaborov-reinforce",
+        "external/peaking-bot",
+        "external/yuriygreben-architect",
+        "external/structured-v4"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/pilkwang-structured",
+        "external/ykhnkf-distance-prioritized"
+      ],
+      "index": 3,
+      "name": "rating_631_632",
+      "reward_mode": "score_delta",
+      "threshold": 0.87,
+      "train_opponents": [
+        "external/peaking-bot",
+        "external/yuriygreben-architect",
+        "external/structured-v4",
+        "external/pilkwang-structured",
+        "external/ykhnkf-distance-prioritized"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/smart-baseline",
+        "external/heuristic"
+      ],
+      "index": 4,
+      "name": "rating_634_669",
+      "reward_mode": "score_delta",
+      "threshold": 0.8333,
+      "train_opponents": [
+        "external/structured-v4",
+        "external/pilkwang-structured",
+        "external/ykhnkf-distance-prioritized",
+        "external/smart-baseline",
+        "external/heuristic"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/obnext",
+        "external/sim-search"
+      ],
+      "index": 5,
+      "name": "rating_672_687",
+      "reward_mode": "terminal",
+      "threshold": 0.7967,
+      "train_opponents": [
+        "external/ykhnkf-distance-prioritized",
+        "external/smart-baseline",
+        "external/heuristic",
+        "external/obnext",
+        "external/sim-search"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/marco-dg",
+        "external/owproto"
+      ],
+      "index": 6,
+      "name": "rating_709_711",
+      "reward_mode": "terminal",
+      "threshold": 0.76,
+      "train_opponents": [
+        "external/heuristic",
+        "external/obnext",
+        "external/sim-search",
+        "external/marco-dg",
+        "external/owproto"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/tamrazov-starwars",
+        "external/ppo"
+      ],
+      "index": 7,
+      "name": "rating_727_752",
+      "reward_mode": "terminal",
+      "threshold": 0.7233,
+      "train_opponents": [
+        "external/sim-search",
+        "external/marco-dg",
+        "external/owproto",
+        "external/tamrazov-starwars",
+        "external/ppo"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "external/hellburner",
+        "mine/bruteforcer"
+      ],
+      "index": 8,
+      "name": "rating_758_789",
+      "reward_mode": "terminal",
+      "threshold": 0.6867,
+      "train_opponents": [
+        "external/owproto",
+        "external/tamrazov-starwars",
+        "external/ppo",
+        "external/hellburner",
+        "mine/bruteforcer"
+      ]
+    },
+    {
+      "gate_opponents": [
+        "mine/apollo_bf",
+        "mine/apollo"
+      ],
+      "index": 9,
+      "name": "rating_830_835",
+      "reward_mode": "terminal",
+      "threshold": 0.65,
+      "train_opponents": [
+        "external/ppo",
+        "external/hellburner",
+        "mine/bruteforcer",
+        "mine/apollo_bf",
+        "mine/apollo"
+      ]
+    }
+  ]
+}

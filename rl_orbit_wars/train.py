@@ -21,10 +21,22 @@ def main() -> int:
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-schedule", choices=["linear", "cosine", "constant"], default="linear")
     parser.add_argument(
+        "--max-launches-per-turn",
+        type=int,
+        default=4,
+        help="Maximum threshold-selected fleet launches emitted by the RL policy on one game turn.",
+    )
+    parser.add_argument(
+        "--multi-launch-logit-margin",
+        type=float,
+        default=0.0,
+        help="Emit valid launches whose logit is at least noop_logit plus this margin.",
+    )
+    parser.add_argument(
         "--opponent",
         default="nearest",
         help=(
-            "Comma-separated training opponents. Supports noop/random/nearest, bot names "
+            "Comma-separated training opponents. Supports random/nearest/noop, bot names "
             "like hellburner/heuristic, and self/self_sample."
         ),
     )
@@ -38,7 +50,7 @@ def main() -> int:
     parser.add_argument("--checkpoint-dir", default="rl_orbit_wars/checkpoints")
     parser.add_argument("--eval-every-updates", type=int, default=25)
     parser.add_argument("--eval-games", type=int, default=4)
-    parser.add_argument("--eval-opponents", default="noop,random,nearest,hellburner,heuristic")
+    parser.add_argument("--eval-opponents", default="random,nearest,baselines/starter,hellburner,heuristic")
     parser.add_argument("--report-every-updates", type=int, default=1)
     parser.add_argument("--init-checkpoint", default=None)
     parser.add_argument(
@@ -74,6 +86,8 @@ def main() -> int:
         transformer_heads=args.transformer_heads,
         lr_warmup_steps=args.lr_warmup_steps,
         lr_schedule=args.lr_schedule,
+        max_launches_per_turn=args.max_launches_per_turn,
+        multi_launch_logit_margin=args.multi_launch_logit_margin,
         opponent=args.opponent,
         device=args.device,
         seed=args.seed,

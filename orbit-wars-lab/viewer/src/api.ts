@@ -39,38 +39,6 @@ export interface RunSummary {
   challenger_id?: string | null;
 }
 
-export interface RunningMatch {
-  run_id: string;
-  match_id: string;
-  agent_ids: string[];
-  mode: string;
-  started_at: string;
-  elapsed_s: number;
-}
-
-export interface SchedulerTournament {
-  id: string;
-  status: "queued" | "running" | "completed" | "aborted";
-  mode: string;
-  format: "2p" | "4p";
-  shape: "round-robin" | "gauntlet";
-  challenger_id?: string | null;
-  is_quick_match: boolean;
-  total_matches: number;
-  matches_done: number;
-  queued: number;
-  running: number;
-  started_at: string;
-}
-
-export interface SchedulerStatus {
-  concurrency: number;
-  running_count: number;
-  queued_total: number;
-  tournaments: SchedulerTournament[];
-  running: RunningMatch[];
-}
-
 export interface KaggleSubmission {
   submission_id: number;
   description: string;

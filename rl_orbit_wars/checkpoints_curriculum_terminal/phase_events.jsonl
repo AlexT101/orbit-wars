@@ -1,0 +1,9 @@
+{"bc_epochs": 4, "bc_final_accuracy": 0.23264438291139242, "bc_final_loss": 3.460059811797323, "bc_samples": 20000, "checkpoint": "rl_orbit_wars/checkpoints/bc_hellburner_transformer.pt", "kind": "pretrain_end", "label": "pretrain ended", "step": 0, "teacher": "hellburner"}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 10000}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 20000}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 30000}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 31024}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 31024}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 41024}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 51024}
+{"checkpoint": "rl_orbit_wars/checkpoints_curriculum_terminal/latest.pt", "kind": "resume", "label": "resumed", "step": 61024}
