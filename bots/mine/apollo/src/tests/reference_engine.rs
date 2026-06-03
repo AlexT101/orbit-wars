@@ -26,9 +26,23 @@ use crate::constants::{
     PLANET_CLEARANCE, ROTATION_LIMIT, SUN_RADIUS,
 };
 use crate::engine::{
-    distance, fleet_speed, point_to_segment_distance, swept_pair_hit, CometGroup, Configuration,
-    EngineState, Fleet, MoveAction, Planet, PlanetPath,
+    distance, fleet_speed, swept_pair_hit, CometGroup, Configuration, EngineState, Fleet,
+    MoveAction, Planet, PlanetPath,
 };
+
+/// Euclidean distance from point `p` to segment `v→w`. The production engine
+/// compares squared distances (`point_to_segment_distance_sq`); this reference
+/// re-derivation keeps the explicit `sqrt` form so its sun-collision check is an
+/// independent cross-check rather than a call into the code under test.
+fn point_to_segment_distance(p: (f64, f64), v: (f64, f64), w: (f64, f64)) -> f64 {
+    let l2 = (v.0 - w.0).powi(2) + (v.1 - w.1).powi(2);
+    if l2 == 0.0 {
+        return distance(p, v);
+    }
+    let t = (((p.0 - v.0) * (w.0 - v.0) + (p.1 - v.1) * (w.1 - v.1)) / l2).clamp(0.0, 1.0);
+    let projection = (v.0 + t * (w.0 - v.0), v.1 + t * (w.1 - v.1));
+    distance(p, projection)
+}
 
 const MT_N: usize = 624;
 const MT_M: usize = 397;
@@ -725,7 +739,6 @@ impl RefEngine {
                 x: start_x,
                 y: start_y,
                 angle: move_action.angle,
-                from_planet_id: move_action.from_id,
                 ships: move_action.ships,
             });
             self.next_fleet_id += 1;

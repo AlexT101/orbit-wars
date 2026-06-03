@@ -6,10 +6,10 @@
 use std::time::Instant;
 
 use super::reference_engine::RefEngine;
-use crate::engine::{Configuration, MoveAction};
 use crate::cache::EntityCache;
-use crate::strategy;
+use crate::engine::{Configuration, MoveAction};
 use crate::rollout::{opponent_turn0_actions, pick_plan_by_rollout, rollout_score};
+use crate::strategy;
 use crate::world::WorldState;
 
 fn cache_for(state: &RefEngine) -> EntityCache {
@@ -76,7 +76,6 @@ fn rollout_score_throughput() {
             None,
         );
 
-        crate::aim::counters::reset();
         for _ in 0..iters_per_seed {
             let t = Instant::now();
             let _ = rollout_score(
@@ -92,10 +91,6 @@ fn rollout_score_throughput() {
             total += t.elapsed();
             runs += 1;
         }
-        println!(
-            "  seed {seed} TIMED-LOOP counters ({iters_per_seed} iters): {}",
-            crate::aim::counters::report()
-        );
     }
 
     let dt = total.as_secs_f64();

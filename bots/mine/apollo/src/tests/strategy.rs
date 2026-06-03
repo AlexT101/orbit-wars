@@ -1,8 +1,8 @@
 //! Smoke tests for the hellburner port.
 
 use super::reference_engine::RefEngine;
-use crate::engine::Configuration;
 use crate::cache::EntityCache;
+use crate::engine::Configuration;
 use crate::strategy;
 use crate::world::WorldState;
 
@@ -64,7 +64,7 @@ fn plan_runs_on_initial_state() {
 
 #[test]
 fn plan_after_early_game_phase() {
-    // Step past EARLY_ROUNDS so the main loop (not the DFS) is exercised.
+    // Exercise the main loop several steps into the game (non-initial state).
     let mut state = RefEngine::new(42, 2, Configuration::default());
     let mut cache = cache_for(&state);
     let noop: Vec<Vec<crate::engine::MoveAction>> = vec![Vec::new(), Vec::new()];

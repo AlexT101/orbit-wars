@@ -3,3 +3,4 @@ description: "Python wrapper that delegates to a native Rust agent. Currently mi
 author: Alex Thummalapalli
 license: "Apache 2.0"
 tags: [rust, native, simulation]
+disabled: true

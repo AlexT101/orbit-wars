@@ -1,0 +1,5 @@
+data/
+weights/
+sweep_logs/
+viewer.html
+*.png

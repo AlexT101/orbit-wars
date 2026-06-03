@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-06-02T21:47:02.365511+00:00",
+  "last_updated": "2026-06-03T15:02:11.421406+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -32,9 +32,14 @@
     },
     "external/hellburner": {
       "2p": {
-        "mu": 732.994434272587,
-        "sigma": 18.810906153140817,
-        "games_played": 376
+        "mu": 724.4120492393665,
+        "sigma": 19.080276491198056,
+        "games_played": 368
+      },
+      "4p": {
+        "mu": 557.6269532201586,
+        "sigma": 130.2196583727689,
+        "games_played": 1
       }
     },
     "baselines/starter": {
@@ -84,6 +89,11 @@
         "mu": 869.9556949111555,
         "sigma": 20.934760444003366,
         "games_played": 712
+      },
+      "4p": {
+        "mu": 557.6713527121924,
+        "sigma": 130.2120194735274,
+        "games_played": 1
       }
     },
     "mine/bruteforcer": {
@@ -186,9 +196,9 @@
     },
     "baselines/hellburner": {
       "2p": {
-        "mu": 638.9323629916687,
-        "sigma": 76.73963148627425,
-        "games_played": 10
+        "mu": 608.2742283809135,
+        "sigma": 82.27997765166397,
+        "games_played": 8
       }
     },
     "external/evogen": {
@@ -200,9 +210,9 @@
     },
     "external/owheuristic": {
       "2p": {
-        "mu": 806.8163396749012,
-        "sigma": 19.000354098859525,
-        "games_played": 323
+        "mu": 809.9371353275627,
+        "sigma": 19.02253358025669,
+        "games_played": 322
       }
     },
     "mine/rl_ppo": {
@@ -214,9 +224,14 @@
     },
     "mine/alphaow_newest": {
       "2p": {
-        "mu": 1036.6135233989016,
-        "sigma": 21.256845669529675,
-        "games_played": 125
+        "mu": 1019.780681458815,
+        "sigma": 19.50392718822998,
+        "games_played": 214
+      },
+      "4p": {
+        "mu": 557.6935535792377,
+        "sigma": 130.24041183708695,
+        "games_played": 1
       }
     },
     "mine/alphaow_temp": {
@@ -226,11 +241,23 @@
         "games_played": 81
       }
     },
-    "mine/beam": {
+    "mine/prometheus": {
       "2p": {
-        "mu": 599.9999999999999,
-        "sigma": 154.93972291919502,
-        "games_played": 2
+        "mu": 1216.662974121648,
+        "sigma": 49.585874905855825,
+        "games_played": 20
+      },
+      "4p": {
+        "mu": 727.0081404884115,
+        "sigma": 156.67989039794827,
+        "games_played": 1
+      }
+    },
+    "mine/alphaow_fixed": {
+      "2p": {
+        "mu": 1050.5451161971025,
+        "sigma": 23.237591663030575,
+        "games_played": 70
       }
     }
   }

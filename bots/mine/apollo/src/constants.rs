@@ -39,13 +39,29 @@ pub const MAX_COORD_DELAY: i64 = 5; // Max extra launch delay a source may add b
 pub const A_S_LOOKAHEAD: i64 = 3; // Max turns past the natural latest arrival that coordinated schedules may target, letting delayed sources grow extra production before launch.
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
-pub const OPENING_TURNS: i64 = 3; // Number of turns at the start where we focus on economy over combat
+
+// Upper bound on the number of inbound sources enumerated per target in the
+// `2^n` subset search (`evaluate_frontline_strategy`). Orbit Wars can field
+// ~40 non-comet planets, so an uncapped `n` would overflow `1u32 << n` (panic
+// in debug, wraparound in release) once `n >= 32`, and even low-20s `n` makes
+// the per-target subset scan explode. Sources are distance-sorted nearest
+// first, so capping keeps the most relevant (soonest-arriving) ones.
+pub const MAX_SUBSET_SOURCES: usize = 16;
 
 // Distance rules
 pub const MAX_DISTANCE: f64 = 38.0; // Maximum distance between planets for us to consider fleet travel
 
 // Simulation rules
-pub const NUDGE_SCAN: i64 = 32; // Number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
+pub const NUDGE_SCAN: i64 = 32; // Baseline number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
+                                // Coarsest angular step (radians) the cone scan will use. The cone half-width is
+                                // the target's *swept-chord* span during the turn (not just its disk radius), so
+                                // it can be wide for a fast/long-turn target; the probe count scales up to keep
+                                // the step at or below this so a thin hitting window in the widened region isn't
+                                // stepped over. ~0.11° — comfortably under the ~0.16° narrowest windows observed.
+pub const MAX_CONE_STEP: f64 = 0.002;
+// Upper bound on cone-scan probes per side, to cap worst-case cost when the cone
+// is very wide (e.g. a near/degenerate target with a huge angular span).
+pub const MAX_CONE_PROBES: i64 = 256;
 
 // Nudge scan notes:
 // Measured over 30 seeds × 5 ship counts × all shooter/target pairs:
@@ -63,5 +79,5 @@ pub const NUDGE_SCAN: i64 = 32; // Number of angle steps per side scanned inside
 // 24	96.6%	1×
 // 48	98.7%	2×
 
-// For bot submissions, NUDGE_SCAN should be increased if we have remaining runtime
-// For local testing, keep NUDGE_SCAN = 16 to balance test runtime with nudge recovery coverage
+// For bot submissions, NUDGE_SCAN should be increased if we have remaining runtime.
+// 32 balances test runtime against nudge recovery coverage for local testing.
