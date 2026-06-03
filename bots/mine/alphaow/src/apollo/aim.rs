@@ -157,17 +157,12 @@ fn closest_approach(
 /// `s* ∈ [0, 1]` minimizing the radial gap `|K(s) − D(s)|` between the target's
 /// chord position `Q(s)` and the fleet's chord distance
 /// `D(s) = launch_offset + (t − 1 + s)·v` (same chord linearization the engine
-/// uses) — exactly, since `K − D` is convex (closed-form `K = D` crossing, else
-/// golden-section on the convex minimum). Aiming `θ = bearing(L → Q(s*))` puts
-/// the fleet at distance `D(s*)` along the line through `Q(s*)`, so the actual
+/// uses) — exactly, since `K − D` is convex (closed-form `K = D` roots, else the
+/// convex interior minimum). Aiming `θ = bearing(L → Q(s*))` puts the fleet at
+/// distance `D(s*)` along the line through `Q(s*)`, so the actual
 /// fleet-to-target distance at `s*` is exactly `|K(s*) − D(s*)|`. If that is
 /// ≤ `target_radius`, the engine's `swept_pair_hit` fires for turn `t` —
 /// return immediately with the earliest such turn.
-///
-/// This replaces a prior end-of-turn fixed-point iteration that could settle
-/// on a self-consistent `(angle, turns)` whose chord never actually intersects
-/// the target's chord during that turn — the cause of fleets launched at
-/// orbiters flying clean past and off the map.
 pub fn lead_target(
     cache: &EntityCache,
     shooter_id: i64,
@@ -209,9 +204,8 @@ pub fn lead_target_from(
     // gets to `L` (`|dist(L, center) − orbital_radius|`). A comet's path is not a
     // fixed-radius circle, so it gets `k_min = 0` (no skip). Intercept needs
     // `launch_offset + t·v + tr ≥ k_min`, so earlier turns are provably out of
-    // reach — start the (identical) scan there. This *under*-skips, the safe
-    // direction: unlike the old `seed_d / v` guess it can never step past a
-    // closing orbiter's true intercept turn (the bug that silently dropped shots).
+    // reach — start the scan there. Rounding down keeps this a sound under-skip
+    // that never steps past a closing orbiter's true intercept turn.
     let dlc = ((lx - CENTER).powi(2) + (ly - CENTER).powi(2)).sqrt();
     let k_min = if target.is_comet() {
         0.0
@@ -230,7 +224,7 @@ pub fn lead_target_from(
         let d0 = launch_offset + (t as f64 - 1.0) * v;
 
         // Exact closest fleet-to-target approach this turn (convex `K − D`):
-        // closed-form `K = D` crossing, else golden-section minimum.
+        // closed-form `K = D` roots, else the convex interior minimum.
         let (best_s, best_gap) = closest_approach(lx, ly, q0x, q0y, dqx, dqy, d0, v);
 
         if best_gap > tr {
@@ -647,8 +641,7 @@ fn blocked_on_path(
         // `off_board_turn`, so both endpoints are `Some` (orbiters are on the
         // whole game; a comet is only ever cached once on board, and launches
         // are never in the past, so it's present from `t = 1` onward — only its
-        // `off_board_turn` edge can fall inside the flight). This also subsumes
-        // the old `abs0 ≥ 0` / in-bounds guards.
+        // `off_board_turn` edge can fall inside the flight).
         let positions = &ent.positions;
         let lo_t = 1;
         // A comet leaving the board is parked at its last on-board position for
@@ -925,7 +918,7 @@ fn try_intercept_turn(
         return None;
     }
     // Target's swept chord during the lead's turn, for the exact per-angle
-    // first-contact test in the scan (replaces a static disk at `(tx, ty)`).
+    // first-contact test in the scan.
     let [q0x, q0y] = cache.position(target_id, launch_turn_offset + turns - 1)?;
     let [q1x, q1y] = cache.position(target_id, launch_turn_offset + turns)?;
     let dqx = q1x - q0x;

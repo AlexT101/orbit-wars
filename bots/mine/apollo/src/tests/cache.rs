@@ -69,20 +69,24 @@ fn orbiting_planet_matches_engine_after_n_turns() {
     );
 }
 
-/// The O(1) `remaining_life` (precomputed `off_board_turn`) must match the
-/// original linear scan over the `positions` table, for a real comet, at every
-/// `current_turn`.
+/// The precomputed `off_board_turn` (read by the planner to zero a comet's value
+/// past its lifetime) must match an independent scan of the public `positions`
+/// table: one past the last on-board index, clamped to `EPISODE_STEPS`.
 #[test]
-fn comet_remaining_life_matches_linear_scan() {
-    // The pre-optimization implementation, scanning the public positions table.
-    fn reference(positions: &[Option<[f64; 2]>], current: i64) -> i64 {
-        let start = current.max(0) as usize;
-        for (t, p) in positions.iter().enumerate().skip(start) {
-            if p.is_none() {
-                return t as i64 - current;
+fn comet_off_board_turn_matches_linear_scan() {
+    // Independent re-derivation of `off_board_turn` from the positions table.
+    fn reference(positions: &[Option<[f64; 2]>]) -> i64 {
+        let mut last_on_board: i64 = -1;
+        for (t, p) in positions.iter().enumerate() {
+            if p.is_some() {
+                last_on_board = t as i64;
             }
         }
-        (EPISODE_STEPS - current).max(0)
+        if last_on_board < 0 {
+            0
+        } else {
+            (last_on_board + 1).min(EPISODE_STEPS)
+        }
     }
 
     // Advance until comets spawn (they appear on fixed game steps).
@@ -98,7 +102,7 @@ fn comet_remaining_life_matches_linear_scan() {
         "expected comets to spawn"
     );
 
-    let mut cache = cache_for(&state);
+    let cache = cache_for(&state);
     let comet_ids: Vec<i64> = cache
         .entities
         .iter()
@@ -110,13 +114,13 @@ fn comet_remaining_life_matches_linear_scan() {
         "cache should hold the spawned comets"
     );
 
-    for current in 0..EPISODE_STEPS {
-        cache.set_current_turn(current);
-        for &id in &comet_ids {
-            let want = reference(&cache.get(id).unwrap().positions, current);
-            let got = cache.remaining_life(id);
-            assert_eq!(got, want, "comet {id} at current_turn {current}");
-        }
+    for &id in &comet_ids {
+        let ent = cache.get(id).unwrap();
+        assert_eq!(
+            ent.off_board_turn,
+            reference(&ent.positions),
+            "comet {id} off_board_turn"
+        );
     }
 }
 

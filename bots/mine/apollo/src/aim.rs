@@ -1,6 +1,6 @@
 //! Line-of-sight obstacle tester for fleet shots.
 //!
-//! [`aim_with_prediction`] leads the target ([`lead_target`]) at the true fleet
+//! [`aim_with_prediction`] leads the target ([`lead_target_from`]) at the true fleet
 //! speed, then checks the path with [`shot_blocked_exact`], which runs the
 //! engine's own swept-pair collision ([`crate::engine::swept_pair_hit`]) per
 //! turn against every obstacle (sun, planet, comet) over the already-cached
@@ -168,21 +168,11 @@ fn closest_approach(
 /// on a self-consistent `(angle, turns)` whose chord never actually intersects
 /// the target's chord during that turn — the cause of fleets launched at
 /// orbiters flying clean past and off the map.
-pub fn lead_target(
-    cache: &EntityCache,
-    shooter_id: i64,
-    target_id: i64,
-    launch_turn_offset: i64,
-    v: f64,
-) -> Option<(f64, i64, f64, f64, f64)> {
-    lead_target_from(cache, shooter_id, target_id, launch_turn_offset, v, 1)
-}
-
-/// [`lead_target`] but resumable: only considers intercept turns `≥ from_turn`.
-/// Returns the earliest feasible intercept at or after `from_turn`, so a caller
-/// whose earliest intercept was blocked can re-solve from `that_turn + 1` to
-/// find the next geometric intercept (the target has moved, opening a different
-/// clear angle). `from_turn = 1` reproduces [`lead_target`] exactly.
+/// Resumable: only considers intercept turns `≥ from_turn`. Returns the earliest
+/// feasible intercept at or after `from_turn`, so a caller whose earliest
+/// intercept was blocked can re-solve from `that_turn + 1` to find the next
+/// geometric intercept (the target has moved, opening a different clear angle).
+/// Pass `from_turn = 1` for the earliest feasible intercept overall.
 pub fn lead_target_from(
     cache: &EntityCache,
     shooter_id: i64,
@@ -198,7 +188,13 @@ pub fn lead_target_from(
     let tr = target.radius;
 
     let abs_launch = cache.current_turn + launch_turn_offset;
-    let max_lookahead = HORIZON.min((EPISODE_STEPS - 1 - abs_launch).max(0));
+    // A fleet launched at engine step `s` moves and can collide during that same
+    // step (reported as intercept turn 1), and the engine resolves steps through
+    // the last one, `EPISODE_STEPS - 1`. The intercept at turn `t` resolves at
+    // step `abs_launch + t - 1`, so the latest useful `t` is `EPISODE_STEPS -
+    // abs_launch` (lands on the final tick). The position table now carries the
+    // extra index `EPISODE_STEPS` that this final shot reads (see `build_*_entity`).
+    let max_lookahead = HORIZON.min((EPISODE_STEPS - abs_launch).max(0));
     if max_lookahead < 1 {
         return None;
     }

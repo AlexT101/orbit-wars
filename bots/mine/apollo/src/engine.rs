@@ -14,8 +14,8 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::constants::{
-    BOARD_SIZE, CENTER, COMET_SPEED, EPISODE_STEPS, MAX_PLAYERS, MAX_SHIP_SPEED, ROTATION_LIMIT,
-    SUN_RADIUS,
+    BOARD_SIZE, CENTER, COMET_SPEED, EPISODE_STEPS, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED,
+    ROTATION_LIMIT, SUN_RADIUS,
 };
 use crate::cache::EntityCache;
 
@@ -37,7 +37,6 @@ pub struct Fleet {
     pub x: f64,
     pub y: f64,
     pub angle: f64,
-    pub from_planet_id: i64,
     pub ships: i64,
 }
 
@@ -140,21 +139,9 @@ pub fn distance(p1: (f64, f64), p2: (f64, f64)) -> f64 {
     ((p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2)).sqrt()
 }
 
-pub fn point_to_segment_distance(p: (f64, f64), v: (f64, f64), w: (f64, f64)) -> f64 {
-    let l2 = (v.0 - w.0).powi(2) + (v.1 - w.1).powi(2);
-    if l2 == 0.0 {
-        return distance(p, v);
-    }
-    let t = (((p.0 - v.0) * (w.0 - v.0) + (p.1 - v.1) * (w.1 - v.1)) / l2).clamp(0.0, 1.0);
-    let projection = (v.0 + t * (w.0 - v.0), v.1 + t * (w.1 - v.1));
-    distance(p, projection)
-}
-
-/// Squared distance from `p` to segment `v→w`. Same projection math as
-/// [`point_to_segment_distance`] but without the final `sqrt`, for callers
-/// that only compare against a threshold: `dist < R ⟺ dist_sq < R²` for
-/// non-negative `R`, so the boolean is identical save for a 1-ULP knife edge
-/// at exactly `R`.
+/// Squared distance from `p` to segment `v→w`, for callers that only compare
+/// against a threshold: `dist < R ⟺ dist_sq < R²` for non-negative `R`, so the
+/// boolean is identical save for a 1-ULP knife edge at exactly `R`.
 #[inline]
 pub fn point_to_segment_distance_sq(p: (f64, f64), v: (f64, f64), w: (f64, f64)) -> f64 {
     let l2 = (v.0 - w.0).powi(2) + (v.1 - w.1).powi(2);
@@ -467,7 +454,7 @@ impl<'a> Simulator<'a> {
     /// Fork a sub-simulator that shares the parent's borrowed comet path tables
     /// and initial-planet table, but owns an independent copy of the mutable
     /// rollout state (planets / fleets / comet groups). Used by
-    /// `TimelineCache::build` to walk forward `HORIZON` turns from the parent
+    /// `ArrivalLedger::build` to walk forward `HORIZON` turns from the parent
     /// simulator's current step without disturbing the parent.
     ///
     /// `initial_step` is reset to the parent's current step so arrival event
@@ -840,15 +827,14 @@ impl<'a> Simulator<'a> {
             let fx = from.x;
             let fy = from.y;
 
-            let start_x = fx + ma.angle.cos() * (radius + 0.1);
-            let start_y = fy + ma.angle.sin() * (radius + 0.1);
+            let start_x = fx + ma.angle.cos() * (radius + LAUNCH_CLEARANCE);
+            let start_y = fy + ma.angle.sin() * (radius + LAUNCH_CLEARANCE);
             self.fleets.push(Fleet {
                 id: self.next_fleet_id,
                 owner: player_id,
                 x: start_x,
                 y: start_y,
                 angle: ma.angle,
-                from_planet_id: ma.from_id,
                 ships: ma.ships,
             });
             self.next_fleet_id += 1;

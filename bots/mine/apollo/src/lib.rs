@@ -1,5 +1,5 @@
 //! The Python wrapper (`main.py`) instantiates one [`Bot`] at import time and
-//! forwards every observation through `Bot::compute_moves`.
+//! forwards every observation through `Bot::compute_moves_with_search`.
 
 mod aim;
 mod constants;
@@ -43,13 +43,13 @@ fn get_item<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny
 
 /// Extract an integer field, tolerating whole-number floats.
 ///
-/// The Kaggle engine sanitizes a move's `ships` to `int(...)` but stores the
-/// move's `from_id` verbatim into the resulting fleet's `from_planet_id` slot
-/// (`orbit_wars.py`). An opponent who submits a move with a float planet id
-/// (e.g. `33.0`) therefore produces a fleet whose `from_planet_id` is a float,
-/// which a plain `extract::<i64>()` rejects with "'float' object cannot be
-/// interpreted as an integer", crashing our agent on its next turn. Falling
-/// back to an `f64` extraction makes parsing robust to such poisoned fields.
+/// The Kaggle engine sanitizes a move's `ships` to `int(...)` but stores some
+/// id fields verbatim (`orbit_wars.py`). An opponent who submits a move with a
+/// float planet id (e.g. `33.0`) therefore produces an observation whose id
+/// field is a float, which a plain `extract::<i64>()` rejects with "'float'
+/// object cannot be interpreted as an integer", crashing our agent on its next
+/// turn. Falling back to an `f64` extraction makes parsing robust to such
+/// poisoned fields.
 fn extract_i64(v: &Bound<'_, PyAny>) -> PyResult<i64> {
     match v.extract::<i64>() {
         Ok(i) => Ok(i),
@@ -88,7 +88,8 @@ fn parse_fleets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Fleet>> {
             x: row.get_item(2)?.extract()?,
             y: row.get_item(3)?.extract()?,
             angle: row.get_item(4)?.extract()?,
-            from_planet_id: extract_i64(&row.get_item(5)?)?,
+            // Column 5 is the fleet's `from_planet_id` (the source planet of the
+            // launch). The planner never reads it, so it is parsed-and-dropped.
             ships: extract_i64(&row.get_item(6)?)?,
         });
     }
@@ -210,16 +211,12 @@ impl Bot {
             .collect())
     }
 
-    /// Plan with rollout-based multi-candidate selection. Costs ~5-10x more
-    /// than `compute_moves` but rejects plans that lose to a modeled opponent.
     fn compute_moves_with_search(
         &mut self,
         obs: &Bound<'_, PyDict>,
     ) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
-        // Step-scoped L1 aim cache shared across candidate generation and every
-        // model built inside the rollout. Declared before any borrow of it.
         let shot_l1 = crate::world::ShotL1::default();
 
         // Build engine state once; reused for candidate WorldState and rollout seed.

@@ -4,7 +4,7 @@
 //! collision against every obstacle, and require the two to agree.
 
 use super::reference_engine::RefEngine;
-use crate::aim::{aim_with_prediction, lead_target, shot_blocked_exact};
+use crate::aim::{aim_with_prediction, lead_target_from, shot_blocked_exact};
 use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
 use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
 use crate::cache::{EntityCache, EntityKind};
@@ -200,7 +200,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
                     };
                     let v = fleet_speed(ships.max(1), 6.0);
                     let Some((_, _, _, _, flight_time)) =
-                        lead_target(&cache, shooter, target, 0, v)
+                        lead_target_from(&cache, shooter, target, 0, v, 1)
                     else {
                         continue;
                     };
@@ -232,7 +232,7 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
 }
 
 /// For every case where the aimer rejects a path, take the angle
-/// [`lead_target`] proposed and require the same swept-pair re-simulation to
+/// [`lead_target_from`] proposed and require the same swept-pair re-simulation to
 /// find a real collision with some non-target obstacle within the same
 /// flight-time budget.
 ///
@@ -260,7 +260,7 @@ fn blocked_verdicts_correspond_to_real_collisions() {
                 for &ships in &ships_grid {
                     let v = fleet_speed(ships.max(1), 6.0);
                     let Some((angle, turns, _, _, flight_time)) =
-                        lead_target(&cache, shooter, target, 0, v)
+                        lead_target_from(&cache, shooter, target, 0, v, 1)
                     else {
                         continue;
                     };
@@ -359,7 +359,7 @@ fn sun_blocks_chords_passing_through_center() {
 
 #[test]
 fn lead_target_returned_point_matches_returned_turn_for_orbiters() {
-    // `lead_target` returns the closest-approach point `Q(s*)` on the target's
+    // `lead_target_from` returns the closest-approach point `Q(s*)` on the target's
     // chord during the returned turn — anywhere in `[Q(turns-1), Q(turns)]`.
     // Verify the returned `(tx, ty)` lies on that segment (within numerical
     // tolerance) rather than equalling either endpoint.
@@ -729,7 +729,8 @@ fn cone_cull_clear_verdicts_sound_with_comets() {
                     continue;
                 };
                 let v = fleet_speed(ships.max(1), 6.0);
-                let Some((_, _, _, _, flight_time)) = lead_target(&cache, shooter, target, 0, v)
+                let Some((_, _, _, _, flight_time)) =
+                    lead_target_from(&cache, shooter, target, 0, v, 1)
                 else {
                     continue;
                 };
@@ -748,4 +749,38 @@ fn cone_cull_clear_verdicts_sound_with_comets() {
         }
     }
     assert!(clear_cases > 50, "expected many clear verdicts, saw {clear_cases}");
+}
+
+/// Regression: a fleet launched on the last actable step (`EPISODE_STEPS - 1`)
+/// moves and can collide that same step, so a reachable adjacent target must
+/// still yield a turn-1 intercept. The aim horizon used to be capped at
+/// `EPISODE_STEPS - 1 - abs_launch`, which collapsed to 0 here and dropped the
+/// shot before testing it (and the position table lacked the index the final
+/// tick reads). Both are fixed: the cap is `EPISODE_STEPS - abs_launch` and the
+/// table carries the trailing `EPISODE_STEPS` slot.
+#[test]
+fn final_tick_launch_can_still_lead_an_adjacent_target() {
+    use crate::engine::Planet;
+
+    // Two static planets (orbital_radius + radius >= ROTATION_LIMIT = 50) so
+    // their positions never move — keeps the geometry exact at any step.
+    let shooter = Planet { id: 1, owner: 0, x: CENTER + 49.0, y: CENTER, radius: 2.0, ships: 0, production: 0 };
+    // Centers 6 apart; with ~6.0 fleet speed the fleet sweeps from launch
+    // offset 2.1 out past the target center in a single tick.
+    let target = Planet { id: 2, owner: 1, x: CENTER + 55.0, y: CENTER, radius: 2.0, ships: 0, production: 0 };
+    let planets = vec![shooter, target];
+
+    let mut cache = EntityCache::build(&planets, &[], &[], 0.05, EPISODE_STEPS - 1);
+    cache.set_current_turn(EPISODE_STEPS - 1);
+    assert_eq!(cache.get(1).map(|e| e.kind), Some(EntityKind::StaticPlanet));
+    assert_eq!(cache.get(2).map(|e| e.kind), Some(EntityKind::StaticPlanet));
+
+    let v = fleet_speed(1000, 6.0); // ~6.0, enough to reach in one tick
+    let got = lead_target_from(&cache, 1, 2, 0, v, 1);
+    let (_, turns, _, _, flight_time) = got.expect("final-tick launch should find an intercept");
+    assert_eq!(turns, 1, "intercept should land on the launch step itself");
+    assert!(
+        flight_time > 0.0 && flight_time <= 1.0,
+        "flight_time {flight_time} should be within the single final tick"
+    );
 }

@@ -4,7 +4,6 @@
 //! supplied planner hook, then HORIZON turns of "ballistic" stepping with no new
 //! launches (in-flight fleets keep moving, combat resolves, planets produce).
 
-#![allow(dead_code)]
 
 use crate::constants::{EPISODE_STEPS, HORIZON, REACTIVE_TURNS};
 use crate::engine::Simulator;

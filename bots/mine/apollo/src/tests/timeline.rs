@@ -10,26 +10,19 @@ use crate::helpers::{
     normalize_arrivals, resolve_arrival_event, simulate_checkpoint_into, simulate_planet_timeline,
 };
 
-/// Verbatim copy of the original `simulate_planet_timeline` body, returning the
-/// fields as a tuple so we can compare without depending on `PlanetTimeline`'s
-/// (now `Rc`-wrapped) field types.
-#[allow(clippy::type_complexity)]
+/// Verbatim copy of the original `simulate_planet_timeline` rollout, returning
+/// the per-turn `owner_at`/`ships_at` arrays plus `horizon` as a tuple so we can
+/// compare without depending on `PlanetTimeline`'s (now `Rc`-wrapped) field
+/// types. (The old per-player summary fields — `keep_needed`/`min_owned`/
+/// `first_enemy`/`fall_turn`/`holds_full` — were unused by the live planner and
+/// have been removed, so they are no longer derived or asserted here.)
 fn reference_timeline(
     planet: &Planet,
     arrivals: &[ArrivalEvent],
-    player: i64,
+    _player: i64,
     horizon: i64,
     expiry_turn: Option<i64>,
-) -> (
-    Vec<i64>,
-    Vec<i64>,
-    i64,
-    i64,
-    Option<i64>,
-    Option<i64>,
-    bool,
-    i64,
-) {
+) -> (Vec<i64>, Vec<i64>, i64) {
     let horizon = horizon.max(0);
     let effective_horizon = match expiry_turn {
         Some(exp) => horizon.min((exp - 1).max(0)),
@@ -47,35 +40,19 @@ fn reference_timeline(
     let mut garrison = planet.ships;
     let mut owner_at: Vec<i64> = vec![owner; len];
     let mut ships_at: Vec<i64> = vec![garrison.max(0); len];
-    let mut min_owned: i64 = if owner == player { garrison } else { 0 };
-    let mut first_enemy: Option<i64> = None;
-    let mut fall_turn: Option<i64> = None;
 
     for turn in 1..=effective_horizon {
         if owner != -1 {
             garrison += planet.production;
         }
         let group = &by_turn[turn as usize];
-        let prev_owner = owner;
         if !group.is_empty() {
-            if prev_owner == player
-                && first_enemy.is_none()
-                && group.iter().any(|ev| ev.owner != -1 && ev.owner != player)
-            {
-                first_enemy = Some(turn);
-            }
             let (no, ng) = resolve_arrival_event(owner, garrison, group);
             owner = no;
             garrison = ng;
-            if prev_owner == player && owner != player && fall_turn.is_none() {
-                fall_turn = Some(turn);
-            }
         }
         owner_at[turn as usize] = owner;
         ships_at[turn as usize] = garrison.max(0);
-        if owner == player {
-            min_owned = min_owned.min(garrison);
-        }
     }
 
     for turn in (effective_horizon + 1)..=horizon {
@@ -83,60 +60,7 @@ fn reference_timeline(
         ships_at[turn as usize] = 0;
     }
 
-    let mut keep_needed: i64 = 0;
-    let mut holds_full = true;
-    if planet.owner == player {
-        let survives = |keep: i64| -> bool {
-            let mut sim_owner = planet.owner;
-            let mut sim_garrison = keep;
-            for turn in 1..=effective_horizon {
-                if sim_owner != -1 {
-                    sim_garrison += planet.production;
-                }
-                let group = &by_turn[turn as usize];
-                if !group.is_empty() {
-                    let (no, ng) = resolve_arrival_event(sim_owner, sim_garrison, group);
-                    sim_owner = no;
-                    sim_garrison = ng;
-                    if sim_owner != player {
-                        return false;
-                    }
-                }
-            }
-            sim_owner == player
-        };
-
-        if survives(planet.ships) {
-            let (mut lo, mut hi) = (0i64, planet.ships);
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                if survives(mid) {
-                    hi = mid;
-                } else {
-                    lo = mid + 1;
-                }
-            }
-            keep_needed = lo;
-        } else {
-            holds_full = false;
-            keep_needed = planet.ships;
-        }
-    }
-
-    (
-        owner_at,
-        ships_at,
-        keep_needed,
-        if planet.owner == player {
-            min_owned.max(0)
-        } else {
-            0
-        },
-        first_enemy,
-        fall_turn,
-        holds_full,
-        horizon,
-    )
+    (owner_at, ships_at, horizon)
 }
 
 fn planet(owner: i64, ships: i64, production: i64) -> Planet {
@@ -206,12 +130,7 @@ fn split_timeline_matches_reference() {
                                 );
                                 assert_eq!(*got.owner_at, want.0, "owner_at | {ctx}");
                                 assert_eq!(*got.ships_at, want.1, "ships_at | {ctx}");
-                                assert_eq!(got.keep_needed, want.2, "keep_needed | {ctx}");
-                                assert_eq!(got.min_owned, want.3, "min_owned | {ctx}");
-                                assert_eq!(got.first_enemy, want.4, "first_enemy | {ctx}");
-                                assert_eq!(got.fall_turn, want.5, "fall_turn | {ctx}");
-                                assert_eq!(got.holds_full, want.6, "holds_full | {ctx}");
-                                assert_eq!(got.horizon, want.7, "horizon | {ctx}");
+                                assert_eq!(got.horizon, want.2, "horizon | {ctx}");
                                 cases += 1;
                             }
                         }
