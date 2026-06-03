@@ -367,10 +367,25 @@ def _latest_table(row: dict) -> str:
             "avg_send_bin",
             "accuracy",
             "loss",
+            "train_loss",
+            "val_loss",
+            "train_pair_accuracy",
+            "val_pair_accuracy",
+            "train_source_accuracy",
+            "val_source_accuracy",
+            "train_target_accuracy",
+            "val_target_accuracy",
+            "train_pair_top5",
+            "val_pair_top5",
             "teacher",
             "samples",
+            "train_samples",
+            "val_samples",
             "noop_fraction",
+            "launch_fraction",
             "unique_labels",
+            "unique_pairs",
+            "target_name",
             "phase",
         }
     ]
@@ -542,10 +557,12 @@ def write_training_report(log_dir: Path) -> Path:
     metrics = load_jsonl(log_dir / "metrics.jsonl")
     evals = load_jsonl(log_dir / "eval.jsonl")
     bc_metrics = load_jsonl(log_dir / "bc_metrics.jsonl")
+    imitation_metrics = load_jsonl(log_dir / "imitation_metrics.jsonl")
     phase_events = load_jsonl(log_dir / "phase_events.jsonl")
     latest = metrics[-1] if metrics else {}
     latest_eval = evals[-1] if evals else {}
     latest_bc = next((row for row in reversed(bc_metrics) if row.get("phase") == "bc"), {})
+    latest_imitation = next((row for row in reversed(imitation_metrics) if row.get("phase") == "imitation"), {})
     colors = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#00a3a3"]
     curriculum_panel = _curriculum_context(log_dir)
     ppo_markers = [
@@ -569,6 +586,15 @@ def write_training_report(log_dir: Path) -> Path:
             f"epoch {latest_bc.get('epoch')} · "
             f"acc {float(latest_bc.get('accuracy', 0.0)):.1%} · "
             f"loss {float(latest_bc.get('loss', 0.0)):.4g}"
+        )
+    imitation_summary = "No source-target imitation log yet."
+    if latest_imitation:
+        imitation_summary = (
+            f"Imitation {latest_imitation.get('target_name') or latest_imitation.get('target_mode', '?')} · "
+            f"epoch {latest_imitation.get('epoch')} · "
+            f"pair {float(latest_imitation.get('val_pair_accuracy', 0.0)):.1%} · "
+            f"source {float(latest_imitation.get('val_source_accuracy', 0.0)):.1%} · "
+            f"target {float(latest_imitation.get('val_target_accuracy', 0.0)):.1%}"
         )
     reward_keys = [key for key in sorted(latest) if key.startswith("reward_")]
     if not reward_keys:
@@ -642,9 +668,22 @@ def write_training_report(log_dir: Path) -> Path:
     </div>
     <div class="subtle">{html.escape(eval_summary)}</div>
   </header>
-  <p class="subtle">{html.escape(bc_summary)}</p>
+  <p class="subtle">{html.escape(bc_summary)}<br>{html.escape(imitation_summary)}</p>
   <main class="grid">
     {curriculum_panel}
+    <details class="panel wide">
+      <summary>Source-Target Imitation</summary>
+      <div class="details-body grid">
+        {_chart(imitation_metrics, "Imitation Loss", ["train_loss", "val_loss", "train_pair_loss", "val_pair_loss"], colors, smooth=1, points=True)}
+        {_chart(imitation_metrics, "Pair Accuracy", ["train_pair_accuracy", "val_pair_accuracy", "train_pair_top5", "val_pair_top5"], colors, y_domain=(0.0, 1.0), smooth=1, points=True)}
+        {_chart(imitation_metrics, "Source And Target Accuracy", ["train_source_accuracy", "val_source_accuracy", "train_target_accuracy", "val_target_accuracy"], colors, y_domain=(0.0, 1.0), smooth=1, points=True)}
+        {_chart(imitation_metrics, "Imitation Throughput", ["samples_per_sec", "epoch_seconds"], colors, smooth=1, points=True)}
+        <section class="panel">
+          <h2>Latest Imitation Metrics</h2>
+          {_latest_table(latest_imitation)}
+        </section>
+      </div>
+    </details>
     <details class="panel wide">
       <summary>BC Pretrain</summary>
       <div class="details-body grid">

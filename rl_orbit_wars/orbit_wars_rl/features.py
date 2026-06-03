@@ -684,16 +684,15 @@ def decode_moves(obs, action_indices: list[int]) -> list[list[float]]:
     return moves
 
 
-def encode_move_as_action_index(obs, move: list[float]) -> int:
+def encode_move_as_source_target_slots(obs, move: list[float]) -> tuple[int, int] | None:
     raw_planets = list(_obs_get(obs, "planets", []) or [])
     if not move or len(move) < 3:
-        return 0
+        return None
     try:
         from_pid = int(move[0])
         angle = float(move[1])
-        ships = max(1, int(move[2]))
     except (TypeError, ValueError):
-        return 0
+        return None
 
     source_slot = None
     src = None
@@ -703,7 +702,7 @@ def encode_move_as_action_index(obs, move: list[float]) -> int:
             src = planet
             break
     if source_slot is None or src is None or int(src[5]) <= 1:
-        return 0
+        return None
 
     src_x = float(src[2])
     src_y = float(src[3])
@@ -726,8 +725,23 @@ def encode_move_as_action_index(obs, move: list[float]) -> int:
             best_target_slot = ti
 
     if best_target_slot is None:
+        return None
+
+    return source_slot, best_target_slot
+
+
+def encode_move_as_action_index(obs, move: list[float]) -> int:
+    slots = encode_move_as_source_target_slots(obs, move)
+    if slots is None:
+        return 0
+    source_slot, best_target_slot = slots
+    raw_planets = list(_obs_get(obs, "planets", []) or [])
+    try:
+        ships = max(1, int(move[2]))
+    except (TypeError, ValueError):
         return 0
 
+    src = raw_planets[source_slot]
     send_fraction = ships / max(1.0, float(src[5]))
     send_bin = min(range(len(SEND_FRACTIONS)), key=lambda i: abs(SEND_FRACTIONS[i] - send_fraction))
     return action_index(source_slot, best_target_slot, send_bin)

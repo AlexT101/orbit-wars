@@ -652,9 +652,10 @@ def train_models(
             **stats,
         }
         append_jsonl(metrics_path, row)
+        accuracy_text = f"{row['anchor_accuracy']:.1%}"
         print(
             f"{_c('imitate', BOLD + CYAN)} epoch={row['epoch']:>3}/{args.epochs} "
-            f"policy={row['policy_loss']:.4f} acc={_c(f'{row['anchor_accuracy']:.1%}', GREEN)} "
+            f"policy={row['policy_loss']:.4f} acc={_c(accuracy_text, GREEN)} "
             f"reward={row['reward_loss'] if row['reward_loss'] is not None else 'skip'}",
             flush=True,
         )

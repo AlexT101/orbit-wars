@@ -269,9 +269,10 @@ def main() -> int:
             **collection_stats,
         }
         append_jsonl(bc_metrics_path, row)
+        accuracy_text = f"{row['accuracy']:.1%}"
         print(
             f"{_c('bc', BOLD + CYAN)} epoch={row['epoch']:>3}/{args.epochs} "
-            f"loss={row['loss']:.4f} acc={_c(f'{row['accuracy']:.1%}', GREEN)}",
+            f"loss={row['loss']:.4f} acc={_c(accuracy_text, GREEN)}",
             flush=True,
         )
         write_training_report(log_dir)

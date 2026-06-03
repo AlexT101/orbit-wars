@@ -79,6 +79,58 @@ python3 rl_orbit_wars/pretrain_bc.py \
   --out rl_orbit_wars/checkpoints/bc_apollo.pt
 ```
 
+## Source-Target Replay Imitation
+
+`imitation.py` is the replay imitation path for the entity transformer. It
+learns which source planet and target planet to choose from expert actions, but
+does not learn the ship count/send fraction. That leaves count sizing to the
+separate hand-coded logic we already trust more.
+
+By default it copies the cached replay agent named `Isaiah @ Tufa Labs` and
+reuses the same AlphaOW replay manifests/cache as the value-net work:
+
+```bash
+python3 rl_orbit_wars/imitation.py \
+  --samples 50000 \
+  --epochs 12 \
+  --hidden 128 \
+  --transformer-layers 3 \
+  --transformer-heads 4 \
+  --out rl_orbit_wars/checkpoints/imitation_isaiah_source_target.pt
+```
+
+It writes `imitation_metrics.jsonl`, `imitation_config.json`,
+`imitation_dataset_stats.json`, `latest_source_target.pt`, and
+`training_report.html` in the checkpoint directory. The report auto-refreshes
+and includes source accuracy, target accuracy, pair accuracy/top-k, loss, and
+throughput.
+
+If the local cache does not contain Isaiah yet, populate it from the daily
+manifest and pin the dates you want:
+
+```bash
+python3 rl_orbit_wars/imitation.py \
+  --download-from-alphaow-manifest \
+  --start-date 2026-05-26 \
+  --end-date 2026-05-28 \
+  --samples 50000 \
+  --out rl_orbit_wars/checkpoints/imitation_isaiah_source_target.pt
+```
+
+For a quick parser/model smoke test on checked-in replays, use all visible
+players instead of the named agent:
+
+```bash
+python3 rl_orbit_wars/imitation.py \
+  --replay-dir replays \
+  --no-alphaow-manifests \
+  --target-mode all \
+  --target-name "" \
+  --samples 128 \
+  --epochs 1 \
+  --out rl_orbit_wars/checkpoints/imitation_smoke.pt
+```
+
 ## Replay Imitation + Inverse RL
 
 `imitation_irl.py` trains from Kaggle replay JSONs instead of calling a local teacher. By default it looks in the alphaow replay manifests/cache under `bots/mine/alphaow_transformer/train`, scans cached player win rates, picks the top cached agent, learns multi-launch labels with a sampled multi-label policy loss, and also saves a contrastive inverse-RL reward model that scores expert state-action pairs above valid alternatives.

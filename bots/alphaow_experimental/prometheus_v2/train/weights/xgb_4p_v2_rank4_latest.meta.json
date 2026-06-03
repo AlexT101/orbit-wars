@@ -1,0 +1,22 @@
+{
+  "dataset": "bots/alphaow_experimental/prometheus_v2/train/data/tune_adjacent_4p/combined_4p_v2_rank4.npz",
+  "features": "4p_v2[278]: 4p_v1 + pairwise placement margins/probabilities + exposure",
+  "feature_set": "4p_v2",
+  "label_mode": "ordinal",
+  "feature_dim": 278,
+  "objective": "regression",
+  "accuracy": 0.8348791455874086,
+  "rmse": 0.37512731552124023,
+  "baseline_2p_model": "/Users/yufan/Desktop/Development/orbit-wars/bots/alphaow_experimental/prometheus_v2/train/weights/xgb_46p12e88t11_latest.json",
+  "fine_tune_from": "/Users/yufan/Desktop/Development/orbit-wars/bots/alphaow_experimental/prometheus_v2/train/weights/xgb_4p_v2_rank4_latest.json",
+  "fine_tune_rounds": 120,
+  "config": {
+    "name": "xgb_4p_v2_rank4_d8_lr005_resume",
+    "max_depth": 8,
+    "learning_rate": 0.03,
+    "n_est": 120
+  },
+  "filter_strong": false,
+  "seed": 42,
+  "val_frac": 0.12
+}

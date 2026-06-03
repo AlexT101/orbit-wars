@@ -162,6 +162,8 @@ def download_dataset(row: ManifestRow, download_root: Path, skip_download: bool)
 
 
 def find_episode_sources(dataset_path: Path, slug: str) -> list[Path]:
+    if dataset_path.is_file():
+        return [dataset_path]
     zips = sorted(dataset_path.rglob("*.zip"))
     if zips:
         return zips
@@ -670,6 +672,8 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     p.add_argument("--work-dir", type=Path, default=DEFAULT_WORK)
+    p.add_argument("--source-dir", type=Path, default=None, help="local directory/zip of replay JSONs; bypasses manifest/KaggleHub")
+    p.add_argument("--source-label", default=None, help="cache label/date for --source-dir, default is source dir name")
     p.add_argument("--start-date", default=None)
     p.add_argument("--end-date", default=None)
     p.add_argument("--limit-days", type=int, default=None, help="debug cap on manifest rows")
@@ -703,14 +707,21 @@ def main() -> None:
     model_tag = fourp_tag if args.game_mode == "4p" else FEATURE_TAG
     model_out = args.model_out or (BOT_DIR / "train" / "weights" / f"{model_prefix}_{model_tag}_latest.json")
     if not args.train_only:
-        rows = read_manifest(args.manifest, args.start_date, args.end_date, args.limit_days)
+        if args.source_dir is not None:
+            source_dir = args.source_dir.expanduser().resolve()
+            label = args.source_label or source_dir.name
+            rows = [ManifestRow(date=label, slug=source_dir.name, url=str(source_dir), episodes=0, bytes=0)]
+            print(f"selected local replay source: {source_dir} label={label}")
+        else:
+            rows = read_manifest(args.manifest, args.start_date, args.end_date, args.limit_days)
         if not rows:
             raise SystemExit("manifest selection is empty")
-        print(f"selected {len(rows)} dataset day(s): {rows[0].date}..{rows[-1].date}")
+        if args.source_dir is None:
+            print(f"selected {len(rows)} dataset day(s): {rows[0].date}..{rows[-1].date}")
         ensure_rust_bins(force=args.force, game_mode=args.game_mode)
         day_artifacts = []
         for row in rows:
-            dataset_path = download_dataset(row, args.work_dir / "downloads", args.skip_download)
+            dataset_path = args.source_dir.expanduser().resolve() if args.source_dir is not None else download_dataset(row, args.work_dir / "downloads", args.skip_download)
             sources = find_episode_sources(dataset_path, row.slug)
             summary_npz, extras_npz, legacy_summary_npz, legacy_extras_npz = build_day(
                 row,

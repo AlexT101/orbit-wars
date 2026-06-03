@@ -70,6 +70,8 @@ class EntityTransformerPolicy(nn.Module):
 
     def __init__(self, hidden: int = 128, layers: int = 3, heads: int = 4) -> None:
         super().__init__()
+        if hidden % heads != 0:
+            raise ValueError(f"hidden={hidden} must be divisible by heads={heads}")
         self.planet_encoder = nn.Sequential(
             nn.Linear(PLANET_FEATURES, hidden),
             nn.LayerNorm(hidden),
