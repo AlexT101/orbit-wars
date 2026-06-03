@@ -5,10 +5,10 @@
 //! launches (in-flight fleets keep moving, combat resolves, planets produce).
 
 use crate::apollo::cache::EntityCache;
-use crate::apollo::constants::{EPISODE_STEPS, HORIZON, REACTIVE_TURNS};
+use crate::apollo::constants::{Config, EPISODE_STEPS, REACTIVE_TURNS};
 use crate::apollo::engine::Simulator;
 use crate::apollo::engine::{EngineState, Fleet, MoveAction, Planet};
-use crate::apollo::helpers::ArrivalLedger;
+use crate::apollo::helpers::{count_alive_players, ArrivalLedger};
 use crate::apollo::world::{ShotL1, WorldState};
 
 pub type PlanFn = for<'a> fn(&WorldState<'a>) -> Vec<MoveAction>;
@@ -105,7 +105,8 @@ pub fn rollout_score(
         let ledger: Option<ArrivalLedger> = if t == 0 {
             None
         } else {
-            Some(ArrivalLedger::build(&sim, HORIZON, cache))
+            let horizon = Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+            Some(ArrivalLedger::build(&sim, horizon, cache))
         };
 
         for p in 0..num_players {
@@ -130,7 +131,9 @@ pub fn rollout_score(
     }
 
     // Ballistic phase: no new launches. Fleets in flight still resolve.
-    for _ in 0..HORIZON {
+    let ballistic_horizon =
+        Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+    for _ in 0..ballistic_horizon {
         if sim.step_count() >= EPISODE_STEPS {
             break;
         }
@@ -163,7 +166,9 @@ pub fn opponent_turn0_actions(
     let ledger = match shared_ledger {
         Some(l) => l,
         None => {
-            owned_ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+            let horizon =
+                Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+            owned_ledger = ArrivalLedger::build(&sim, horizon, cache);
             &owned_ledger
         }
     };
@@ -229,7 +234,9 @@ pub fn opponent_turn0_variants(
     let ledger = match shared_ledger {
         Some(l) => l,
         None => {
-            owned_ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+            let horizon =
+                Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+            owned_ledger = ArrivalLedger::build(&sim, horizon, cache);
             &owned_ledger
         }
     };

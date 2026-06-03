@@ -32,7 +32,6 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450]; // Game steps 
 // Specific to our bot for internal decisions
 
 // Turn rules
-pub const HORIZON: i64 = 30; // Number of turns to look into the future.
 pub const ROTATION_LOOK_AHEAD_TURNS: i64 = 10; // Number of turns to look ahead when estimating future position of planets
 pub const OFFSET_LOOKAHEAD: i64 = 5; // Max base launch delay swept per target. Offset 0 emits now; winning delayed offsets become reservations so later choices cannot spend those ships.
 pub const MAX_COORD_DELAY: i64 = 5; // Max extra launch delay a source may add beyond the subset's base offset while trying to coordinate arrivals near the subset's natural latest arrival.
@@ -40,16 +39,41 @@ pub const A_S_LOOKAHEAD: i64 = 3; // Max turns past the natural latest arrival t
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 
-// Upper bound on the number of inbound sources enumerated per target in the
-// `2^n` subset search (`evaluate_frontline_strategy`). Orbit Wars can field
-// ~40 non-comet planets, so an uncapped `n` would overflow `1u32 << n` (panic
-// in debug, wraparound in release) once `n >= 32`, and even low-20s `n` makes
-// the per-target subset scan explode. Sources are distance-sorted nearest
-// first, so capping keeps the most relevant (soonest-arriving) ones.
-pub const MAX_SUBSET_SOURCES: usize = 16;
+// Fixed look-ahead used by the aimer when capping a shot's feasible arrival turn
+pub const AIM_HORIZON: i64 = 30;
 
-// Distance rules
-pub const MAX_DISTANCE: f64 = 38.0; // Maximum distance between planets for us to consider fleet travel
+#[derive(Clone, Copy, Debug)]
+pub struct Config {
+    /// Number of turns to look into the future (rollout/ledger walk length).
+    pub horizon: i64,
+    /// Maximum distance between planets for us to consider fleet travel.
+    pub max_distance: f64,
+    /// Upper bound on the number of inbound sources enumerated per target.
+    pub max_subset_sources: usize,
+}
+
+const CONFIG_2P: Config = Config {
+    horizon: 30,
+    max_distance: 38.0,
+    max_subset_sources: 16,
+};
+
+const CONFIG_4P: Config = Config {
+    horizon: 20,
+    max_distance: 32.0,
+    max_subset_sources: 12,
+};
+
+impl Config {
+    #[inline]
+    pub fn for_alive(alive: usize) -> Config {
+        if alive >= 3 {
+            CONFIG_4P
+        } else {
+            CONFIG_2P
+        }
+    }
+}
 
 // Simulation rules
 pub const NUDGE_SCAN: i64 = 32; // Baseline number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
