@@ -155,6 +155,12 @@ def list_runs(exclude_quick_match: bool = False) -> list[dict]:
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict:
+    sched = _peek_scheduler()
+    if sched is not None:
+        live = sched.tournament_details(run_id)
+        if live is not None:
+            return live
+
     run_dir = _runs_root() / run_id
     if not run_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")

@@ -29,6 +29,12 @@ def ok_job(job: QueuedMatch) -> MatchJobResult:
     )
 
 
+def delayed_job(job: QueuedMatch) -> MatchJobResult:
+    """Slow enough for API tests to observe a partially completed tournament."""
+    time.sleep(0.2)
+    return ok_job(job)
+
+
 def slow_job(job: QueuedMatch) -> MatchJobResult:
     """Sleeps long enough that the test always kills it (timeout or cancel)."""
     time.sleep(30)

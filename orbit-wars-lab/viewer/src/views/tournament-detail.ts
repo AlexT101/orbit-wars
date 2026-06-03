@@ -64,6 +64,10 @@ export async function renderTournamentDetail(
   let hasLoadedBody = false;
   let detailRequestId = 0;
 
+  function isActiveStatus(status: string): boolean {
+    return status === "queued" || status === "running";
+  }
+
   function randomSeedBase(): number {
     return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff;
   }
@@ -131,8 +135,8 @@ export async function renderTournamentDetail(
 
     currentConfig = config;
     currentRunStatus = run.status || "";
-    stopBtn.hidden = currentRunStatus !== "running";
-    if (currentRunStatus !== "running") {
+    stopBtn.hidden = !isActiveStatus(currentRunStatus);
+    if (!isActiveStatus(currentRunStatus)) {
       stopBtn.disabled = false;
       stopBtn.textContent = "Stop";
     }
@@ -219,6 +223,12 @@ export async function renderTournamentDetail(
     const totalDuration = matches.reduce((sum, m) => sum + (m.duration_s || 0), 0);
     const avgTurns = matches.length ? totalTurns / matches.length : 0;
     const avgDuration = matches.length ? totalDuration / matches.length : 0;
+    const matchesDone = run.matches_done ?? matches.length;
+    const totalMatches = run.total_matches ?? results.total_matches ?? matches.length;
+    const matchCountLabel =
+      totalMatches && matchesDone !== totalMatches
+        ? `${matchesDone}/${totalMatches}`
+        : String(matches.length);
     const seedLabel =
       config.seed_mode === "replay"
         ? `replay: ${config.replay_map?.source_name || "map"}`
@@ -232,7 +242,7 @@ export async function renderTournamentDetail(
         <div class="td-meta-item"><span class="td-label">Games/pair</span><span>${config.games_per_pair ?? "?"}</span></div>
         <div class="td-meta-item"><span class="td-label">Seed</span><span>${escapeHtml(seedLabel)}</span></div>
         <div class="td-meta-item"><span class="td-label">Agents</span><span>${agents.length}</span></div>
-        <div class="td-meta-item"><span class="td-label">Matches</span><span>${matches.length}</span></div>
+        <div class="td-meta-item"><span class="td-label">Matches</span><span>${matchCountLabel}</span></div>
         <div class="td-meta-item"><span class="td-label">Failed</span><span>${failedMatches}</span></div>
         <div class="td-meta-item"><span class="td-label">Avg turns</span><span>${avgTurns.toFixed(0)}</span></div>
         <div class="td-meta-item"><span class="td-label">Avg duration</span><span>${avgDuration.toFixed(2)}s</span></div>
@@ -260,7 +270,9 @@ export async function renderTournamentDetail(
 
       <h2 style="margin-top: 28px;">Matches (${matches.length})</h2>
       <div class="td-match-list">
-        ${matches.map((m) => renderMatchRow(m, runId)).join("")}
+        ${matches.length
+          ? matches.map((m) => renderMatchRow(m, runId)).join("")
+          : `<div class="loading">No completed matches yet.</div>`}
       </div>
     `;
 
@@ -298,7 +310,7 @@ export async function renderTournamentDetail(
   }
 
   await loadDetails({ showLoading: true });
-  if (!hasLoadedBody || currentRunStatus !== "running") {
+  if (!hasLoadedBody || !isActiveStatus(currentRunStatus)) {
     return;
   }
 
@@ -312,10 +324,10 @@ export async function renderTournamentDetail(
     if (document.hidden) return;
     try {
       const fresh = await api.getRunProgress(runId);
-      if (fresh.status !== "running") {
+      if (!isActiveStatus(fresh.status)) {
         if (pollInterval !== null) window.clearInterval(pollInterval);
         pollInterval = null;
-        if (currentRunStatus === "running") void loadDetails();
+        if (isActiveStatus(currentRunStatus)) void loadDetails();
         return;
       }
       void loadDetails();

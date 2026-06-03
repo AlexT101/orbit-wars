@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from orbit_wars_app import api
 from orbit_wars_app.main import app
 from orbit_wars_app.scheduler import Scheduler
-from tests.scheduler_fakes import ok_job
+from tests.scheduler_fakes import delayed_job, ok_job
 
 
 def _make_zoo(tmp_path: Path, names: list[str]) -> Path:
@@ -42,6 +42,18 @@ def fake_env(tmp_path: Path, monkeypatch):
     api._shutdown_scheduler()
 
 
+@pytest.fixture
+def delayed_env(tmp_path: Path, monkeypatch):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    zoo = _make_zoo(tmp_path, ["a", "b"])
+    monkeypatch.setenv("ORBIT_WARS_RUNS_DIR", str(runs))
+    monkeypatch.setenv("ORBIT_WARS_ZOO_DIR", str(zoo))
+    monkeypatch.setattr(api, "Scheduler", partial(Scheduler, job_fn=delayed_job))
+    yield runs
+    api._shutdown_scheduler()
+
+
 async def _wait_completed(ac: AsyncClient, run_id: str, timeout: float = 20.0) -> dict:
     for _ in range(int(timeout / 0.1)):
         p = await ac.get(f"/api/runs/{run_id}/progress")
@@ -49,6 +61,26 @@ async def _wait_completed(ac: AsyncClient, run_id: str, timeout: float = 20.0) -
             return p.json()
         await asyncio.sleep(0.1)
     raise AssertionError(f"{run_id} never finished")
+
+
+async def _wait_partial_details(
+    ac: AsyncClient,
+    run_id: str,
+    timeout: float = 10.0,
+) -> dict:
+    for _ in range(int(timeout / 0.05)):
+        r = await ac.get(f"/api/runs/{run_id}")
+        assert r.status_code == 200
+        data = r.json()
+        run = data.get("run") or {}
+        matches = (data.get("results") or {}).get("matches") or []
+        if (
+            run.get("status") == "running"
+            and 0 < len(matches) < run.get("total_matches", 0)
+        ):
+            return data
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{run_id} never exposed partial details")
 
 
 @pytest.mark.asyncio
@@ -67,6 +99,33 @@ async def test_queue_and_complete(fake_env):
         prog = await _wait_completed(ac, run_id)
         assert prog["status"] == "completed"
         assert prog["matches_done"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_details_include_live_partial_results(delayed_env):
+    payload = {
+        "agents": ["baselines/a", "baselines/b"],
+        "games_per_pair": 4,
+        "mode": "fast",
+    }
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await ac.put("/api/scheduler/concurrency", json={"concurrency": 1})
+        r = await ac.post("/api/tournaments", json=payload)
+        assert r.status_code == 200
+        run_id = r.json()["run_id"]
+
+        data = await _wait_partial_details(ac, run_id)
+
+        assert data["id"] == run_id
+        assert data["run"]["status"] == "running"
+        assert data["run"]["total_matches"] == 4
+        assert data["run"]["matches_done"] == len(data["results"]["matches"])
+        assert data["results"]["status"] == "running"
+        assert data["results"]["total_matches"] == 4
+        assert data["results"]["matches"][0]["match_id"] == "001"
+
+        await _wait_completed(ac, run_id)
 
 
 @pytest.mark.asyncio

@@ -315,31 +315,50 @@ class TournamentState:
 
     # ---- on-disk writers (call under self.lock) ----
 
-    def write_config(self) -> None:
+    def config_payload(self) -> dict:
         replay_map = (
             self.config.replay_map.model_dump()
             if self.config.replay_map is not None
             else None
         )
+        return {
+            "mode": self.config.mode,
+            "format": self.config.format,
+            "games_per_pair": self.config.games_per_pair,
+            "agents": self.config.agents,
+            "seed_base": self.config.seed_base,
+            "seed_mode": self.config.seed_mode,
+            "replay_map": replay_map,
+            "save_replays": self.config.save_replays,
+            "shape": self.config.shape,
+            "challenger_id": self.config.challenger_id,
+            "is_quick_match": self.config.is_quick_match,
+            "started_at": self.started_at,
+        }
+
+    def write_config(self) -> None:
         (self.run_dir / "config.json").write_text(
-            json.dumps(
-                {
-                    "mode": self.config.mode,
-                    "format": self.config.format,
-                    "games_per_pair": self.config.games_per_pair,
-                    "agents": self.config.agents,
-                    "seed_base": self.config.seed_base,
-                    "seed_mode": self.config.seed_mode,
-                    "replay_map": replay_map,
-                    "save_replays": self.config.save_replays,
-                    "shape": self.config.shape,
-                    "challenger_id": self.config.challenger_id,
-                    "is_quick_match": self.config.is_quick_match,
-                    "started_at": self.started_at,
-                },
-                indent=2,
-            )
+            json.dumps(self.config_payload(), indent=2)
         )
+
+    def run_payload(
+        self,
+        *,
+        status: str,
+        matches_done: int,
+        finished_at: Optional[str] = None,
+    ) -> dict:
+        return {
+            "id": self.id,
+            "started_at": self.started_at,
+            "finished_at": finished_at,
+            "mode": self.config.mode,
+            "format": self.config.format,
+            "status": status,
+            "total_matches": self.total_matches,
+            "matches_done": matches_done,
+            "is_quick_match": self.config.is_quick_match,
+        }
 
     def write_run_json(
         self,
@@ -365,17 +384,11 @@ class TournamentState:
                 return
             self._run_json_last_write_t = now
             self._run_json_last_done = matches_done
-        payload = {
-            "id": self.id,
-            "started_at": self.started_at,
-            "finished_at": finished_at,
-            "mode": self.config.mode,
-            "format": self.config.format,
-            "status": status,
-            "total_matches": self.total_matches,
-            "matches_done": matches_done,
-            "is_quick_match": self.config.is_quick_match,
-        }
+        payload = self.run_payload(
+            status=status,
+            matches_done=matches_done,
+            finished_at=finished_at,
+        )
         target = self.run_dir / "run.json"
         tmp = self.run_dir / "run.json.tmp"
         tmp.write_text(json.dumps(payload, indent=2))
@@ -402,23 +415,36 @@ class TournamentState:
             "agent_stats": agent_stats,
         }
 
+    def results_payload(self, status: str) -> dict:
+        matches = sorted(self.results, key=lambda m: m.match_id)
+        return {
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "total_matches": self.total_matches,
+            "matches": [m.model_dump() for m in matches],
+            "summary": self.build_summary(),
+            "status": status,
+        }
+
     def write_results_json(self, status: RunStatus) -> None:
         # Parallel completion is out-of-order; sort by match_id so results.json
         # reads naturally and the head-to-head matrix stays consistent.
         self.results.sort(key=lambda m: m.match_id)
         (self.run_dir / "results.json").write_text(
-            json.dumps(
-                {
-                    "started_at": self.started_at,
-                    "finished_at": self.finished_at,
-                    "total_matches": self.total_matches,
-                    "matches": [m.model_dump() for m in self.results],
-                    "summary": self.build_summary(),
-                    "status": status,
-                },
-                indent=2,
-            )
+            json.dumps(self.results_payload(status), indent=2)
         )
+
+    def details_payload(self, status: str) -> dict:
+        return {
+            "id": self.id,
+            "config": self.config_payload(),
+            "results": self.results_payload(status),
+            "run": self.run_payload(
+                status=status,
+                matches_done=self.completed_count,
+                finished_at=self.finished_at,
+            ),
+        }
 
 
 class Scheduler:
@@ -769,6 +795,16 @@ class Scheduler:
                 "matches_done": ts.completed_count,
                 "total_matches": ts.total_matches,
             }
+
+    def tournament_details(self, run_id: str) -> Optional[dict]:
+        """In-memory details for an active tournament, including completed matches."""
+        with self._lock:
+            ts = self._tournaments.get(run_id)
+            status = ts.status if ts is not None else None
+        if ts is None or status is None:
+            return None
+        with ts.lock:
+            return ts.details_payload(status)
 
     def is_active(self, run_id: str) -> bool:
         with self._lock:
