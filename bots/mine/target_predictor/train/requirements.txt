@@ -1,0 +1,8 @@
+numpy
+xgboost
+kagglehub
+kagglesdk
+torch
+
+# Optional, only needed for train_gbm.py LightGBM comparison runs.
+lightgbm
