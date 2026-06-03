@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-06-02T14:59:45.001173+00:00",
+  "last_updated": "2026-06-03T15:02:11.421406+00:00",
   "ratings": {
     "baselines/nearest-sniper": {
       "2p": {
@@ -224,9 +224,9 @@
     },
     "mine/alphaow_newest": {
       "2p": {
-        "mu": 1013.1537980992986,
-        "sigma": 20.878157506129483,
-        "games_played": 164
+        "mu": 1019.780681458815,
+        "sigma": 19.50392718822998,
+        "games_played": 214
       },
       "4p": {
         "mu": 557.6935535792377,
@@ -255,9 +255,9 @@
     },
     "mine/alphaow_fixed": {
       "2p": {
-        "mu": 1066.884950493514,
-        "sigma": 39.88203420649476,
-        "games_played": 20
+        "mu": 1050.5451161971025,
+        "sigma": 23.237591663030575,
+        "games_played": 70
       }
     }
   }
