@@ -2,8 +2,6 @@
 //! Refreshed at start of game and when new comets spawn
 //! Lookups are relative to current turn, i.e. `EntityCache::position(id, turns_ahead)`
 
-#![allow(dead_code)]
-
 use std::f64::consts::FRAC_PI_2;
 
 use parking_lot::Mutex;
@@ -111,9 +109,10 @@ pub struct Entity {
     pub orbital_radius: f64, // 0.0 for comets since they don't orbit sun
     pub positions: Vec<Option<[f64; 2]>>, // Pre-computed positions, or None if not on board (comets)
     /// First absolute turn at which the entity is off the board, precomputed at
-    /// build time so [`EntityCache::remaining_life`] is O(1). Comet paths are a
-    /// single contiguous on-board window, so this is `last_on_board + 1`
-    /// (clamped to `EPISODE_STEPS`). Planets never leave: `EPISODE_STEPS`.
+    /// build time (read by [`crate::apollo::helpers`] when zeroing comet value past its
+    /// lifetime). Comet paths are a single contiguous on-board window, so this is
+    /// `last_on_board + 1` (clamped to `EPISODE_STEPS`). Planets never leave:
+    /// `EPISODE_STEPS`.
     pub(crate) off_board_turn: i64,
     /// Capsule approximation of the on-board arc as `[ax, ay, bx, by]`: the chord
     /// from the first to the last on-board position. Together with [`Self::bulge`]
@@ -141,11 +140,6 @@ impl Entity {
     #[inline]
     pub fn is_static(&self) -> bool {
         matches!(self.kind, EntityKind::StaticPlanet)
-    }
-
-    #[inline]
-    pub fn is_dynamic(&self) -> bool {
-        !self.is_static()
     }
 
     #[inline]
@@ -419,7 +413,7 @@ impl EntityCache {
     }
 
     /// Cross-turn fast-path lookup for a static→static or orbiting→orbiting
-    /// shot, skipping `lead_target` and the whole per-entity planet sweep.
+    /// shot, skipping `lead_target_from` and the whole per-entity planet sweep.
     /// Returns:
     ///   * [`InvariantVerdict::Use`] — the carried base, derived for this turn
     ///     (identity for static, rotated `ω·Δturn` for orbiting) and confirmed
@@ -478,8 +472,7 @@ impl EntityCache {
         // a disc-qualified path; only a comet can change the verdict this turn.
         let (angle, _turns, _tx, _ty, flight_time) = derived;
         let v = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
-        if aim::comet_blocks_path(self, src, target, angle, flight_time, v, launch_turn_offset)
-        {
+        if aim::comet_blocks_path(self, src, target, angle, flight_time, v, launch_turn_offset) {
             return InvariantVerdict::SingleSolve;
         }
         InvariantVerdict::Use(derived)
@@ -628,7 +621,9 @@ impl EntityCache {
     pub fn position(&self, id: i64, turns_ahead: i64) -> Option<[f64; 2]> {
         let entity = self.get(id)?;
         let abs = self.current_turn + turns_ahead;
-        if abs < 0 || abs >= EPISODE_STEPS {
+        // Table holds indices `[0, EPISODE_STEPS]` (one past the step count) so a
+        // final-tick intercept can read the target's last position.
+        if abs < 0 || abs > EPISODE_STEPS {
             return None;
         }
         entity.positions[abs as usize]
@@ -639,31 +634,17 @@ impl EntityCache {
     /// `current_turn`). Used by [`crate::apollo::engine::Simulator`] during rollout,
     /// where the simulator tracks its own absolute step and `current_turn` reflects
     /// a different (per-bot-turn) notion. Returns `None` when the entity is
-    /// unknown, off-board (comets), or the turn is outside `[0, EPISODE_STEPS)`.
+    /// unknown, off-board (comets), or the turn is outside `[0, EPISODE_STEPS]`.
     #[inline]
     pub fn position_abs(&self, id: i64, abs_step: i64) -> Option<[f64; 2]> {
-        if abs_step < 0 || abs_step >= EPISODE_STEPS {
+        // `[0, EPISODE_STEPS]` inclusive — see `position`. Index `EPISODE_STEPS`
+        // is the post-move position for the final step, which the engine's
+        // orbital loop reads as `position_abs(id, turn_step + 1)` on step
+        // `EPISODE_STEPS - 1` (its trig fallback now only fires without a cache).
+        if abs_step < 0 || abs_step > EPISODE_STEPS {
             return None;
         }
         self.get(id)?.positions[abs_step as usize]
-    }
-
-    /// Turns remaining until `id` leaves the board (for comets) or game end (for
-    /// planets), relative to `current_turn`. O(1) via the precomputed
-    /// `off_board_turn`; returns 0 for a comet not currently on the board
-    /// (already gone, or not yet spawned).
-    pub fn remaining_life(&self, id: i64) -> i64 {
-        let Some(entity) = self.get(id) else {
-            return 0;
-        };
-        if !entity.is_comet() {
-            return (EPISODE_STEPS - self.current_turn).max(0);
-        }
-        let cur = self.current_turn;
-        if cur < 0 || cur >= EPISODE_STEPS || entity.positions[cur as usize].is_none() {
-            return 0;
-        }
-        (entity.off_board_turn - cur).max(0)
     }
 }
 
@@ -779,7 +760,11 @@ fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {
         EntityKind::OrbitingPlanet
     };
 
-    let cap = EPISODE_STEPS as usize;
+    // One extra slot past `EPISODE_STEPS`: a fleet launched on the last actable
+    // step can still collide that step, and the aimer reads the target position
+    // at index `EPISODE_STEPS` for that final-tick intercept (see `lead_target_from`
+    // and the engine's matching trig fallback in `Simulator::step_with_actions`).
+    let cap = EPISODE_STEPS as usize + 1;
     let mut positions = Vec::with_capacity(cap);
     if is_static {
         for _ in 0..cap {
@@ -787,7 +772,7 @@ fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {
         }
     } else {
         let init_angle = dy.atan2(dx);
-        for t in 0..(EPISODE_STEPS) {
+        for t in 0..(EPISODE_STEPS + 1) {
             let effective = (t - 1).max(0);
             let angle = init_angle + angular_velocity * effective as f64;
             positions.push(Some([
@@ -817,7 +802,10 @@ fn build_planet_entity(planet: &Planet, angular_velocity: f64) -> Entity {
 }
 
 fn build_comet_entity(pid: i64, group: &CometGroup, idx: usize, current_step: i64) -> Entity {
-    let cap = EPISODE_STEPS as usize;
+    // `+ 1` mirrors `build_planet_entity`: the trailing index `EPISODE_STEPS`
+    // stays `None` for comets (no final-tick comet intercepts are planned), but
+    // its presence keeps `position`/`position_abs` in-bounds at that index.
+    let cap = EPISODE_STEPS as usize + 1;
     let mut positions = vec![None; cap];
 
     let mut first_on_board: i64 = -1;

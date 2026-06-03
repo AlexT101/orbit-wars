@@ -80,6 +80,7 @@ fn fleet_actions(state: &RefEngine) -> Vec<Vec<MoveAction>> {
                 from_id: planet.id,
                 angle,
                 ships: planet.ships / 2,
+                target: -1,
             });
         }
     }

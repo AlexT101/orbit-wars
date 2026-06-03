@@ -2,6 +2,7 @@
 
 pub mod apollo;
 pub mod apollo_bridge;
+pub mod beam;
 pub mod duct;
 pub mod focused_plan;
 pub mod mcts;

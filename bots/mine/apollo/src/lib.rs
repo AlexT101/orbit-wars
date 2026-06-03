@@ -1,13 +1,13 @@
 //! The Python wrapper (`main.py`) instantiates one [`Bot`] at import time and
-//! forwards every observation through `Bot::compute_moves`.
+//! forwards every observation through `Bot::compute_moves_with_search`.
 
 mod aim;
+mod cache;
 mod constants;
 mod engine;
-mod cache;
-mod strategy;
 mod helpers;
 mod rollout;
+mod strategy;
 mod world;
 
 #[cfg(test)]
@@ -17,9 +17,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
+use crate::cache::EntityCache;
 use crate::constants::{COMET_SPAWN_STEPS, HORIZON, TOTAL_OVERAGE_TIME};
 use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
-use crate::cache::EntityCache;
 use crate::helpers::ArrivalLedger;
 use crate::rollout::pick_plan_by_rollout;
 use crate::world::WorldState;
@@ -43,13 +43,13 @@ fn get_item<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny
 
 /// Extract an integer field, tolerating whole-number floats.
 ///
-/// The Kaggle engine sanitizes a move's `ships` to `int(...)` but stores the
-/// move's `from_id` verbatim into the resulting fleet's `from_planet_id` slot
-/// (`orbit_wars.py`). An opponent who submits a move with a float planet id
-/// (e.g. `33.0`) therefore produces a fleet whose `from_planet_id` is a float,
-/// which a plain `extract::<i64>()` rejects with "'float' object cannot be
-/// interpreted as an integer", crashing our agent on its next turn. Falling
-/// back to an `f64` extraction makes parsing robust to such poisoned fields.
+/// The Kaggle engine sanitizes a move's `ships` to `int(...)` but stores some
+/// id fields verbatim (`orbit_wars.py`). An opponent who submits a move with a
+/// float planet id (e.g. `33.0`) therefore produces an observation whose id
+/// field is a float, which a plain `extract::<i64>()` rejects with "'float'
+/// object cannot be interpreted as an integer", crashing our agent on its next
+/// turn. Falling back to an `f64` extraction makes parsing robust to such
+/// poisoned fields.
 fn extract_i64(v: &Bound<'_, PyAny>) -> PyResult<i64> {
     match v.extract::<i64>() {
         Ok(i) => Ok(i),
@@ -88,7 +88,8 @@ fn parse_fleets(seq: &Bound<'_, PyAny>) -> PyResult<Vec<Fleet>> {
             x: row.get_item(2)?.extract()?,
             y: row.get_item(3)?.extract()?,
             angle: row.get_item(4)?.extract()?,
-            from_planet_id: extract_i64(&row.get_item(5)?)?,
+            // Column 5 is the fleet's `from_planet_id` (the source planet of the
+            // launch). The planner never reads it, so it is parsed-and-dropped.
             ships: extract_i64(&row.get_item(6)?)?,
         });
     }
@@ -202,6 +203,7 @@ impl Bot {
         world.shot_l1 = Some(&shot_l1);
 
         let moves = crate::strategy::plan(&world);
+        let moves = crate::strategy::redirect_moves(&world, moves);
         self.current_turn += 1;
         Ok(moves
             .into_iter()
@@ -209,16 +211,12 @@ impl Bot {
             .collect())
     }
 
-    /// Plan with rollout-based multi-candidate selection. Costs ~5-10x more
-    /// than `compute_moves` but rejects plans that lose to a modeled opponent.
     fn compute_moves_with_search(
         &mut self,
         obs: &Bound<'_, PyDict>,
     ) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
-        // Step-scoped L1 aim cache shared across candidate generation and every
-        // model built inside the rollout. Declared before any borrow of it.
         let shot_l1 = crate::world::ShotL1::default();
 
         // Build engine state once; reused for candidate WorldState and rollout seed.
@@ -274,6 +272,25 @@ impl Bot {
             Some(&initial_ledger),
             Some(&shot_l1),
         );
+
+        // Final reroute pass on the chosen plan only — after the rollout has
+        // scored the untouched policy. Rebuild a WorldState (the rollout's
+        // mutable cache borrow has ended) so `redirect_moves` can re-derive
+        // travel times and project intermediate planets' ownership.
+        let moves = {
+            let cache_ref = self.cache.as_ref().expect("entity cache populated above");
+            let final_sim = Simulator::new(&initial_state);
+            let mut world = WorldState::from_simulator_with_ledger(
+                player,
+                &final_sim,
+                &initial_ledger,
+                cache_ref,
+            );
+            world.remaining_overage_time = obs.remaining_overage_time;
+            world.shot_l1 = Some(&shot_l1);
+            crate::strategy::redirect_moves(&world, moves)
+        };
+
         self.current_turn += 1;
         Ok(moves
             .into_iter()
@@ -381,15 +398,24 @@ fn aim_angle(
     }
 
     // Comets are optional in the benchmark obs — default to none.
-    let (comets, comet_planet_ids) = match (obs.get_item("comets")?, obs.get_item("comet_planet_ids")?) {
-        (Some(c), Some(ids)) => (parse_comets(&c)?, ids.extract::<Vec<i64>>()?),
-        _ => (Vec::new(), Vec::new()),
-    };
+    let (comets, comet_planet_ids) =
+        match (obs.get_item("comets")?, obs.get_item("comet_planet_ids")?) {
+            (Some(c), Some(ids)) => (parse_comets(&c)?, ids.extract::<Vec<i64>>()?),
+            _ => (Vec::new(), Vec::new()),
+        };
 
-    let cache = EntityCache::build(&planets, &comets, &comet_planet_ids, angular_velocity, obs_current_step(obs)?);
+    let cache = EntityCache::build(
+        &planets,
+        &comets,
+        &comet_planet_ids,
+        angular_velocity,
+        obs_current_step(obs)?,
+    );
 
-    Ok(crate::aim::aim_with_prediction(&cache, source, target, fleet_size, 0)
-        .map(|(angle, _turns, _tx, _ty, _flight_time)| angle))
+    Ok(
+        crate::aim::aim_with_prediction(&cache, source, target, fleet_size, 0)
+            .map(|(angle, _turns, _tx, _ty, _flight_time)| angle),
+    )
 }
 
 #[pymodule]
