@@ -32,6 +32,10 @@ name = "summary_parity"
 path = "src/bin/summary_parity.rs"
 
 [[bin]]
+name = "spatial_parity"
+path = "src/bin/spatial_parity.rs"
+
+[[bin]]
 name = "extract_v2"
 path = "src/bin/extract_v2.rs"
 

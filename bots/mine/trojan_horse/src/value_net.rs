@@ -207,6 +207,8 @@ enum InputKind {
     SummaryV8,
     /// 157-d v9: v8 plus causal tempo/history slopes.
     SummaryV9,
+    /// 170-d v10: v9 plus 13 spatial/reachability features.
+    SummaryV10,
     /// 236-d 4P-specific layout with global/map features, my block, three
     /// threat-ordered opponent blocks, aggregate enemy features, and pairwise
     /// matchup/rank features.
@@ -257,6 +259,8 @@ fn detect_kind(input_dim: usize) -> Option<InputKind> {
         Some(InputKind::SummaryV8)
     } else if input_dim == summary_features_v9::DIM {
         Some(InputKind::SummaryV9)
+    } else if input_dim == summary_features_v10::DIM {
+        Some(InputKind::SummaryV10)
     } else if input_dim == summary_features_4p_v1::DIM {
         Some(InputKind::FourPV1)
     } else if input_dim == summary_features_4p_v1::DIM_V2 {
@@ -646,6 +650,10 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
                 let feats = summary_features_v9::extract(state, me);
                 forward_raw(w, &feats)
             }
+            InputKind::SummaryV10 => {
+                let feats = summary_features_v10::extract(state, me);
+                forward_raw(w, &feats)
+            }
             InputKind::FourPV1 => {
                 let feats = summary_features_4p_v1::extract(state, me);
                 forward_raw(w, &feats)
@@ -699,6 +707,10 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
             }
             InputKind::SummaryV9 => {
                 let feats = summary_features_v9::extract(state, me);
+                model.predict_value(&feats)
+            }
+            InputKind::SummaryV10 => {
+                let feats = summary_features_v10::extract(state, me);
                 model.predict_value(&feats)
             }
             InputKind::FourPV1 => {
@@ -1878,6 +1890,204 @@ pub mod summary_features_v9 {
         let mut out = [0f32; DIM];
         out[..summary_features_v8::DIM].copy_from_slice(&core);
         out[summary_features_v8::DIM..].copy_from_slice(&tempo);
+        out
+    }
+}
+
+/// 13-d spatial / reachability features, mirrored exactly from the Python
+/// `train/spatial_features.py` (inspired by the open-source `producer_lite`
+/// planner). These add real planet-position geometry — distance-decayed
+/// reachable enemy mass, frontline distance, capture vulnerability, in-flight
+/// fleet threat, and center control — that the spatially-blind summary
+/// aggregates lack. Parity is checked by `train/check_spatial_parity.py`.
+///
+/// All features are from the perspective of player `me`; positive differences
+/// favour `me`. Computed in f64 then cast to f32 to match the Python builder.
+pub mod summary_features_spatial {
+    use super::*;
+
+    pub const DIM: usize = 13;
+    const HORIZON: f64 = 18.0;
+    const SUN: (f64, f64) = (50.0, 50.0);
+
+    fn fleet_speed(ships: f64) -> f64 {
+        let s = ships.max(1.0);
+        let speed = 1.0 + 5.0 * (s.ln() / 1000.0_f64.ln()).powf(1.5);
+        speed.clamp(1.0, 6.0)
+    }
+
+    pub fn extract(state: &GameState, me: i32) -> [f32; DIM] {
+        let mut out = [0f32; DIM];
+        let planets = &state.planets;
+        let n = planets.len();
+        if n == 0 {
+            return out;
+        }
+
+        // Per-planet arrays.
+        let xy: Vec<(f64, f64)> = planets.iter().map(|p| (p.x, p.y)).collect();
+        let ships: Vec<f64> = planets.iter().map(|p| (p.ships as f64).max(0.0)).collect();
+        let prod: Vec<f64> = planets.iter().map(|p| p.production as f64).collect();
+        let is_me: Vec<bool> = planets.iter().map(|p| p.owner == me).collect();
+        let is_opp: Vec<bool> = planets.iter().map(|p| p.owner >= 0 && p.owner != me).collect();
+        let n_me = is_me.iter().filter(|&&b| b).count();
+        let n_opp = is_opp.iter().filter(|&&b| b).count();
+        if n_me == 0 || n_opp == 0 {
+            return out;
+        }
+        let speed: Vec<f64> = ships.iter().map(|&s| fleet_speed(s)).collect();
+        let reach: Vec<f64> = speed.iter().map(|&sp| (sp * HORIZON).max(1e-6)).collect();
+
+        let dist = |a: (f64, f64), b: (f64, f64)| -> f64 {
+            let dx = a.0 - b.0;
+            let dy = a.1 - b.1;
+            (dx * dx + dy * dy).max(0.0).sqrt()
+        };
+
+        // Reachable-mass aggregates onto each target planet.
+        let mut enemy_onto = vec![0.0f64; n]; // enemy mass reaching tgt
+        let mut my_onto = vec![0.0f64; n]; // my mass reaching tgt
+        for s in 0..n {
+            if !(is_me[s] || is_opp[s]) {
+                continue;
+            }
+            for t in 0..n {
+                if s == t {
+                    continue;
+                }
+                let decay = (1.0 - dist(xy[s], xy[t]) / reach[s]).max(0.0);
+                if decay <= 0.0 {
+                    continue;
+                }
+                let c = ships[s] * decay;
+                if is_opp[s] {
+                    enemy_onto[t] += c;
+                } else if is_me[s] {
+                    my_onto[t] += c;
+                }
+            }
+        }
+
+        let mut my_recv = 0.0;
+        let mut opp_recv = 0.0;
+        let mut max_enemy_pressure = 0.0f64;
+        let mut my_vuln = 0.0f64;
+        let mut opp_vuln = 0.0f64;
+        let mut threatened_prod_me = 0.0f64;
+        let mut threatened_prod_opp = 0.0f64;
+        let mut frontline_min = f64::INFINITY;
+        let mut frontline_nearest_sum = 0.0f64;
+        let mut center_me = 0.0f64;
+        let mut center_opp = 0.0f64;
+
+        for t in 0..n {
+            let dc = dist(xy[t], SUN);
+            let w = 1.0 / (1.0 + dc);
+            if is_me[t] {
+                my_recv += enemy_onto[t];
+                if enemy_onto[t] > max_enemy_pressure {
+                    max_enemy_pressure = enemy_onto[t];
+                }
+                if enemy_onto[t] > ships[t] {
+                    my_vuln += 1.0;
+                    threatened_prod_me += prod[t];
+                }
+                center_me += ships[t] * w;
+                // Nearest enemy distance from this (my) planet.
+                let mut nearest = f64::INFINITY;
+                for j in 0..n {
+                    if is_opp[j] {
+                        let d = dist(xy[t], xy[j]);
+                        if d < nearest {
+                            nearest = d;
+                        }
+                        if d < frontline_min {
+                            frontline_min = d;
+                        }
+                    }
+                }
+                frontline_nearest_sum += nearest;
+            } else if is_opp[t] {
+                opp_recv += my_onto[t];
+                if my_onto[t] > ships[t] {
+                    opp_vuln += 1.0;
+                    threatened_prod_opp += prod[t];
+                }
+                center_opp += ships[t] * w;
+            }
+        }
+
+        // In-flight fleet threat.
+        let mut incoming = 0.0f64;
+        let mut outgoing = 0.0f64;
+        for f in &state.fleets {
+            if f.owner < 0 {
+                continue;
+            }
+            let fxy = (f.x, f.y);
+            let fs = (f.ships as f64).max(0.0);
+            let fr = (fleet_speed(fs) * HORIZON).max(1e-6);
+            if f.owner != me {
+                // enemy fleet -> nearest my planet
+                let mut nearest = f64::INFINITY;
+                for t in 0..n {
+                    if is_me[t] {
+                        let d = dist(fxy, xy[t]);
+                        if d < nearest {
+                            nearest = d;
+                        }
+                    }
+                }
+                if nearest.is_finite() {
+                    incoming += fs * (1.0 - nearest / fr).max(0.0);
+                }
+            } else {
+                // my fleet -> nearest enemy planet
+                let mut nearest = f64::INFINITY;
+                for t in 0..n {
+                    if is_opp[t] {
+                        let d = dist(fxy, xy[t]);
+                        if d < nearest {
+                            nearest = d;
+                        }
+                    }
+                }
+                if nearest.is_finite() {
+                    outgoing += fs * (1.0 - nearest / fr).max(0.0);
+                }
+            }
+        }
+
+        out[0] = my_recv as f32;
+        out[1] = opp_recv as f32;
+        out[2] = (opp_recv - my_recv) as f32;
+        out[3] = max_enemy_pressure as f32;
+        out[4] = frontline_min as f32;
+        out[5] = (frontline_nearest_sum / n_me as f64) as f32;
+        out[6] = my_vuln as f32;
+        out[7] = opp_vuln as f32;
+        out[8] = (opp_vuln - my_vuln) as f32;
+        out[9] = incoming as f32;
+        out[10] = outgoing as f32;
+        out[11] = (threatened_prod_opp - threatened_prod_me) as f32;
+        out[12] = (center_me - center_opp) as f32;
+        out
+    }
+}
+
+/// 170-d v10: summary_v9 (157) plus 13 spatial/reachability features.
+/// Layout: `[summary_features_v9 (157)][summary_features_spatial (13)]`.
+pub mod summary_features_v10 {
+    use super::*;
+
+    pub const DIM: usize = summary_features_v9::DIM + summary_features_spatial::DIM;
+
+    pub fn extract(state: &GameState, me: i32) -> [f32; DIM] {
+        let v9 = summary_features_v9::extract(state, me);
+        let sp = summary_features_spatial::extract(state, me);
+        let mut out = [0f32; DIM];
+        out[..summary_features_v9::DIM].copy_from_slice(&v9);
+        out[summary_features_v9::DIM..].copy_from_slice(&sp);
         out
     }
 }

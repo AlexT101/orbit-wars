@@ -16,7 +16,7 @@ _LOCK = threading.Lock()
 
 # Value nets bundled with the bot. main.py points the Rust runtime at both
 # when the caller hasn't set them, so mixed 2P/4P runs route automatically.
-_DEFAULT_VALUE_NET_2P = "train/weights/xgb_46p12e88t11_latest.json"
+_DEFAULT_VALUE_NET_2P = "train/weights/xgb_46p12e88t11sp13_latest.json"
 _DEFAULT_VALUE_NET_4P_CANDIDATES = (
     "train/weights/xgb_4p_v2_rank4_latest.json",
     "train/weights/xgb_4p_v1_latest.json",
