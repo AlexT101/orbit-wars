@@ -66,7 +66,6 @@ fn to_apollo_fleet(f: &crate::Fleet) -> AFleet {
         x: f.x,
         y: f.y,
         angle: f.angle,
-        from_planet_id: f.from_planet_id,
         ships: f.ships,
     }
 }
