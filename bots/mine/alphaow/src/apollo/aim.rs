@@ -1,6 +1,6 @@
 //! Line-of-sight obstacle tester for fleet shots.
 //!
-//! [`aim_with_prediction`] leads the target ([`lead_target`]) at the true fleet
+//! [`aim_with_prediction`] leads the target ([`lead_target_from`]) at the true fleet
 //! speed, then checks the path with [`shot_blocked_exact`], which runs the
 //! engine's own swept-pair collision ([`crate::apollo::engine::swept_pair_hit`]) per
 //! turn against every obstacle (sun, planet, comet) over the already-cached
@@ -13,12 +13,12 @@
 
 use std::f64::consts::FRAC_PI_2;
 
+use crate::apollo::cache::{Entity, EntityCache};
 use crate::apollo::constants::{
     CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_CONE_PROBES, MAX_CONE_STEP,
     MAX_SHIP_SPEED, NUDGE_SCAN, SUN_RADIUS,
 };
 use crate::apollo::engine::fleet_speed;
-use crate::apollo::cache::{Entity, EntityCache};
 
 /// Aim solver result: `(angle_radians, integer_turns, target_x, target_y,
 /// fractional_flight_time)`. The fifth component is the real-valued flight
@@ -157,27 +157,22 @@ fn closest_approach(
 /// `s* ∈ [0, 1]` minimizing the radial gap `|K(s) − D(s)|` between the target's
 /// chord position `Q(s)` and the fleet's chord distance
 /// `D(s) = launch_offset + (t − 1 + s)·v` (same chord linearization the engine
-/// uses) — exactly, since `K − D` is convex (closed-form `K = D` roots, else the
-/// convex interior minimum). Aiming `θ = bearing(L → Q(s*))` puts the fleet at
-/// distance `D(s*)` along the line through `Q(s*)`, so the actual
+/// uses) — exactly, since `K − D` is convex (closed-form `K = D` crossing, else
+/// golden-section on the convex minimum). Aiming `θ = bearing(L → Q(s*))` puts
+/// the fleet at distance `D(s*)` along the line through `Q(s*)`, so the actual
 /// fleet-to-target distance at `s*` is exactly `|K(s*) − D(s*)|`. If that is
 /// ≤ `target_radius`, the engine's `swept_pair_hit` fires for turn `t` —
 /// return immediately with the earliest such turn.
-pub fn lead_target(
-    cache: &EntityCache,
-    shooter_id: i64,
-    target_id: i64,
-    launch_turn_offset: i64,
-    v: f64,
-) -> Option<(f64, i64, f64, f64, f64)> {
-    lead_target_from(cache, shooter_id, target_id, launch_turn_offset, v, 1)
-}
-
-/// [`lead_target`] but resumable: only considers intercept turns `≥ from_turn`.
-/// Returns the earliest feasible intercept at or after `from_turn`, so a caller
-/// whose earliest intercept was blocked can re-solve from `that_turn + 1` to
-/// find the next geometric intercept (the target has moved, opening a different
-/// clear angle). `from_turn = 1` reproduces [`lead_target`] exactly.
+///
+/// This replaces a prior end-of-turn fixed-point iteration that could settle
+/// on a self-consistent `(angle, turns)` whose chord never actually intersects
+/// the target's chord during that turn — the cause of fleets launched at
+/// orbiters flying clean past and off the map.
+/// Resumable: only considers intercept turns `≥ from_turn`. Returns the earliest
+/// feasible intercept at or after `from_turn`, so a caller whose earliest
+/// intercept was blocked can re-solve from `that_turn + 1` to find the next
+/// geometric intercept (the target has moved, opening a different clear angle).
+/// Pass `from_turn = 1` for the earliest feasible intercept overall.
 pub fn lead_target_from(
     cache: &EntityCache,
     shooter_id: i64,
@@ -193,7 +188,13 @@ pub fn lead_target_from(
     let tr = target.radius;
 
     let abs_launch = cache.current_turn + launch_turn_offset;
-    let max_lookahead = HORIZON.min((EPISODE_STEPS - 1 - abs_launch).max(0));
+    // A fleet launched at engine step `s` moves and can collide during that same
+    // step (reported as intercept turn 1), and the engine resolves steps through
+    // the last one, `EPISODE_STEPS - 1`. The intercept at turn `t` resolves at
+    // step `abs_launch + t - 1`, so the latest useful `t` is `EPISODE_STEPS -
+    // abs_launch` (lands on the final tick). The position table now carries the
+    // extra index `EPISODE_STEPS` that this final shot reads (see `build_*_entity`).
+    let max_lookahead = HORIZON.min((EPISODE_STEPS - abs_launch).max(0));
     if max_lookahead < 1 {
         return None;
     }
@@ -204,8 +205,9 @@ pub fn lead_target_from(
     // gets to `L` (`|dist(L, center) − orbital_radius|`). A comet's path is not a
     // fixed-radius circle, so it gets `k_min = 0` (no skip). Intercept needs
     // `launch_offset + t·v + tr ≥ k_min`, so earlier turns are provably out of
-    // reach — start the scan there. Rounding down keeps this a sound under-skip
-    // that never steps past a closing orbiter's true intercept turn.
+    // reach — start the (identical) scan there. This *under*-skips, the safe
+    // direction: unlike the old `seed_d / v` guess it can never step past a
+    // closing orbiter's true intercept turn (the bug that silently dropped shots).
     let dlc = ((lx - CENTER).powi(2) + (ly - CENTER).powi(2)).sqrt();
     let k_min = if target.is_comet() {
         0.0
@@ -224,7 +226,7 @@ pub fn lead_target_from(
         let d0 = launch_offset + (t as f64 - 1.0) * v;
 
         // Exact closest fleet-to-target approach this turn (convex `K − D`):
-        // closed-form `K = D` roots, else the convex interior minimum.
+        // closed-form `K = D` crossing, else golden-section minimum.
         let (best_s, best_gap) = closest_approach(lx, ly, q0x, q0y, dqx, dqy, d0, v);
 
         if best_gap > tr {
@@ -465,13 +467,19 @@ pub fn comet_blocks_path(
         let hi = (ent.off_board_turn - if exit_extend { 0 } else { 1 } - abs_base).min(max_turn);
         // Engine id-order tiebreak: a comet with id >= target_id loses to the
         // target on the arrival turn (`max_turn`), so it can't block there.
-        let hi = if cid >= target_id { hi.min(max_turn - 1) } else { hi };
+        let hi = if cid >= target_id {
+            hi.min(max_turn - 1)
+        } else {
+            hi
+        };
         for t in 1..=hi {
             // `t ≥ 1` ⇒ start slot ≥ `abs_base` ≥ on-board. The end slot is clamped
             // to `last_slot` so the comet's exit turn reads its last position twice
             // (static); both reads are thus `Some` — unwrap encodes that.
-            let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
-            let p1 = positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
+            let p0 =
+                positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
+            let p1 =
+                positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
             let d_start = launch_offset + (t as f64 - 1.0) * v;
             let d_end = launch_offset + t as f64 * v;
             let ax = lx + d_start * ux;
@@ -518,12 +526,10 @@ fn blocked_on_path(
     let max_turn = (flight_time.ceil() as i64).max(1);
 
     // The fleet flies one straight ray at constant speed from the launch ring
-    // out to the arrival distance `ring_d`. Precompute that whole segment once.
-    let ring_d = launch_offset + flight_time * v;
+    // outward. `ring_d = launch_offset + flight_time * v` is the fractional
+    // target-contact distance; the precomputed endpoints below tile that ray.
     let sx = lx + launch_offset * ux;
     let sy = ly + launch_offset * uy;
-    let ex = lx + ring_d * ux;
-    let ey = ly + ring_d * uy;
     // Endpoint at the START of the arrival turn (one tick before target arrival).
     // On the arrival turn the target is hit, and the engine resolves the fleet
     // against the lowest-id planet first (then the sun, only if no planet hit).
@@ -549,15 +555,24 @@ fn blocked_on_path(
     // that band is disjoint from this ray span the planet can't be struck at any
     // angle or turn (see the reject in the loop). Max is at an endpoint; min is
     // at the perpendicular foot of center onto the segment (clamped).
+    //
+    // The span runs to `efx,efy` (the END of the arrival turn, `arrival_end_d`),
+    // not just to the target-contact point `ex,ey` (`ring_d`): a lower-id orbiter
+    // wins the arrival-turn tiebreak and is swept over the full arrival tick
+    // (out to `arrival_end_d` in the per-turn loop), so its reachable region can
+    // extend past `ring_d`. Bounding only to `ring_d` could reject such a planet
+    // before the exact swept test and let through a shot the engine kills.
+    // Obstacles whose sweep stops at/before `ring_d` (sun, id >= target_id) are
+    // unaffected — the wider band is merely conservative for them.
     let (ray_d_min, ray_d_max) = {
         let dsx = sx - CENTER;
         let dsy = sy - CENTER;
-        let dex = ex - CENTER;
-        let dey = ey - CENTER;
+        let dex = efx - CENTER;
+        let dey = efy - CENTER;
         let d_end_s = (dsx * dsx + dsy * dsy).sqrt();
         let d_end_e = (dex * dex + dey * dey).sqrt();
-        let segx = ex - sx;
-        let segy = ey - sy;
+        let segx = efx - sx;
+        let segy = efy - sy;
         let l2 = segx * segx + segy * segy;
         let d_min = if l2 > 1e-12 {
             let u = (((CENTER - sx) * segx + (CENTER - sy) * segy) / l2).clamp(0.0, 1.0);
@@ -641,7 +656,8 @@ fn blocked_on_path(
         // `off_board_turn`, so both endpoints are `Some` (orbiters are on the
         // whole game; a comet is only ever cached once on board, and launches
         // are never in the past, so it's present from `t = 1` onward — only its
-        // `off_board_turn` edge can fall inside the flight).
+        // `off_board_turn` edge can fall inside the flight). This also subsumes
+        // the old `abs0 ≥ 0` / in-bounds guards.
         let positions = &ent.positions;
         let lo_t = 1;
         // A comet leaving the board is parked at its last on-board position for
@@ -674,7 +690,8 @@ fn blocked_on_path(
         // `abs_base + t - 1` slot, clamped to the last on-board slot for the
         // comet exit turn).
         let dist_at = |t: i64| -> f64 {
-            let p = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
+            let p =
+                positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
             let dx = p[0] - lx;
             let dy = p[1] - ly;
             (dx * dx + dy * dy).sqrt()
@@ -709,8 +726,10 @@ fn blocked_on_path(
                 if dist_at(t) - a_of(t) < lower {
                     break; // past the far edge; no later turn can contact either
                 }
-                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
-                let p1 = positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
+                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)]
+                    .expect("on-board by clamp");
+                let p1 =
+                    positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
                 if contact_before(p0[0], p0[1], p1[0], p1[1], r, t) {
                     return true;
                 }
@@ -720,8 +739,10 @@ fn blocked_on_path(
             // comet): `h` may be non-monotonic and the band non-contiguous, so
             // fall back to the exact full scan over the clamped window.
             for t in lo_t..=hi_t {
-                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
-                let p1 = positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
+                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)]
+                    .expect("on-board by clamp");
+                let p1 =
+                    positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
                 if contact_before(p0[0], p0[1], p1[0], p1[1], r, t) {
                     return true;
                 }
@@ -842,7 +863,14 @@ pub fn aim_with_prediction(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    aim_with_blocker(cache, shooter_id, target_id, ships, launch_turn_offset, true)
+    aim_with_blocker(
+        cache,
+        shooter_id,
+        target_id,
+        ships,
+        launch_turn_offset,
+        true,
+    )
 }
 
 /// Comet-free aim: identical to [`aim_with_prediction`] but treats the board as
@@ -860,7 +888,14 @@ pub fn aim_ignoring_comets(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    aim_with_blocker(cache, shooter_id, target_id, ships, launch_turn_offset, false)
+    aim_with_blocker(
+        cache,
+        shooter_id,
+        target_id,
+        ships,
+        launch_turn_offset,
+        false,
+    )
 }
 
 /// Max number of successive geometric intercept turns [`aim_with_blocker`] will
@@ -918,7 +953,7 @@ fn try_intercept_turn(
         return None;
     }
     // Target's swept chord during the lead's turn, for the exact per-angle
-    // first-contact test in the scan.
+    // first-contact test in the scan (replaces a static disk at `(tx, ty)`).
     let [q0x, q0y] = cache.position(target_id, launch_turn_offset + turns - 1)?;
     let [q1x, q1y] = cache.position(target_id, launch_turn_offset + turns)?;
     let dqx = q1x - q0x;
@@ -982,8 +1017,7 @@ fn try_intercept_turn(
             // own swept-pair). `None` ⇒ this angle doesn't reach the target during
             // turn `turns` — skip. The fractional contact gives this angle's *own*
             // arrival time.
-            let Some(s_hit) =
-                segment_contact_s(ax, ay, bx, by, q0x, q0y, q1x, q1y, target_radius)
+            let Some(s_hit) = segment_contact_s(ax, ay, bx, by, q0x, q0y, q1x, q1y, target_radius)
             else {
                 continue;
             };
@@ -1034,8 +1068,14 @@ fn aim_with_blocker(
     let v_true = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
     let mut from = 1i64;
     for _ in 0..MAX_INTERCEPT_TRIES {
-        let (angle, turns, tx, ty, flight_time) =
-            lead_target_from(cache, shooter_id, target_id, launch_turn_offset, v_true, from)?;
+        let (angle, turns, tx, ty, flight_time) = lead_target_from(
+            cache,
+            shooter_id,
+            target_id,
+            launch_turn_offset,
+            v_true,
+            from,
+        )?;
         if let Some(res) = try_intercept_turn(
             cache,
             shooter_id,
