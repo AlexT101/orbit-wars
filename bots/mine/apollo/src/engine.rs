@@ -13,11 +13,11 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use crate::cache::EntityCache;
 use crate::constants::{
     BOARD_SIZE, CENTER, COMET_SPEED, EPISODE_STEPS, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED,
     ROTATION_LIMIT, SUN_RADIUS,
 };
-use crate::cache::EntityCache;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Planet {

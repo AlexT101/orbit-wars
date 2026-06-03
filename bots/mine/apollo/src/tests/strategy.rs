@@ -1,8 +1,8 @@
 //! Smoke tests for the hellburner port.
 
 use super::reference_engine::RefEngine;
-use crate::engine::Configuration;
 use crate::cache::EntityCache;
+use crate::engine::Configuration;
 use crate::strategy;
 use crate::world::WorldState;
 

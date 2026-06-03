@@ -53,11 +53,11 @@ pub const MAX_DISTANCE: f64 = 38.0; // Maximum distance between planets for us t
 
 // Simulation rules
 pub const NUDGE_SCAN: i64 = 32; // Baseline number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
-// Coarsest angular step (radians) the cone scan will use. The cone half-width is
-// the target's *swept-chord* span during the turn (not just its disk radius), so
-// it can be wide for a fast/long-turn target; the probe count scales up to keep
-// the step at or below this so a thin hitting window in the widened region isn't
-// stepped over. ~0.11° — comfortably under the ~0.16° narrowest windows observed.
+                                // Coarsest angular step (radians) the cone scan will use. The cone half-width is
+                                // the target's *swept-chord* span during the turn (not just its disk radius), so
+                                // it can be wide for a fast/long-turn target; the probe count scales up to keep
+                                // the step at or below this so a thin hitting window in the widened region isn't
+                                // stepped over. ~0.11° — comfortably under the ~0.16° narrowest windows observed.
 pub const MAX_CONE_STEP: f64 = 0.002;
 // Upper bound on cone-scan probes per side, to cap worst-case cost when the cone
 // is very wide (e.g. a near/degenerate target with a huge angular span).

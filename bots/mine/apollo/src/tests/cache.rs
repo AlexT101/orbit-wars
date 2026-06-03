@@ -1,10 +1,8 @@
 use super::reference_engine::RefEngine;
 use crate::aim::{aim_ignoring_comets, aim_with_prediction};
+use crate::cache::{rot_sibling, AimCacheVerdict, EntityCache, EntityKind, InvariantVerdict};
 use crate::constants::EPISODE_STEPS;
 use crate::engine::Configuration;
-use crate::cache::{
-    rot_sibling, AimCacheVerdict, EntityCache, EntityKind, InvariantVerdict,
-};
 
 fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(

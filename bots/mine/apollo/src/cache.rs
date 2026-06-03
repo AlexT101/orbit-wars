@@ -2,7 +2,6 @@
 //! Refreshed at start of game and when new comets spawn
 //! Lookups are relative to current turn, i.e. `EntityCache::position(id, turns_ahead)`
 
-
 use std::f64::consts::FRAC_PI_2;
 
 use parking_lot::Mutex;
@@ -473,8 +472,7 @@ impl EntityCache {
         // a disc-qualified path; only a comet can change the verdict this turn.
         let (angle, _turns, _tx, _ty, flight_time) = derived;
         let v = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
-        if aim::comet_blocks_path(self, src, target, angle, flight_time, v, launch_turn_offset)
-        {
+        if aim::comet_blocks_path(self, src, target, angle, flight_time, v, launch_turn_offset) {
             return InvariantVerdict::SingleSolve;
         }
         InvariantVerdict::Use(derived)
@@ -648,7 +646,6 @@ impl EntityCache {
         }
         self.get(id)?.positions[abs_step as usize]
     }
-
 }
 
 /// `true` iff any [`COMET_SPAWN_STEPS`] tick falls in `(stored, current]`.

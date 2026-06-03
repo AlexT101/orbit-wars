@@ -6,10 +6,10 @@
 use std::time::Instant;
 
 use super::reference_engine::RefEngine;
-use crate::engine::{Configuration, MoveAction};
 use crate::cache::EntityCache;
-use crate::strategy;
+use crate::engine::{Configuration, MoveAction};
 use crate::rollout::{opponent_turn0_actions, pick_plan_by_rollout, rollout_score};
+use crate::strategy;
 use crate::world::WorldState;
 
 fn cache_for(state: &RefEngine) -> EntityCache {

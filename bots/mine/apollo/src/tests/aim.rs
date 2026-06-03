@@ -5,9 +5,9 @@
 
 use super::reference_engine::RefEngine;
 use crate::aim::{aim_with_prediction, lead_target_from, shot_blocked_exact};
+use crate::cache::{EntityCache, EntityKind};
 use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
 use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
-use crate::cache::{EntityCache, EntityKind};
 
 fn cache_for(state: &RefEngine) -> EntityCache {
     EntityCache::build(
@@ -700,7 +700,10 @@ fn cone_cull_clear_verdicts_sound_with_comets() {
         state.step_with_actions(&noop).unwrap();
         guard += 1;
     }
-    assert!(!state.comet_planet_ids.is_empty(), "expected comets to spawn");
+    assert!(
+        !state.comet_planet_ids.is_empty(),
+        "expected comets to spawn"
+    );
 
     let cache = cache_for(&state);
     let now = cache.current_turn as usize;
@@ -748,7 +751,10 @@ fn cone_cull_clear_verdicts_sound_with_comets() {
             }
         }
     }
-    assert!(clear_cases > 50, "expected many clear verdicts, saw {clear_cases}");
+    assert!(
+        clear_cases > 50,
+        "expected many clear verdicts, saw {clear_cases}"
+    );
 }
 
 /// Regression: a fleet launched on the last actable step (`EPISODE_STEPS - 1`)
@@ -764,10 +770,26 @@ fn final_tick_launch_can_still_lead_an_adjacent_target() {
 
     // Two static planets (orbital_radius + radius >= ROTATION_LIMIT = 50) so
     // their positions never move — keeps the geometry exact at any step.
-    let shooter = Planet { id: 1, owner: 0, x: CENTER + 49.0, y: CENTER, radius: 2.0, ships: 0, production: 0 };
+    let shooter = Planet {
+        id: 1,
+        owner: 0,
+        x: CENTER + 49.0,
+        y: CENTER,
+        radius: 2.0,
+        ships: 0,
+        production: 0,
+    };
     // Centers 6 apart; with ~6.0 fleet speed the fleet sweeps from launch
     // offset 2.1 out past the target center in a single tick.
-    let target = Planet { id: 2, owner: 1, x: CENTER + 55.0, y: CENTER, radius: 2.0, ships: 0, production: 0 };
+    let target = Planet {
+        id: 2,
+        owner: 1,
+        x: CENTER + 55.0,
+        y: CENTER,
+        radius: 2.0,
+        ships: 0,
+        production: 0,
+    };
     let planets = vec![shooter, target];
 
     let mut cache = EntityCache::build(&planets, &[], &[], 0.05, EPISODE_STEPS - 1);

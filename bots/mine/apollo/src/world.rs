@@ -9,15 +9,14 @@
 //! Anything strategy-flavoured (phase windows like "early"/"opening", scoring
 //! heuristics, solver memoization) belongs in the strategy module, not here.
 
-
 use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::aim::AimResult;
+use crate::cache::EntityCache;
 use crate::constants::HORIZON;
 use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
-use crate::cache::EntityCache;
 
 /// Step-scoped, lock-free L1 aim cache shared across every [`WorldState`] and
 /// `HellburnerModel` built during one `Bot::compute_moves` call. Keyed by the

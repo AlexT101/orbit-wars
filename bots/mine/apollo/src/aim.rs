@@ -13,12 +13,12 @@
 
 use std::f64::consts::FRAC_PI_2;
 
+use crate::cache::{Entity, EntityCache};
 use crate::constants::{
     CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_CONE_PROBES, MAX_CONE_STEP,
     MAX_SHIP_SPEED, NUDGE_SCAN, SUN_RADIUS,
 };
 use crate::engine::fleet_speed;
-use crate::cache::{Entity, EntityCache};
 
 /// Aim solver result: `(angle_radians, integer_turns, target_x, target_y,
 /// fractional_flight_time)`. The fifth component is the real-valued flight
@@ -467,13 +467,19 @@ pub fn comet_blocks_path(
         let hi = (ent.off_board_turn - if exit_extend { 0 } else { 1 } - abs_base).min(max_turn);
         // Engine id-order tiebreak: a comet with id >= target_id loses to the
         // target on the arrival turn (`max_turn`), so it can't block there.
-        let hi = if cid >= target_id { hi.min(max_turn - 1) } else { hi };
+        let hi = if cid >= target_id {
+            hi.min(max_turn - 1)
+        } else {
+            hi
+        };
         for t in 1..=hi {
             // `t ≥ 1` ⇒ start slot ≥ `abs_base` ≥ on-board. The end slot is clamped
             // to `last_slot` so the comet's exit turn reads its last position twice
             // (static); both reads are thus `Some` — unwrap encodes that.
-            let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
-            let p1 = positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
+            let p0 =
+                positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
+            let p1 =
+                positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
             let d_start = launch_offset + (t as f64 - 1.0) * v;
             let d_end = launch_offset + t as f64 * v;
             let ax = lx + d_start * ux;
@@ -684,7 +690,8 @@ fn blocked_on_path(
         // `abs_base + t - 1` slot, clamped to the last on-board slot for the
         // comet exit turn).
         let dist_at = |t: i64| -> f64 {
-            let p = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
+            let p =
+                positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
             let dx = p[0] - lx;
             let dy = p[1] - ly;
             (dx * dx + dy * dy).sqrt()
@@ -719,8 +726,10 @@ fn blocked_on_path(
                 if dist_at(t) - a_of(t) < lower {
                     break; // past the far edge; no later turn can contact either
                 }
-                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
-                let p1 = positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
+                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)]
+                    .expect("on-board by clamp");
+                let p1 =
+                    positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
                 if contact_before(p0[0], p0[1], p1[0], p1[1], r, t) {
                     return true;
                 }
@@ -730,8 +739,10 @@ fn blocked_on_path(
             // comet): `h` may be non-monotonic and the band non-contiguous, so
             // fall back to the exact full scan over the clamped window.
             for t in lo_t..=hi_t {
-                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)].expect("on-board by clamp");
-                let p1 = positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
+                let p0 = positions[((abs_base + t - 1) as usize).min(last_slot)]
+                    .expect("on-board by clamp");
+                let p1 =
+                    positions[((abs_base + t) as usize).min(last_slot)].expect("on-board by clamp");
                 if contact_before(p0[0], p0[1], p1[0], p1[1], r, t) {
                     return true;
                 }
@@ -852,7 +863,14 @@ pub fn aim_with_prediction(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    aim_with_blocker(cache, shooter_id, target_id, ships, launch_turn_offset, true)
+    aim_with_blocker(
+        cache,
+        shooter_id,
+        target_id,
+        ships,
+        launch_turn_offset,
+        true,
+    )
 }
 
 /// Comet-free aim: identical to [`aim_with_prediction`] but treats the board as
@@ -870,7 +888,14 @@ pub fn aim_ignoring_comets(
     ships: i64,
     launch_turn_offset: i64,
 ) -> Option<AimResult> {
-    aim_with_blocker(cache, shooter_id, target_id, ships, launch_turn_offset, false)
+    aim_with_blocker(
+        cache,
+        shooter_id,
+        target_id,
+        ships,
+        launch_turn_offset,
+        false,
+    )
 }
 
 /// Max number of successive geometric intercept turns [`aim_with_blocker`] will
@@ -992,8 +1017,7 @@ fn try_intercept_turn(
             // own swept-pair). `None` ⇒ this angle doesn't reach the target during
             // turn `turns` — skip. The fractional contact gives this angle's *own*
             // arrival time.
-            let Some(s_hit) =
-                segment_contact_s(ax, ay, bx, by, q0x, q0y, q1x, q1y, target_radius)
+            let Some(s_hit) = segment_contact_s(ax, ay, bx, by, q0x, q0y, q1x, q1y, target_radius)
             else {
                 continue;
             };
@@ -1044,8 +1068,14 @@ fn aim_with_blocker(
     let v_true = fleet_speed(ships.max(1), MAX_SHIP_SPEED);
     let mut from = 1i64;
     for _ in 0..MAX_INTERCEPT_TRIES {
-        let (angle, turns, tx, ty, flight_time) =
-            lead_target_from(cache, shooter_id, target_id, launch_turn_offset, v_true, from)?;
+        let (angle, turns, tx, ty, flight_time) = lead_target_from(
+            cache,
+            shooter_id,
+            target_id,
+            launch_turn_offset,
+            v_true,
+            from,
+        )?;
         if let Some(res) = try_intercept_turn(
             cache,
             shooter_id,

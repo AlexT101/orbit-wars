@@ -2,12 +2,12 @@
 //! forwards every observation through `Bot::compute_moves_with_search`.
 
 mod aim;
+mod cache;
 mod constants;
 mod engine;
-mod cache;
-mod strategy;
 mod helpers;
 mod rollout;
+mod strategy;
 mod world;
 
 #[cfg(test)]
@@ -17,9 +17,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
+use crate::cache::EntityCache;
 use crate::constants::{COMET_SPAWN_STEPS, HORIZON, TOTAL_OVERAGE_TIME};
 use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
-use crate::cache::EntityCache;
 use crate::helpers::ArrivalLedger;
 use crate::rollout::pick_plan_by_rollout;
 use crate::world::WorldState;
@@ -398,15 +398,24 @@ fn aim_angle(
     }
 
     // Comets are optional in the benchmark obs — default to none.
-    let (comets, comet_planet_ids) = match (obs.get_item("comets")?, obs.get_item("comet_planet_ids")?) {
-        (Some(c), Some(ids)) => (parse_comets(&c)?, ids.extract::<Vec<i64>>()?),
-        _ => (Vec::new(), Vec::new()),
-    };
+    let (comets, comet_planet_ids) =
+        match (obs.get_item("comets")?, obs.get_item("comet_planet_ids")?) {
+            (Some(c), Some(ids)) => (parse_comets(&c)?, ids.extract::<Vec<i64>>()?),
+            _ => (Vec::new(), Vec::new()),
+        };
 
-    let cache = EntityCache::build(&planets, &comets, &comet_planet_ids, angular_velocity, obs_current_step(obs)?);
+    let cache = EntityCache::build(
+        &planets,
+        &comets,
+        &comet_planet_ids,
+        angular_velocity,
+        obs_current_step(obs)?,
+    );
 
-    Ok(crate::aim::aim_with_prediction(&cache, source, target, fleet_size, 0)
-        .map(|(angle, _turns, _tx, _ty, _flight_time)| angle))
+    Ok(
+        crate::aim::aim_with_prediction(&cache, source, target, fleet_size, 0)
+            .map(|(angle, _turns, _tx, _ty, _flight_time)| angle),
+    )
 }
 
 #[pymodule]
