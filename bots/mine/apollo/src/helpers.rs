@@ -78,6 +78,21 @@ pub fn count_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
     n.max(2)
 }
 
+pub fn count_alive_players(planets: &[Planet], fleets: &[Fleet]) -> usize {
+    let mut alive = [false; MAX_PLAYERS];
+    for p in planets {
+        if p.owner >= 0 && (p.owner as usize) < MAX_PLAYERS {
+            alive[p.owner as usize] = true;
+        }
+    }
+    for f in fleets {
+        if f.owner >= 0 && (f.owner as usize) < MAX_PLAYERS {
+            alive[f.owner as usize] = true;
+        }
+    }
+    alive.iter().filter(|&&a| a).count()
+}
+
 // ── Timeline Helpers ──────────────────────────────────────────────────────────
 // Forward simulation with initial timeline and hypothetical queries
 

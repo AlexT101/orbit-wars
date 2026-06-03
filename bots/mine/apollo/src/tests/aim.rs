@@ -6,7 +6,7 @@
 use super::reference_engine::RefEngine;
 use crate::aim::{aim_with_prediction, lead_target_from, shot_blocked_exact};
 use crate::cache::{EntityCache, EntityKind};
-use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
+use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, AIM_HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
 use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
 
 fn cache_for(state: &RefEngine) -> EntityCache {
@@ -205,10 +205,10 @@ fn clear_verdicts_survive_swept_pair_resimulation() {
                         continue;
                     };
 
-                    // Cap at HORIZON: the table only sees obstacles within
-                    // HORIZON turns of launch by design — past that the
+                    // Cap at AIM_HORIZON: the table only sees obstacles within
+                    // AIM_HORIZON turns of launch by design — past that the
                     // aimer is silent, not wrong.
-                    let sim_time = flight_time.min(HORIZON as f64);
+                    let sim_time = flight_time.min(AIM_HORIZON as f64);
                     let collision =
                         ground_truth_collision(&cache, shooter, target, angle, ships, sim_time);
                     if let Some((t, bid)) = collision {
@@ -662,7 +662,7 @@ fn h_reduction_matches_exhaustive_scan_with_comets() {
             for &ships in &ships_grid {
                 let v = fleet_speed(ships.max(1), 6.0);
                 // A generous flight budget so the swept window spans the comets.
-                let flight_time = HORIZON as f64;
+                let flight_time = AIM_HORIZON as f64;
                 for k in 0..steps {
                     let angle = std::f64::consts::TAU * k as f64 / steps as f64;
                     let band =
@@ -737,7 +737,7 @@ fn cone_cull_clear_verdicts_sound_with_comets() {
                 else {
                     continue;
                 };
-                let sim_time = flight_time.min(HORIZON as f64);
+                let sim_time = flight_time.min(AIM_HORIZON as f64);
                 if let Some((t, bid)) =
                     ground_truth_collision(&cache, shooter, target, angle, ships, sim_time)
                 {
