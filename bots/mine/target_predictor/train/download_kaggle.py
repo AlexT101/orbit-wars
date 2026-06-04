@@ -74,14 +74,27 @@ def import_kagglehub():
 
 
 def stage(src: Path, dest_zip: Path, dest_dir: Path) -> Path:
-    """Move/copy kagglehub's download into a stable location under `out`.
+    """Stage a kagglehub download into a stable location under `out`.
 
-    If the upstream dataset is a single .zip, keep it as <slug>.zip.
-    Otherwise, copy the whole directory tree to <slug>/.
+    Order of preference, to keep disk usage bounded:
+      1. If a single .zip > 1 MB exists in src → copy as <slug>.zip (cheap).
+      2. Else if src has .json files (kagglehub already extracted) → re-zip
+         them as <slug>.zip with ZIP_DEFLATED so we don't blow up disk by
+         15× (1.2 GB zip vs 21 GB of raw json).
+      3. Else (other formats) → copy directory tree to <slug>/.
     """
     zips = sorted(src.rglob("*.zip"))
     if len(zips) == 1 and zips[0].stat().st_size > 1024 * 1024:
         shutil.copy2(zips[0], dest_zip)
+        return dest_zip
+    json_files = sorted(p for p in src.rglob("*.json") if p.is_file())
+    if json_files:
+        import zipfile
+        # compresslevel=9 makes ~1.4 GB per day instead of ~2.5 GB at level 1.
+        # Worth the few extra seconds per day to fit ~45 days in 100 GB disk.
+        with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+            for p in json_files:
+                zf.write(p, arcname=p.name)
         return dest_zip
     dest_dir.mkdir(parents=True, exist_ok=True)
     for p in src.rglob("*"):
@@ -116,10 +129,18 @@ def main() -> int:
         if dest_zip.exists() or dest_dir.exists():
             print(f"{row.date}: already staged ({dest_zip if dest_zip.exists() else dest_dir})")
             continue
-        print(f"{row.date}: downloading {row.kagglehub_ref}")
+        print(f"{row.date}: downloading {row.kagglehub_ref}", flush=True)
         src = Path(kagglehub.dataset_download(row.kagglehub_ref))
         staged = stage(src, dest_zip, dest_dir)
-        print(f"{row.date}: staged {staged}")
+        size_mb = staged.stat().st_size // (1024 * 1024) if staged.is_file() else 0
+        print(f"{row.date}: staged {staged}  ({size_mb} MB)", flush=True)
+        # Aggressively reclaim kagglehub cache (~21 GB per extracted day) so
+        # we don't fill the disk while iterating many days.
+        import shutil as _sh
+        cache = Path.home() / ".cache" / "kagglehub"
+        if cache.exists():
+            for child in cache.iterdir():
+                _sh.rmtree(child, ignore_errors=True)
     return 0
 
 

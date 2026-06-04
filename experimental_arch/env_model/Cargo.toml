@@ -15,6 +15,7 @@ rustc-hash = "2"
 # Return feature tensors as numpy arrays (zero-copy: numpy takes ownership of
 # the Rust Vec's buffer), so the Python side is `torch.from_numpy`-ready.
 numpy = "0.23"
+rayon = "1.10"
 
 [profile.release]
 lto = "thin"

@@ -1,0 +1,612 @@
+//! Decoupled UCT for simultaneous-move games.
+//!
+//! Models the game correctly: at each node, both players commit actions
+//! privately, then the joint action is applied. Each player picks their
+//! action by PUCT on their OWN MARGINAL stats (summed across what the
+//! opponent might play). Backprop updates both players' marginal stats
+//! plus the joint child.
+//!
+//! Compared to the sequential MCTS in `mcts.rs`:
+//!   - No opp-sees-my-action info leak
+//!   - Branching at each node is my_K × opp_K (joint), but marginal stats
+//!     accumulate at N/my_K (my) and N/opp_K (opp) — faster signal than
+//!     fully joint
+//!   - Tree depth is half (no MyTurn/EnemyTurn alternation)
+
+use crate::sim::{alive_players, apply_launches, tick, Action};
+use crate::{ow2_plan, GameState};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::Instant;
+
+const EXPLORATION: f64 = 0.3;
+const TERMINAL_STEP: i64 = 500;
+const K_ROOT_DEFAULT: usize = 5;
+const K_NON_ROOT_DEFAULT: usize = 4;
+
+thread_local! {
+    /// Stash the root after each turn, so next turn's matching state can
+    /// reuse the joint subtree corresponding to (my_chosen, opp_actual).
+    static LAST_TREE: RefCell<Option<(i64, Box<Node>)>> = RefCell::new(None);
+
+    /// Persistent apollo `EntityCache`, shared across every candidate-generation
+    /// call, every rollout, and every real turn of a game. The cache holds no
+    /// strategy/player-specific state — only game-static orbiter geometry and an
+    /// owner-agnostic aim cache keyed by absolute launch turn — so a single
+    /// instance is correct everywhere. Paired with a `GeometryKey` so a process
+    /// that serves multiple games (benchmarks, harness reuse) rebuilds on a new
+    /// map instead of reusing stale geometry. Mirrors apollo's `Bot.cache`
+    /// (`bots/mine/apollo/src/lib.rs`).
+    static CACHE: RefCell<Option<(GeometryKey, crate::apollo::cache::EntityCache)>> =
+        RefCell::new(None);
+}
+
+/// Fingerprint of a game's fixed geometry: angular velocity plus the static
+/// orbiter layout (id + initial radius/angle of every non-comet planet). Two
+/// observations of the same game share this; a new game (different map or
+/// angular velocity) does not, triggering a cache rebuild.
+#[derive(Clone, PartialEq)]
+struct GeometryKey {
+    av_bits: u64,
+    planets: Vec<(i64, u64, u64)>,
+}
+
+fn geometry_key(state: &GameState) -> GeometryKey {
+    let mut planets: Vec<(i64, u64, u64)> = state
+        .planets
+        .iter()
+        .filter(|p| !p.is_comet)
+        .map(|p| (p.id, p.orbital_radius.to_bits(), p.initial_angle.to_bits()))
+        .collect();
+    planets.sort_unstable_by_key(|t| t.0);
+    GeometryKey {
+        av_bits: state.angular_velocity.to_bits(),
+        planets,
+    }
+}
+
+/// Rebuild-if-needed + per-turn refresh of the persistent [`CACHE`],
+/// mirroring apollo's `Bot::refresh_cache`: build once per game, refresh comets
+/// only on a spawn step, then set the current turn and drop the now-unqueryable
+/// prior turn's aim slot. Run once at the top of [`best_move`].
+fn refresh_cache(state: &GameState) {
+    use crate::apollo::constants::COMET_SPAWN_STEPS;
+    let key = geometry_key(state);
+    CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let needs_build = match slot.as_ref() {
+            Some((k, _)) => *k != key,
+            None => true,
+        };
+        if needs_build {
+            *slot = Some((key, crate::apollo_bridge::rollout_cache(state)));
+        } else if COMET_SPAWN_STEPS.contains(&state.step) {
+            if let Some((_, cache)) = slot.as_mut() {
+                crate::apollo_bridge::refresh_cache_comets(cache, state);
+            }
+        }
+        if let Some((_, cache)) = slot.as_mut() {
+            cache.set_current_turn(state.step);
+            cache.clear_aim_cache_slot(state.step - 1);
+        }
+    });
+}
+
+/// Run `f` with the shared entity cache's `current_turn` set to `turn`. Used by
+/// candidate generation (one call per node, whose step may differ from the real
+/// turn). The cache is interior-mutable for its aim table, so `f` takes `&_`.
+fn with_cache_at<R>(turn: i64, f: impl FnOnce(&crate::apollo::cache::EntityCache) -> R) -> R {
+    CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let (_, cache) = slot.as_mut().expect("entity cache built in best_move");
+        cache.set_current_turn(turn);
+        f(cache)
+    })
+}
+
+#[derive(Clone)]
+struct ActionStats {
+    visits: u32,
+    sum_value: f64, // from MY perspective
+}
+
+#[derive(Clone)]
+struct Node {
+    state: GameState,
+    visits: u32,
+    my_candidates: Vec<Vec<Action>>,
+    my_priors: Vec<f64>,
+    my_stats: Vec<ActionStats>,
+    opp_candidates: Vec<Vec<Action>>,
+    opp_priors: Vec<f64>,
+    opp_stats: Vec<ActionStats>,
+    /// (my_idx, opp_idx) -> joint child subtree
+    children: HashMap<(usize, usize), Box<Node>>,
+    candidates_initialized: bool,
+}
+
+fn rank_prior(rank: usize, total: usize) -> f64 {
+    let raw = 0.5_f64.powi(rank as i32);
+    let z: f64 = (0..total).map(|i| 0.5_f64.powi(i as i32)).sum();
+    raw / z
+}
+
+fn enumerate_alternatives_strong(state: &GameState, player: i32, k: usize) -> Vec<Vec<Action>> {
+    let greedy = ow2_plan::plan(state, player, false);
+    let mut out: Vec<Vec<Action>> = vec![greedy];
+    for tgt in &state.planets {
+        if tgt.owner == player {
+            continue;
+        }
+        if out.len() >= k {
+            break;
+        }
+        let alt = ow2_plan::plan_with_exclusion(state, player, false, Some(tgt.id));
+        if !out.iter().any(|a| actions_equal(a, &alt)) {
+            out.push(alt);
+        }
+    }
+    if out.len() < k && !out.iter().any(|a| a.is_empty()) {
+        out.push(Vec::new());
+    }
+    out
+}
+
+fn enumerate_alternatives(state: &GameState, player: i32, k: usize) -> Vec<Vec<Action>> {
+    let __apollo_t0 = std::time::Instant::now();
+    let mut alts = with_cache_at(state.step, |cache| {
+        crate::apollo_bridge::apollo_candidates(state, player, cache)
+    });
+    crate::profiling::add(&crate::profiling::APOLLO_CANDIDATES_NS, __apollo_t0);
+    crate::profiling::inc(&crate::profiling::APOLLO_CANDIDATES_CALLS);
+    if !alts.is_empty() {
+        alts.truncate(k);
+        return alts;
+    }
+    enumerate_alternatives_strong(state, player, k)
+}
+
+/// Candidate sets for both players at `state`. Fast path: when apollo candidates
+/// are the active generator for both (the default — no focused override), build
+/// the player-agnostic `Simulator` + arrival ledger once and derive both sets
+/// from it via [`crate::apollo_bridge::apollo_candidates_pair`], so the
+/// `HORIZON`-turn ledger walk is paid once instead of per player. Falls back to
+/// the per-player [`enumerate_alternatives`] when focused candidates are enabled
+/// or apollo yields nothing for a side.
+fn enumerate_pair(
+    state: &GameState,
+    me: i32,
+    opp: i32,
+    k: usize,
+) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
+    let (mut my, mut op) = with_cache_at(state.step, |cache| {
+        crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache)
+    });
+    if !my.is_empty() && !op.is_empty() {
+        my.truncate(k);
+        op.truncate(k);
+        return (my, op);
+    }
+    // One side empty: fall back to per-player generation so the ow2 fallback can
+    // fill the missing side.
+    (
+        enumerate_alternatives(state, me, k),
+        enumerate_alternatives(state, opp, k),
+    )
+}
+
+fn actions_equal(a: &[Action], b: &[Action]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let key = |x: &Action| (x.0, (x.1 * 100.0).round() as i64, x.2);
+    let mut ax: Vec<_> = a.iter().map(key).collect();
+    let mut bx: Vec<_> = b.iter().map(key).collect();
+    ax.sort();
+    bx.sort();
+    ax == bx
+}
+
+pub(crate) fn dominant_enemy(state: &GameState, me: i32) -> Option<i32> {
+    let mut best: Option<(i32, i64)> = None;
+    let mut visit_player = |p: i32| {
+        if p == -1 || p == me {
+            return;
+        }
+        let s = crate::sim::player_score(state, p);
+        if best.as_ref().map(|b| s > b.1).unwrap_or(true) {
+            best = Some((p, s));
+        }
+    };
+    for p in &state.planets {
+        visit_player(p.owner);
+    }
+    for f in &state.fleets {
+        visit_player(f.owner);
+    }
+    best.map(|b| b.0)
+}
+
+fn puct_c() -> f64 {
+    EXPLORATION
+}
+
+fn select_my(node: &Node) -> usize {
+    let c = puct_c();
+    let parent_n = node.visits.max(1) as f64;
+    let mut best_i = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    for i in 0..node.my_candidates.len() {
+        let st = &node.my_stats[i];
+        let exploit = if st.visits == 0 {
+            0.0
+        } else {
+            st.sum_value / st.visits as f64
+        };
+        let explore = c * node.my_priors[i] * parent_n.sqrt() / (1.0 + st.visits as f64);
+        let s = exploit + explore;
+        if s > best_score {
+            best_score = s;
+            best_i = i;
+        }
+    }
+    best_i
+}
+
+fn select_opp(node: &Node) -> usize {
+    // Opp wants to minimize MY value → negate exploit.
+    let c = puct_c();
+    let parent_n = node.visits.max(1) as f64;
+    let mut best_i = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    for i in 0..node.opp_candidates.len() {
+        let st = &node.opp_stats[i];
+        let exploit = if st.visits == 0 {
+            0.0
+        } else {
+            -st.sum_value / st.visits as f64
+        };
+        let explore = c * node.opp_priors[i] * parent_n.sqrt() / (1.0 + st.visits as f64);
+        let s = exploit + explore;
+        if s > best_score {
+            best_score = s;
+            best_i = i;
+        }
+    }
+    best_i
+}
+
+fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
+    if node.candidates_initialized {
+        return;
+    }
+    let __ec_t0 = std::time::Instant::now();
+    let k = if root {
+        K_ROOT_DEFAULT
+    } else {
+        K_NON_ROOT_DEFAULT
+    };
+    let opp = dominant_enemy(&node.state, me).unwrap_or(1 - me);
+    let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k);
+    let my_n = my_alts.len();
+    let opp_n = opp_alts.len();
+    node.my_priors = (0..my_n).map(|i| rank_prior(i, my_n)).collect();
+    node.opp_priors = (0..opp_n).map(|i| rank_prior(i, opp_n)).collect();
+    node.my_stats = (0..my_n)
+        .map(|_| ActionStats {
+            visits: 0,
+            sum_value: 0.0,
+        })
+        .collect();
+    node.opp_stats = (0..opp_n)
+        .map(|_| ActionStats {
+            visits: 0,
+            sum_value: 0.0,
+        })
+        .collect();
+    node.my_candidates = my_alts;
+    node.opp_candidates = opp_alts;
+    node.candidates_initialized = true;
+    crate::profiling::add(&crate::profiling::ENSURE_CANDIDATES_NS, __ec_t0);
+    crate::profiling::inc(&crate::profiling::ENSURE_CANDIDATES_CALLS);
+}
+
+// ── profiling (OW_PROFILE) ───────────────────────────────────────────────
+// Per-turn cumulative timing of leaf evaluation.
+fn prof_enabled() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("OW_PROFILE").is_ok())
+}
+thread_local! {
+    static PROF_EVAL_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static PROF_EVAL_N: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static PROF_ROLL_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static PROF_ROLL_N: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+fn prof_reset() {
+    PROF_EVAL_NS.with(|c| c.set(0));
+    PROF_EVAL_N.with(|c| c.set(0));
+    PROF_ROLL_NS.with(|c| c.set(0));
+    PROF_ROLL_N.with(|c| c.set(0));
+}
+
+fn rollout(state: &GameState, me: i32) -> f64 {
+    evaluate(state, me)
+}
+
+pub(crate) fn evaluate(state: &GameState, me: i32) -> f64 {
+    if prof_enabled() {
+        let t = Instant::now();
+        let v = evaluate_inner(state, me);
+        let ns = t.elapsed().as_nanos() as u64;
+        PROF_EVAL_NS.with(|c| c.set(c.get() + ns));
+        PROF_EVAL_N.with(|c| c.set(c.get() + 1));
+        return v;
+    }
+    evaluate_inner(state, me)
+}
+
+fn evaluate_inner(state: &GameState, me: i32) -> f64 {
+    let __vn_t0 = std::time::Instant::now();
+    let __pred = crate::value_net::predict(state, me);
+    crate::profiling::add(&crate::profiling::VALUE_NET_NS, __vn_t0);
+    crate::profiling::inc(&crate::profiling::VALUE_NET_CALLS);
+    if let Some(v) = __pred {
+        return v.clamp(-1.0, 1.0);
+    }
+    crate::eval::evaluate_external(state, me)
+}
+
+fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
+    if node.state.step >= TERMINAL_STEP || alive_players(&node.state) <= 1 {
+        let v = evaluate(&node.state, me);
+        node.visits += 1;
+        return v;
+    }
+    ensure_candidates(node, me, is_root);
+    let __sel_t0 = std::time::Instant::now();
+    let my_idx = select_my(node);
+    let opp_idx = select_opp(node);
+    crate::profiling::add(&crate::profiling::SELECTION_NS, __sel_t0);
+    crate::profiling::inc(&crate::profiling::SELECTION_CALLS);
+    let value: f64;
+    if !node.children.contains_key(&(my_idx, opp_idx)) {
+        let __tree_t0 = std::time::Instant::now();
+        let mut s = node.state.clone();
+        crate::profiling::add(&crate::profiling::TREE_OPS_NS, __tree_t0);
+        crate::profiling::inc(&crate::profiling::TREE_OPS_CALLS);
+        // Expand: apply both actions, tick, create new node, rollout.
+        let __al_t0 = std::time::Instant::now();
+        apply_launches(&mut s, &node.my_candidates[my_idx]);
+        apply_launches(&mut s, &node.opp_candidates[opp_idx]);
+        crate::profiling::add(&crate::profiling::APPLY_LAUNCHES_NS, __al_t0);
+        let __tick_t0 = std::time::Instant::now();
+        tick(&mut s);
+        crate::profiling::add(&crate::profiling::TICK_NS, __tick_t0);
+        crate::profiling::inc(&crate::profiling::TICK_CALLS);
+        let rollout_value = rollout(&s, me);
+        let __tree_t1 = std::time::Instant::now();
+        let child = Node {
+            state: s,
+            visits: 1,
+            my_candidates: Vec::new(),
+            my_priors: Vec::new(),
+            my_stats: Vec::new(),
+            opp_candidates: Vec::new(),
+            opp_priors: Vec::new(),
+            opp_stats: Vec::new(),
+            children: HashMap::new(),
+            candidates_initialized: false,
+        };
+        node.children.insert((my_idx, opp_idx), Box::new(child));
+        crate::profiling::add(&crate::profiling::TREE_OPS_NS, __tree_t1);
+        value = rollout_value;
+    } else {
+        // Recurse.
+        let child = node.children.get_mut(&(my_idx, opp_idx)).unwrap();
+        value = select_and_expand(child, me, false);
+    }
+    // Backprop: update both marginal stats + joint node.
+    let __bp_t0 = std::time::Instant::now();
+    node.visits += 1;
+    node.my_stats[my_idx].visits += 1;
+    node.my_stats[my_idx].sum_value += value;
+    node.opp_stats[opp_idx].visits += 1;
+    node.opp_stats[opp_idx].sum_value += value;
+    crate::profiling::add(&crate::profiling::BACKPROP_NS, __bp_t0);
+    crate::profiling::inc(&crate::profiling::BACKPROP_CALLS);
+    value
+}
+
+fn state_hash(state: &GameState) -> u64 {
+    let mut h: u64 = state.step as u64;
+    for p in &state.planets {
+        h = h.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(p.id as u64);
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add((p.owner as i64 + 1) as u64);
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(p.ships as u64);
+    }
+    for f in &state.fleets {
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(f.from_planet_id as u64);
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add((f.owner + 1) as u64);
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(f.ships as u64);
+    }
+    h
+}
+
+pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
+    // Build/refresh the persistent shared apollo cache before any candidate
+    // generation or rollout reads it.
+    refresh_cache(state);
+    let reuse_disabled = false;
+    let target_hash = state_hash(state);
+    let mut reused: Option<Box<Node>> = None;
+    if !reuse_disabled {
+        LAST_TREE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if let Some((expected_step, prev_root)) = slot.take() {
+                if expected_step == state.step {
+                    // Find joint child whose state matches.
+                    for (_key, child) in prev_root.children.iter() {
+                        if state_hash(&child.state) == target_hash {
+                            reused = Some(child.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let mut root = match reused {
+        Some(r) => *r,
+        None => Node {
+            state: state.clone(),
+            visits: 0,
+            my_candidates: Vec::new(),
+            my_priors: Vec::new(),
+            my_stats: Vec::new(),
+            opp_candidates: Vec::new(),
+            opp_priors: Vec::new(),
+            opp_stats: Vec::new(),
+            children: HashMap::new(),
+            candidates_initialized: false,
+        },
+    };
+    ensure_candidates(&mut root, me, true);
+
+    if prof_enabled() {
+        prof_reset();
+    }
+    let deadline = Instant::now() + std::time::Duration::from_millis(budget_ms);
+    let mut iters = 0u32;
+    while Instant::now() < deadline {
+        select_and_expand(&mut root, me, true);
+        iters += 1;
+        if iters > 100_000 {
+            break;
+        }
+    }
+    crate::profiling::ITERATIONS.fetch_add(iters as u64, std::sync::atomic::Ordering::Relaxed);
+
+    if std::env::var("OW_DEBUG").is_ok() {
+        // Walk the tree to measure unique node count + max depth.
+        fn count_nodes(n: &Node) -> usize {
+            1 + n.children.values().map(|c| count_nodes(c)).sum::<usize>()
+        }
+        fn max_depth(n: &Node) -> usize {
+            if n.children.is_empty() {
+                1
+            } else {
+                1 + n.children.values().map(|c| max_depth(c)).max().unwrap_or(0)
+            }
+        }
+        let nodes = count_nodes(&root);
+        let depth = max_depth(&root);
+
+        let mut child_info: Vec<String> = Vec::new();
+        for i in 0..root.my_candidates.len() {
+            let st = &root.my_stats[i];
+            let avg = if st.visits > 0 {
+                st.sum_value / st.visits as f64
+            } else {
+                0.0
+            };
+            let target_summary: Vec<String> = root.my_candidates[i]
+                .iter()
+                .take(3)
+                .map(|x| format!("(s={},t≈{:.2})", x.0, x.1))
+                .collect();
+            child_info.push(format!(
+                "v={}/avg={:.3} {}",
+                st.visits,
+                avg,
+                target_summary.join(",")
+            ));
+        }
+        eprintln!(
+            "[duck] step={} iters={} root_visits={} my_K={} nodes={} max_depth={} | {}",
+            state.step,
+            iters,
+            root.visits,
+            root.my_candidates.len(),
+            nodes,
+            depth,
+            child_info.join(" || ")
+        );
+    }
+
+    if prof_enabled() {
+        let eval_ns = PROF_EVAL_NS.with(|c| c.get());
+        let eval_n = PROF_EVAL_N.with(|c| c.get());
+        let roll_ns = PROF_ROLL_NS.with(|c| c.get());
+        let roll_n = PROF_ROLL_N.with(|c| c.get());
+        let eval_ms = eval_ns as f64 / 1e6;
+        let roll_ms = roll_ns as f64 / 1e6;
+        let acct_ms = eval_ms + roll_ms;
+        let budget = budget_ms as f64;
+        let pct = |x: f64| {
+            if budget > 0.0 {
+                x / budget * 100.0
+            } else {
+                0.0
+            }
+        };
+        let per = |ns: u64, n: u64| {
+            if n > 0 {
+                ns as f64 / 1e3 / n as f64
+            } else {
+                0.0
+            }
+        };
+        eprintln!(
+            "[prof] step={} iters={} budget={}ms | rollout_sim={:.1}ms ({:.0}%, n={}, {:.1}µs/call) | leaf_eval={:.1}ms ({:.0}%, n={}, {:.2}µs/call) | accounted={:.1}ms ({:.0}%); rest=tree+candidates",
+            state.step, iters, budget_ms,
+            roll_ms, pct(roll_ms), roll_n, per(roll_ns, roll_n),
+            eval_ms, pct(eval_ms), eval_n, per(eval_ns, eval_n),
+            acct_ms, pct(acct_ms),
+        );
+    }
+
+    if root.my_candidates.is_empty() {
+        return Vec::new();
+    }
+    // Pick by raw max in my marginal stats.
+    let mut best_i = 0usize;
+    let mut best_val = if root.my_stats[0].visits > 0 {
+        root.my_stats[0].sum_value / root.my_stats[0].visits as f64
+    } else {
+        f64::NEG_INFINITY
+    };
+    for i in 1..root.my_candidates.len() {
+        let st = &root.my_stats[i];
+        if st.visits == 0 {
+            continue;
+        }
+        let avg = st.sum_value / st.visits as f64;
+        if avg > best_val {
+            best_val = avg;
+            best_i = i;
+        }
+    }
+    let chosen = root.my_candidates[best_i].clone();
+
+    // Stash root for next turn's reuse (so we can match observed state to
+    // a joint child).
+    if !reuse_disabled {
+        let next_step = state.step + 1;
+        LAST_TREE.with(|cell| {
+            *cell.borrow_mut() = Some((next_step, Box::new(root)));
+        });
+    }
+    chosen
+}

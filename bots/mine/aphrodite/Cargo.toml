@@ -1,0 +1,38 @@
+[package]
+name = "aphrodite"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "aphrodite"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aphrodite"
+path = "src/main.rs"
+
+[[bin]]
+name = "extract_v2"
+path = "src/bin/extract_v2.rs"
+
+[[bin]]
+name = "xgb_parity"
+path = "src/bin/xgb_parity.rs"
+
+[features]
+# Mirrors the vendored apollo engine: cfg-gates its per-section timers.
+profile = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustc-hash = "1.1"
+sha2 = "0.10"
+# Faster uncontended Mutex than std (no poisoning, lighter fast path) for the
+# hot aim caches.
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

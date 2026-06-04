@@ -207,6 +207,14 @@ wandb/
 # bots/mine/alphaow/train/build_from_zip.py + extras_v{3,4}_build.py.
 bots/mine/alphaow/train/data/*.npz
 
+# Raw Kaggle ladder replays (~1.3GB/zip)
+ladder_replays/
+
+# Aphrodite per-format training data + ladder intermediates (combined.npz is ~377MB)
+bots/mine/aphrodite/train/data/2p/
+bots/mine/aphrodite/train/data/4p/
+bots/mine/aphrodite/train/data/**/_ladder_work/
+
 !orbit-wars-lab/runs/
 orbit-wars-lab/runs/*
 !orbit-wars-lab/runs/trueskill.json
