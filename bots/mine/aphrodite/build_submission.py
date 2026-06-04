@@ -1,10 +1,6 @@
 """Build a Kaggle-ready submission bundle for aphrodite.
 
-aphrodite is the aphrodite Rust bot paired with the *fixed-extrapolation*
-XGB model (xgb_2p_old_top10.json, retrained 2026-05-30). It is a
-subprocess-style bot: a Python wrapper (main.py) spawns the `aphrodite`
-Rust binary and pipes one JSON observation per turn. The bundle therefore
-needs three files at the archive root:
+aphrodite needs these files at the archive root:
 
   - main.py                  (the dev wrapper verbatim; auto-detects the flat
                               bundle layout at runtime — see main.py's `_locate`)
@@ -12,9 +8,6 @@ needs three files at the archive root:
   - xgb_2p_old_top10.json  (fallback fixed-extrapolation value-net weights)
   - xgb_2p.json              (optional 2-player value-net weights)
   - xgb_4p.json              (optional 4-player value-net weights)
-
-The corrected `extrapolate_fleets` path is the runtime default, matching the
-fixed training feature extraction.
 
 Build process:
 

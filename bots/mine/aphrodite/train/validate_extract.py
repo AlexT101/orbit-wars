@@ -1,24 +1,17 @@
-"""INDEPENDENT cross-check of the summary_v2 extractor.
+"""Independent cross-check of the summary_v2 extractor.
 
-The user asked: "double check you extracted it right — take some data, run the
-extrapolator yourself, then compare with the data results."
-
-So this does NOT call the Rust feature code. It re-implements, from scratch in
-pure Python, the ENTIRE pipeline that produced the NPZ:
+This reimplements the entire pipeline that produced the NPZ:
   - parse_state (planet/fleet/comet decode, orbit-radius derivation)
   - predict_fleet_collision (per-fleet swept orbital collision, the expensive
     "find each ship's target" step)
   - extrapolate_fleets (land every fleet, resolve combat per planet)
   - summary_features_v2 (current + extrapolated + neutral blocks, 46-d)
 
-Then it feeds the SAME normalized observations to the actual `extract_v2` Rust
+Then it feeds the same normalized observations to the actual `extract_v2` Rust
 binary (the exact program that built replays_strong.npz) and compares all 46
 features per observation. Every feature is an integer-valued sum (ships / counts
-/ production / comet-time), so a correct extractor must match EXACTLY. Any
+/ production / comet-time), so a correct extractor must match exactly. Any
 mismatch is reported with the offending block + a few examples.
-
-Note: like from_replays_fast.py we strip `config`, so max_speed defaults to 6.0
-(this is what actually built the NPZ).
 """
 
 from __future__ import annotations
@@ -41,7 +34,7 @@ CENTER = (50.0, 50.0)
 SUN_RADIUS = 10.0
 BOARD = 100.0
 ROT_LIMIT = 50.0
-MAX_SPEED = 6.0          # config stripped -> default
+MAX_SPEED = 6.0
 MAX_TIME = 100
 F32 = np.float32
 
@@ -359,8 +352,8 @@ def main():
     n_skip4p = 0
     for path in files:
         data = json.loads(path.read_bytes())
-        # from_replays_fast.py only keeps 2-player games (len(rewards)==2);
-        # 4-player replays are never in the NPZ, so skip them here too.
+        # This validates a 2-player NPZ (len(rewards)==2); 4-player replays
+        # are never in such an NPZ, so skip them here too.
         if len(data.get("rewards") or []) != 2:
             n_skip4p += 1
             continue
