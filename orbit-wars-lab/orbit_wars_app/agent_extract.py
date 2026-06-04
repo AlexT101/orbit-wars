@@ -34,33 +34,35 @@ class TarballError(Exception):
 
 
 def ensure_extracted(agent_dir: Path) -> Path:
-    """Return the runnable agent dir, preferring submission.tar.gz over loose source.
+    """Return the runnable agent dir, preferring loose source over tarballs.
 
-    If `submission.tar.gz` exists, it is always preferred and extracted into
-    `agent_dir/.extracted/` (with caching via mtime). If no tarball exists,
-    falls back to returning `agent_dir` (e.g., for loose `main.py` setups).
+    Returns `agent_dir` unchanged when it already has a loose `main.py`, even
+    if a stale or alternate `submission.tar.gz` is present. If there is no
+    loose `main.py`, a `submission.tar.gz` is extracted into
+    `agent_dir/.extracted/`. A marker file records the source tarball's mtime
+    so subsequent calls skip the extract if the tarball is unchanged.
     """
+    if (agent_dir / "main.py").is_file():
+        return agent_dir
+
     tarball = agent_dir / SUBMISSION_FILENAME
+    if not tarball.is_file():
+        return agent_dir
 
-    # Prefer tarball if it exists
-    if tarball.is_file():
-        extract_dir = agent_dir / EXTRACT_DIRNAME
-        marker = extract_dir / MTIME_MARKER
-        src_mtime = tarball.stat().st_mtime_ns
+    extract_dir = agent_dir / EXTRACT_DIRNAME
+    marker = extract_dir / MTIME_MARKER
+    src_mtime = tarball.stat().st_mtime_ns
 
-        if marker.is_file():
-            try:
-                if int(marker.read_text().strip()) == src_mtime:
-                    return extract_dir
-            except (OSError, ValueError):
-                pass  # corrupt marker — fall through and re-extract
+    if marker.is_file():
+        try:
+            if int(marker.read_text().strip()) == src_mtime:
+                return extract_dir
+        except (OSError, ValueError):
+            pass  # corrupt marker — fall through and re-extract
 
-        _extract_safely(tarball, extract_dir)
-        marker.write_text(str(src_mtime))
-        return extract_dir
-
-    # Fallback to loose source
-    return agent_dir
+    _extract_safely(tarball, extract_dir)
+    marker.write_text(str(src_mtime))
+    return extract_dir
 
 
 def _extract_safely(tarball: Path, dest: Path) -> None:
@@ -86,6 +88,8 @@ def _extract_safely(tarball: Path, dest: Path) -> None:
                         f"{tarball.name} expands past {MAX_EXTRACT_BYTES} bytes"
                     )
             # `filter='data'` (Python 3.12+) drops setuid/symlinks-outside/etc.
+            # — equivalent to the per-member check above, kept for defence in
+            # depth in case a future tarfile bug regresses one of them.
             tf.extractall(dest, filter="data")
     except tarfile.TarError as e:
         raise TarballError(f"{tarball.name}: {e}") from e
