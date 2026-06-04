@@ -205,8 +205,6 @@ pub fn extract_features(state: &GameState, me: i32) -> Features {
 enum InputKind {
     /// 2728-d raw two-stream + distance matrix.
     Full,
-    /// 19-d handcrafted summary (see `summary_features::extract`).
-    Summary,
     /// 46-d v2 summary (per-player + extrap + neutral block;
     /// see `summary_features_v2::extract`).
     SummaryV2,
@@ -218,16 +216,13 @@ enum InputKind {
 fn detect_kind(input_dim: usize) -> Option<InputKind> {
     if input_dim == INPUT_DIM {
         Some(InputKind::Full)
-    } else if input_dim == summary_features::DIM {
-        Some(InputKind::Summary)
     } else if input_dim == summary_features_v2::DIM {
         Some(InputKind::SummaryV2)
     } else {
         eprintln!(
-            "[aphrodite] unknown input_dim={} (expected {} full / {} summary / {} summary_v2)",
+            "[aphrodite] unknown input_dim={} (expected {} full / {} summary_v2)",
             input_dim,
             INPUT_DIM,
-            summary_features::DIM,
             summary_features_v2::DIM
         );
         None
@@ -367,10 +362,6 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
                 scratch.extend_from_slice(features.dist.as_ref());
                 model.predict_value(&scratch)
             }
-            InputKind::Summary => {
-                let feats = summary_features::extract(state, me);
-                model.predict_value(&feats)
-            }
             InputKind::SummaryV2 => {
                 let feats = summary_features_v2::extract(state, me);
                 model.predict_value(&feats)
@@ -378,158 +369,6 @@ pub fn predict(state: &GameState, me: i32) -> Option<f64> {
         },
     };
     Some(y as f64)
-}
-
-/// Handcrafted scalar summary features. Permutation-invariant by
-/// construction — does not depend on planet ordering. Matches the
-/// Python reference in `train/summary_features.py` byte-for-byte
-/// (verified by a feature-parity unit test in
-/// `tests/summary_parity.rs`, see CI).
-pub mod summary_features {
-    use super::*;
-
-    pub const DIM: usize = 23;
-
-    /// Build the 19-d summary feature vector directly from the game
-    /// state. Avoids the cost of materializing the 2728-d raw feature
-    /// tensor — important when the bot uses a summary-only value net
-    /// (no need to compute the distance matrix).
-    pub fn extract(state: &GameState, me: i32) -> [f32; DIM] {
-        // Resolve in-flight fleets for the extrapolated counts.
-        let extrap_map = extrapolate_fleets(state);
-
-        let mut my_ships = 0.0f32;
-        let mut opp_ships = 0.0f32;
-        let mut neutral_ships = 0.0f32;
-        let mut my_ships_ext = 0.0f32;
-        let mut opp_ships_ext = 0.0f32;
-        let mut my_planets = 0.0f32;
-        let mut opp_planets = 0.0f32;
-        let mut neutral_planets = 0.0f32;
-        let mut my_planets_ext = 0.0f32;
-        let mut opp_planets_ext = 0.0f32;
-        let mut my_production = 0.0f32;
-        let mut opp_production = 0.0f32;
-        let mut my_radius = 0.0f32;
-        let mut opp_radius = 0.0f32;
-        let mut pressure_me_to_opp = 0.0f32;
-        let mut pressure_opp_to_me = 0.0f32;
-        let mut pressure_me_to_neutral = 0.0f32;
-        let mut pressure_opp_to_neutral = 0.0f32;
-        let mut max_my_ships = 0.0f32;
-        let mut max_opp_ships = 0.0f32;
-        let n_planets = state.planets.len() as f32;
-
-        // Precompute per-planet owner classification (current + extrap).
-        let n = state.planets.len();
-        let mut cur_owner: Vec<i32> = Vec::with_capacity(n);
-        let mut ext_owner: Vec<i32> = Vec::with_capacity(n);
-        let mut ext_ships: Vec<f32> = Vec::with_capacity(n);
-        for p in &state.planets {
-            cur_owner.push(p.owner);
-            let (eo, es) = extrap_map.get(&p.id).copied().unwrap_or((p.owner, p.ships));
-            ext_owner.push(eo);
-            ext_ships.push(es as f32);
-        }
-
-        for (idx, p) in state.planets.iter().enumerate() {
-            let ships = p.ships as f32;
-            let radius = p.radius as f32;
-            let prod = p.production as f32;
-            let owner = cur_owner[idx];
-            let ext_o = ext_owner[idx];
-            let ext_s = ext_ships[idx];
-            if owner == -1 {
-                neutral_ships += ships;
-                neutral_planets += 1.0;
-            } else if owner == me {
-                my_ships += ships;
-                my_planets += 1.0;
-                my_production += prod;
-                my_radius += radius;
-                if ships > max_my_ships {
-                    max_my_ships = ships;
-                }
-            } else {
-                opp_ships += ships;
-                opp_planets += 1.0;
-                opp_production += prod;
-                opp_radius += radius;
-                if ships > max_opp_ships {
-                    max_opp_ships = ships;
-                }
-            }
-            if ext_o == -1 {
-                // no contribution to my/opp ships ext
-            } else if ext_o == me {
-                my_ships_ext += ext_s;
-                my_planets_ext += 1.0;
-            } else {
-                opp_ships_ext += ext_s;
-                opp_planets_ext += 1.0;
-            }
-        }
-
-        // Pairwise pressure + frontline distance.
-        let mut front_dist = 200.0f32;
-        for i in 0..n {
-            let pi = &state.planets[i];
-            for j in 0..n {
-                if i == j {
-                    continue;
-                }
-                let pj = &state.planets[j];
-                let dx = (pi.x - pj.x) as f32;
-                let dy = (pi.y - pj.y) as f32;
-                let d = (dx * dx + dy * dy).sqrt();
-                let inv = 1.0 / (1.0 + d);
-                let oi = cur_owner[i];
-                let oj = cur_owner[j];
-                if oi == me && oj != me && oj != -1 {
-                    pressure_me_to_opp += inv;
-                    if d < front_dist {
-                        front_dist = d;
-                    }
-                }
-                if oi != me && oi != -1 && oj == me {
-                    pressure_opp_to_me += inv;
-                }
-                if oi == me && oj == -1 {
-                    pressure_me_to_neutral += inv;
-                }
-                if oi != me && oi != -1 && oj == -1 {
-                    pressure_opp_to_neutral += inv;
-                }
-            }
-        }
-        let log_ratio = (1.0 + my_ships).ln() - (1.0 + opp_ships).ln();
-
-        [
-            my_ships,
-            opp_ships,
-            neutral_ships,
-            my_ships_ext,
-            opp_ships_ext,
-            my_planets,
-            opp_planets,
-            neutral_planets,
-            my_planets_ext - my_planets,
-            opp_planets_ext - opp_planets,
-            my_production,
-            opp_production,
-            my_radius,
-            opp_radius,
-            pressure_me_to_opp,
-            pressure_opp_to_me,
-            pressure_me_to_neutral,
-            pressure_opp_to_neutral,
-            n_planets,
-            max_my_ships,
-            max_opp_ships,
-            front_dist,
-            log_ratio,
-        ]
-    }
 }
 
 /// v2 summary feature set per user spec:

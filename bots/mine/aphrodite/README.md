@@ -61,5 +61,4 @@ For 4p replay extraction, pass `--players 4` to `build_from_zip.py`,
 `from_replays_fast.py`, or `collect.py`, then train `train/weights/xgb_4p.json`.
 
 Useful support scripts include `collect.py`, `from_replays_fast.py`,
-`build_from_zip.py`, `validate_extract.py`, `rebuild_fixed_extrap.py`, and
-`rebuild_and_retrain_local.py`.
+`build_from_zip.py`, and `validate_extract.py`.

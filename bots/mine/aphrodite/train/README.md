@@ -7,13 +7,12 @@ SummaryV2 features, and train the deployed fixed-extrapolation XGB model:
 
 ## Kept Pipeline Pieces
 
-- `collect.py`, `mcts_match.py`, `eval.py` - match/self-play/data collection
-- `from_replays.py`, `from_replays_fast.py`, `build_from_zip.py` - replay to NPZ
-- `validate_extract.py`, `check_parity.py`, `summary_features.py` - extraction checks
+- `collect.py`, `eval.py` - match/self-play/data collection
+- `from_replays_fast.py`, `build_from_zip.py` - replay to NPZ
+- `validate_extract.py` - extraction checks
 - `combine_npz.py` - concatenate replay/self-play/candidate datasets with safe game-id offsets
 - `filter_top10_and_train_xgb.py`, `train_xgb.py` - train XGB models
-- `rebuild_fixed_extrap.py`, `rebuild_and_retrain_local.py` - fixed extrapolation audits
-- `kaggle_rebuild_v2.py`, `select_strong_replays.py`, `view_replay.py` - replay utilities
+- `select_strong_replays.py`, `view_replay.py` - replay utilities
 
 ## Current Model
 
