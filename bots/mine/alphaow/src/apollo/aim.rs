@@ -15,7 +15,7 @@ use std::f64::consts::FRAC_PI_2;
 
 use crate::apollo::cache::{Entity, EntityCache};
 use crate::apollo::constants::{
-    CENTER, EPISODE_STEPS, HORIZON, LAUNCH_CLEARANCE, MAX_CONE_PROBES, MAX_CONE_STEP,
+    AIM_HORIZON, CENTER, EPISODE_STEPS, LAUNCH_CLEARANCE, MAX_CONE_PROBES, MAX_CONE_STEP,
     MAX_SHIP_SPEED, NUDGE_SCAN, SUN_RADIUS,
 };
 use crate::apollo::engine::fleet_speed;
@@ -194,7 +194,7 @@ pub fn lead_target_from(
     // step `abs_launch + t - 1`, so the latest useful `t` is `EPISODE_STEPS -
     // abs_launch` (lands on the final tick). The position table now carries the
     // extra index `EPISODE_STEPS` that this final shot reads (see `build_*_entity`).
-    let max_lookahead = HORIZON.min((EPISODE_STEPS - abs_launch).max(0));
+    let max_lookahead = AIM_HORIZON.min((EPISODE_STEPS - abs_launch).max(0));
     if max_lookahead < 1 {
         return None;
     }

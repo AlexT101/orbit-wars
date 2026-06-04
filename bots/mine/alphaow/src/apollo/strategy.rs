@@ -11,7 +11,7 @@
 //!     [`WorldState::projected_timeline`] — hellburner's `simulate_planet_timeline`.
 //!
 //! Hellburner-specific data we build here:
-//!   * Proximity graph (`MAX_DISTANCE=38`, `ROTATION_LOOK_AHEAD_TURNS=10`).
+//!   * Proximity graph (`Config::max_distance`, `ROTATION_LOOK_AHEAD_TURNS=10`).
 //!   * `reinforcement_target` per owned planet (frontline BFS).
 //!   * Per-turn `PlanState` (spent ships + planned commitments).
 
@@ -23,8 +23,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::apollo::cache::{AimCacheVerdict, InvariantVerdict};
 use crate::apollo::constants::{
-    A_S_LOOKAHEAD, MAX_COORD_DELAY, MAX_DISTANCE, MAX_SUBSET_SOURCES, OFFSET_LOOKAHEAD,
-    ROTATION_LOOK_AHEAD_TURNS,
+    A_S_LOOKAHEAD, MAX_COORD_DELAY, OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS,
 };
 use crate::apollo::engine::{MoveAction, Planet};
 use crate::apollo::helpers::{
@@ -89,7 +88,7 @@ impl<'a> HellburnerModel<'a> {
                 }
                 let [fx, fy] = future_pos[&dst.id];
                 let travel = dist(src.x, src.y, fx, fy);
-                if travel <= MAX_DISTANCE {
+                if travel <= state.config.max_distance {
                     inbound_edges
                         .get_mut(&dst.id)
                         .unwrap()
@@ -943,7 +942,7 @@ fn collect_source_candidates(
         // first), so once we've collected `MAX_SUBSET_SOURCES` viable sources we
         // stop — keeping the soonest-arriving candidates while bounding the
         // `2^n` enumeration (and avoiding the `1u32 << n` overflow for large n).
-        if out.len() >= MAX_SUBSET_SOURCES {
+        if out.len() >= world.config.max_subset_sources {
             break;
         }
         let src = *world.planet(src_id);
@@ -1086,6 +1085,18 @@ fn send_reinforcements(
             continue;
         };
         let arrival_now = turns_now.max(1);
+
+        // Gate on the planning horizon, matching how combat fleets are bounded.
+        // The frontline planner only scores a capture at `owner_buf[horizon]`, so
+        // it never proposes a fleet whose ownership flip lands past the horizon (it
+        // scores 0). Reinforcement has no such scoring, so without this check a slow
+        // shuttle that only arrives after the window the bot can value would still
+        // launch — wasting ships that the rollout never sees deliver. `<=` mirrors
+        // the inclusive combat boundary (an arrival at exactly `horizon` still
+        // flips `owner_buf[horizon]`).
+        if arrival_now > world.config.horizon {
+            continue;
+        }
 
         // Hold if waiting delivers the fleet no later than launching now.
         // Fleet speed is log-shaped in ship count, so `production·d` extra ships

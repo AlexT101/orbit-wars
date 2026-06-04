@@ -15,7 +15,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::aim::AimResult;
 use crate::cache::EntityCache;
-use crate::constants::HORIZON;
+use crate::constants::Config;
 use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 
 /// Step-scoped, lock-free L1 aim cache shared across every [`WorldState`] and
@@ -29,8 +29,8 @@ use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 /// across threads — so a bare `RefCell` is sound here without any `Sync` shim.
 pub type ShotL1 = RefCell<HashMap<(i64, i64, i64, i64), Option<AimResult>>>;
 use crate::helpers::{
-    count_players, simulate_planet_timeline, ArrivalEvent, ArrivalLedger, PlanetTimeline,
-    TimelineCache,
+    count_alive_players, count_players, simulate_planet_timeline, ArrivalEvent, ArrivalLedger,
+    PlanetTimeline, TimelineCache,
 };
 
 /// Per-turn world snapshot. Strategy code borrows this and never mutates it.
@@ -51,6 +51,9 @@ pub struct WorldState<'a> {
 
     pub my_planets: Vec<Planet>,
     pub enemy_planets: Vec<Planet>,
+
+    /// Runtime tuning profile selected from the alive-player count of this snapshot.
+    pub config: Config,
 
     /// defaults to 0.0 for rollout-internal and test-built worlds so they take the cheap
     /// path through cost-gated logic.
@@ -100,7 +103,8 @@ impl<'a> WorldState<'a> {
     /// player-agnostic ledger can be shared across players.
     pub fn from_engine(player: i64, engine: &EngineState, cache: &'a EntityCache) -> Self {
         let sim = Simulator::new(engine);
-        let ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+        let config = Config::for_alive(count_alive_players(sim.planets(), sim.fleets()));
+        let ledger = ArrivalLedger::build(&sim, config.horizon, cache);
         Self::from_simulator_with_ledger(player, &sim, &ledger, cache)
     }
 
@@ -116,6 +120,7 @@ impl<'a> WorldState<'a> {
         cache: &'a EntityCache,
     ) -> Self {
         let timeline_cache = TimelineCache::from_ledger(sim.planets(), player, ledger);
+        let config = Config::for_alive(count_alive_players(sim.planets(), sim.fleets()));
 
         let planets: Vec<Planet> = sim.planets().to_vec();
         let comet_planet_ids: Vec<i64> = sim.comet_planet_ids().to_vec();
@@ -147,6 +152,7 @@ impl<'a> WorldState<'a> {
             comet_ids,
             my_planets,
             enemy_planets,
+            config,
             remaining_overage_time: 0.0,
         }
     }

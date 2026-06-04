@@ -12,14 +12,14 @@
 //!   - apollo `FleetOrder = (from_id, angle, ships)` -> alphaow
 //!     `Action = (from_id, angle, ships, owner)` with `owner = player`.
 
-use crate::apollo::constants::HORIZON;
+use crate::apollo::constants::Config;
 use crate::apollo::engine::{
     CometGroup as ACometGroup, EngineState, Fleet as AFleet, MoveAction, Planet as APlanet,
     Simulator,
 };
 use crate::apollo::cache::EntityCache;
 use crate::apollo::strategy;
-use crate::apollo::helpers::{count_players, ArrivalLedger};
+use crate::apollo::helpers::{count_alive_players, count_players, ArrivalLedger};
 use crate::apollo::world::WorldState;
 use crate::sim::Action;
 use crate::{GameState, Planet, CENTER_X, CENTER_Y};
@@ -193,7 +193,8 @@ pub fn apollo_plan_pair(
 ) -> (Vec<Action>, Vec<Action>) {
     let engine = build_engine(state);
     let sim = Simulator::new(&engine);
-    let ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+    let horizon = Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+    let ledger = ArrivalLedger::build(&sim, horizon, cache);
     let my = plan_from_ledger(&sim, &ledger, me, cache);
     let op = opp
         .map(|o| plan_from_ledger(&sim, &ledger, o, cache))
@@ -212,7 +213,8 @@ pub fn apollo_candidates_pair(
 ) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
     let engine = build_engine(state);
     let sim = Simulator::new(&engine);
-    let ledger = ArrivalLedger::build(&sim, HORIZON, cache);
+    let horizon = Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+    let ledger = ArrivalLedger::build(&sim, horizon, cache);
     (
         candidates_from_ledger(&sim, &ledger, me, cache),
         candidates_from_ledger(&sim, &ledger, opp, cache),

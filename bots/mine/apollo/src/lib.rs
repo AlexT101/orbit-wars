@@ -18,7 +18,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
 
 use crate::cache::EntityCache;
-use crate::constants::{COMET_SPAWN_STEPS, HORIZON, TOTAL_OVERAGE_TIME};
+use crate::constants::{Config, COMET_SPAWN_STEPS, TOTAL_OVERAGE_TIME};
 use crate::engine::{CometGroup, EngineState, Fleet, Planet, Simulator};
 use crate::helpers::ArrivalLedger;
 use crate::rollout::pick_plan_by_rollout;
@@ -252,7 +252,11 @@ impl Bot {
         let (candidates, initial_ledger) = {
             let cache_ref = self.cache.as_ref().expect("entity cache populated above");
             let initial_sim = Simulator::new(&initial_state);
-            let ledger = ArrivalLedger::build(&initial_sim, HORIZON, cache_ref);
+            let config = Config::for_alive(crate::helpers::count_alive_players(
+                initial_sim.planets(),
+                initial_sim.fleets(),
+            ));
+            let ledger = ArrivalLedger::build(&initial_sim, config.horizon, cache_ref);
             let mut world =
                 WorldState::from_simulator_with_ledger(player, &initial_sim, &ledger, cache_ref);
             world.remaining_overage_time = obs.remaining_overage_time;
