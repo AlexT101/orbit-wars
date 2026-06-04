@@ -162,6 +162,7 @@ process).
 ```bash
 ./venv/Scripts/python.exe bots/mine/aphrodite/train/eval.py --players 4 \
   --weights bots/mine/aphrodite/train/weights/xgb_4p.json \
+  --weights-2p bots/mine/aphrodite/train/weights/xgb_2p.json \
   --opponents apollo_fast \
   --seeds 1000 1001 1002 1003 1004 1005 1006 1007 1008 1009 \
   --budget-ms 500 --threads 12
@@ -171,6 +172,8 @@ process).
   matters (it decides who you spawn next to), so seats are shuffled by a
   deterministic, seed-derived permutation and results are normalized back to
   aphrodite's perspective internally. `--swap` is ignored in 4p.
+- `--weights-2p` enables the late-game 2p switchover (§5); omit it to eval the
+  4p net alone. A/B the two to measure the switch's effect.
 
 Opponents (resolved from `bots/**/<name>/main.py`): `heuristic`, `apollo_fast`
 (in `bots/mine`), `owheuristic`, `producer` (in `bots/external`).
@@ -200,6 +203,29 @@ mv xgb_2p_candidate.json xgb_2p.json  # promote the winner
 
 `build_submission.py` bundles `xgb_2p.json` / `xgb_4p.json` (plus the fallback)
 into the Kaggle tarball.
+
+---
+
+## 5. Late-game 2p switchover (4p)
+
+A 4p game that collapses to two survivors is effectively a 1v1, where the 2p
+net is much stronger than the 4p net. So the bot can score such positions with
+the 2p model:
+
+- `value_net::predict` counts alive players in the **evaluated state** and, when
+  exactly two are alive, uses the secondary net from `APHRODITE_VALUE_NET_PATH_2P`
+  (falling back to the primary net if none is set). This is **per-leaf**, so a
+  4p search scores its deep 2-survivor branches with the 2p net even before the
+  real game has collapsed.
+- **On by default at runtime**: `main.py` sets `APHRODITE_VALUE_NET_PATH_2P` to
+  the resolved 2p net for every game. In a 2p game it just matches the primary
+  (no behavior change); in 4p it engages once a position is down to two players.
+- Both nets consume the same 46-d SummaryV2 features, so no feature/extraction
+  changes are involved — only which booster scores the row.
+
+To exercise it in eval, pass `--weights-2p` (see the 4p example in §3); the
+daemon sets the env var for that match. Without `--weights-2p`, eval runs the
+primary net alone — run both and compare to measure the switch's effect.
 
 ---
 

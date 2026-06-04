@@ -211,6 +211,13 @@ def _ensure(payload=None):
         weights = _weight_candidates(run_cwd, build_cwd, n_players) or weights
         if weights:
             env["APHRODITE_VALUE_NET_PATH"] = weights
+    # Expose the 2p net as the "two-players-left" model so a 4p game that
+    # collapses to a 1v1 is scored by the (stronger) 2p net. Harmless in 2p
+    # games — it just matches the primary.
+    if "APHRODITE_VALUE_NET_PATH_2P" not in env:
+        w2p = _weight_candidates(run_cwd, build_cwd, 2)
+        if w2p:
+            env["APHRODITE_VALUE_NET_PATH_2P"] = w2p
     _PROC = subprocess.Popen(
         [binary],
         stdin=subprocess.PIPE,

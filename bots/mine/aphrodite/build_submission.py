@@ -41,10 +41,13 @@ APHRODITE = HERE
 WEIGHTS = APHRODITE / "train" / "weights" / "xgb_2p_old_top10.json"
 WEIGHTS_2P = APHRODITE / "train" / "weights" / "xgb_2p.json"
 WEIGHTS_4P = APHRODITE / "train" / "weights" / "xgb_4p.json"
-# The submission's main.py is the dev wrapper verbatim — it auto-detects the
-# flat-bundle layout at runtime, so there is no second Kaggle-only copy to keep
-# in sync. (See main.py's `_locate`.)
+# The submission's main.py is the dev wrapper, copied with ONE tweak: the
+# per-turn budget default is raised to SUBMISSION_BUDGET_MS (the Kaggle worker
+# allows more time per turn than local dev, where main.py defaults to 500ms).
+# Otherwise it is verbatim and auto-detects the flat-bundle layout at runtime
+# (see main.py's `_locate`).
 MAIN_PY = HERE / "main.py"
+SUBMISSION_BUDGET_MS = "1000"
 # Name the weights land under inside the flat bundle. main.py's _locate looks
 # for exactly this name next to itself.
 WEIGHTS_NAME = "xgb_2p_old_top10.json"
@@ -104,7 +107,16 @@ def main() -> int:
     bundle.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        shutil.copy(MAIN_PY, td / "main.py")
+        # Copy the wrapper, raising the per-turn budget default for the
+        # submission. Fail loudly if the expected line is missing so we never
+        # silently ship the dev budget.
+        wrapper_src = MAIN_PY.read_text(encoding="utf-8")
+        old_line = 'env.setdefault("APHRODITE_BUDGET_MS", "500")'
+        new_line = f'env.setdefault("APHRODITE_BUDGET_MS", "{SUBMISSION_BUDGET_MS}")'
+        if wrapper_src.count(old_line) != 1:
+            sys.exit(f"expected exactly one {old_line!r} in main.py to bump for the submission")
+        (td / "main.py").write_text(wrapper_src.replace(old_line, new_line), encoding="utf-8")
+        print(f"  bumped submission budget to {SUBMISSION_BUDGET_MS}ms (dev main.py stays 500ms)")
         shutil.copy(BIN_OUT, td / "aphrodite")
         os.chmod(td / "aphrodite", 0o755)
         staged = ["main.py", "aphrodite"]

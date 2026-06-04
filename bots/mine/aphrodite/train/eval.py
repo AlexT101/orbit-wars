@@ -39,7 +39,7 @@ def slot_order_for_seed(seed: int) -> tuple[int, ...]:
     return _PERMS_4P[(seed * 7) % len(_PERMS_4P)]
 
 
-def run_match(slot_bots, seed: int, budget_ms: int, weights_path):
+def run_match(slot_bots, seed: int, budget_ms: int, weights_path, weights_2p=None):
     """Run one match with bots placed in the given engine-slot order.
 
     Returns (rewards, avg_ms) indexed by ENGINE SLOT. The caller is
@@ -53,7 +53,8 @@ def run_match(slot_bots, seed: int, budget_ms: int, weights_path):
     closers: list = []
     for i, name in enumerate(slot_bots):
         if name == "aphrodite":
-            d = collect.AphroditeDaemon(dump_path=None, budget_ms=budget_ms, weights_path=weights_path)
+            d = collect.AphroditeDaemon(dump_path=None, budget_ms=budget_ms,
+                                        weights_path=weights_path, weights_2p_path=weights_2p)
             agent_funcs[i] = d
             closers.append(d.close)
         else:
@@ -96,7 +97,7 @@ def run_job(job):
     aphrodite's perspective. Returns (opp, seed, outcome, r_alpha, ms_alpha,
     ms_opp, side) where outcome is W (sole top) / T (tied top) / L.
     """
-    opp, seed, variant, budget_ms, weights, n_players = job
+    opp, seed, variant, budget_ms, weights, weights_2p, n_players = job
     input_bots = ["aphrodite"] + [opp] * (n_players - 1)
     if n_players == 2:
         slot_order = (0, 1) if variant else (1, 0)
@@ -104,7 +105,7 @@ def run_job(job):
         slot_order = slot_order_for_seed(seed)
     slotted = [input_bots[i] for i in slot_order]
 
-    rewards, avg_ms = run_match(slotted, seed, budget_ms, weights)
+    rewards, avg_ms = run_match(slotted, seed, budget_ms, weights, weights_2p)
 
     aphro_slot = list(slot_order).index(0)  # engine slot aphrodite played
     rvals = [float(x) for x in rewards]
@@ -124,6 +125,9 @@ def run_job(job):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--weights", default=None)
+    p.add_argument("--weights-2p", default=None,
+                   help="secondary net used once a position has only 2 players left alive "
+                        "(4p late-game switchover). Off unless set.")
     p.add_argument("--players", type=int, choices=(2, 4), default=2,
                    help="2p: aphrodite vs opponent. 4p: aphrodite vs 3x opponent, seats seed-shuffled.")
     p.add_argument("--opponents", nargs="+", default=["heuristic", "apollo_fast"])
@@ -139,14 +143,15 @@ def main():
                         "fixed budget) degrade — use --threads 1 for accurate timing/strength.")
     args = p.parse_args()
 
-    # Pass weights as a resolved string: picklable and unambiguous across workers.
+    # Pass weights as resolved strings: picklable and unambiguous across workers.
     weights = str(Path(args.weights).resolve()) if args.weights else None
+    weights_2p = str(Path(args.weights_2p).resolve()) if args.weights_2p else None
     if args.players == 2:
         variants = [True, False] if args.swap else [True]
     else:
         variants = [None]  # 4p seats come from the seed permutation
     jobs = [
-        (opp, seed, variant, args.budget_ms, weights, args.players)
+        (opp, seed, variant, args.budget_ms, weights, weights_2p, args.players)
         for opp in args.opponents
         for seed in args.seeds
         for variant in variants
@@ -154,7 +159,7 @@ def main():
     threads = max(1, min(args.threads, len(jobs)))
     matchup = "vs opp" if args.players == 2 else "vs 3x opp (seats seed-shuffled)"
     print(f"aphrodite {args.players}p {matchup} budget={args.budget_ms}ms weights={weights} "
-          f"jobs={len(jobs)} threads={threads}"
+          f"weights_2p={weights_2p} jobs={len(jobs)} threads={threads}"
           + ("  [parallel: ms/strength may degrade under contention]" if threads > 1 else ""),
           flush=True)
 

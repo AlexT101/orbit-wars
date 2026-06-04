@@ -238,10 +238,19 @@ enum Model {
 }
 
 fn load_weights() -> Option<Model> {
-    let path = match std::env::var("APHRODITE_VALUE_NET_PATH") {
+    load_weights_from("APHRODITE_VALUE_NET_PATH", false)
+}
+
+/// Load an XGB value net from the file named by env var `var`. `optional`
+/// suppresses the "not set" warning for nets allowed to be absent (e.g. the
+/// 2-players-left net).
+fn load_weights_from(var: &str, optional: bool) -> Option<Model> {
+    let path = match std::env::var(var) {
         Ok(p) => p,
         Err(_) => {
-            eprintln!("[aphrodite] APHRODITE_VALUE_NET_PATH not set; using duck heuristic");
+            if !optional {
+                eprintln!("[aphrodite] {} not set; using duck heuristic", var);
+            }
             return None;
         }
     };
@@ -275,6 +284,17 @@ static WEIGHTS: OnceLock<Option<Model>> = OnceLock::new();
 
 fn weights() -> Option<&'static Model> {
     WEIGHTS.get_or_init(load_weights).as_ref()
+}
+
+static WEIGHTS_2P: OnceLock<Option<Model>> = OnceLock::new();
+
+/// Optional secondary net, used when a position has only two players left
+/// alive (a 4p game collapsed to a 1v1). Loaded from
+/// `APHRODITE_VALUE_NET_PATH_2P`; absent is fine (we fall back to the primary).
+fn weights_2p() -> Option<&'static Model> {
+    WEIGHTS_2P
+        .get_or_init(|| load_weights_from("APHRODITE_VALUE_NET_PATH_2P", true))
+        .as_ref()
 }
 
 /// True iff weights are loaded and ready for inference.
@@ -346,11 +366,34 @@ fn dot_neon(row: &[f32], input: &[f32], bias: f32, dim: usize) -> f32 {
     s
 }
 
+/// Number of players with at least one planet or in-flight fleet. Mirrors
+/// `apollo::helpers::count_alive_players`, but over the crate `GameState`
+/// types the value net works with.
+fn count_alive_players(state: &GameState) -> usize {
+    let mut alive = [false; 8];
+    for p in &state.planets {
+        if p.owner >= 0 && (p.owner as usize) < alive.len() {
+            alive[p.owner as usize] = true;
+        }
+    }
+    for f in &state.fleets {
+        if f.owner >= 0 && (f.owner as usize) < alive.len() {
+            alive[f.owner as usize] = true;
+        }
+    }
+    alive.iter().filter(|&&a| a).count()
+}
+
 /// Run the value net on `state` from `me`'s perspective. Returns `None`
 /// if no weights are loaded (caller should fall back to the heuristic).
 /// Output is in `[-1, 1]` — MY perspective.
 pub fn predict(state: &GameState, me: i32) -> Option<f64> {
-    let m = weights()?;
+    // Once only two players are alive the position is effectively 2-player, so
+    // score it with the dedicated 2p net when one is loaded. The count comes
+    // from the evaluated state, so a 4p game's late 2-survivor leaves switch to
+    // the 2p model automatically. Falls back to the primary net if no 2p net.
+    let two_left = count_alive_players(state) == 2;
+    let m = if two_left { weights_2p().or_else(weights) } else { weights() }?;
     let y = match m {
         Model::Xgb { model, kind } => match kind {
             InputKind::Full => {

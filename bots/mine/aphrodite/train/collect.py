@@ -105,15 +105,20 @@ class AphroditeDaemon:
     Python process.
     """
 
-    def __init__(self, dump_path: Path | None, budget_ms: int, weights_path: Path | None):
+    def __init__(self, dump_path: Path | None, budget_ms: int, weights_path: Path | None,
+                 weights_2p_path: Path | None = None):
         env = dict(os.environ)
         env.pop("APHRODITE_DUMP_FEATURES_PATH", None)
         env.pop("APHRODITE_VALUE_NET_PATH", None)
+        env.pop("APHRODITE_VALUE_NET_PATH_2P", None)
         if dump_path is not None:
             env["APHRODITE_DUMP_FEATURES_PATH"] = str(Path(dump_path).resolve())
         env["APHRODITE_BUDGET_MS"] = str(budget_ms)
         if weights_path is not None:
             env["APHRODITE_VALUE_NET_PATH"] = str(Path(weights_path).resolve())
+        # Secondary net used once a position has only 2 players left alive.
+        if weights_2p_path is not None:
+            env["APHRODITE_VALUE_NET_PATH_2P"] = str(Path(weights_2p_path).resolve())
         self.proc = subprocess.Popen(
             [str(BIN_PATH)],
             stdin=subprocess.PIPE,
