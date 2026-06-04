@@ -6,8 +6,8 @@ What remains important:
 
 - Corrected fleet extrapolation is the runtime default.
 - `build_submission.py` packages only `main.py`, the Rust `aphrodite` binary,
-  and `xgb_top10_d6_fixed.json`.
-- `train/data/fixed/combined_top10_fixed.npz` and
+  and `xgb_2p_old_top10.json`.
+- `train/data/2p/old_top10.npz` and
   `train/filter_top10_and_train_xgb.py` are the retained path for rebuilding
   the deployed model.
 

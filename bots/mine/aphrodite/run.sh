@@ -12,7 +12,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
-WEIGHTS="${APHRODITE_VALUE_NET_PATH:-$HERE/train/weights/xgb_top10_d6_fixed.json}"
+WEIGHTS="${APHRODITE_VALUE_NET_PATH:-$HERE/train/weights/xgb_2p.json}"
 
 if [ ! -f "$WEIGHTS" ]; then
     echo "warning: no XGB weights at $WEIGHTS - running without value net"

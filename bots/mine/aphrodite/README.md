@@ -9,7 +9,7 @@ generator and final redirect pass, with a fixed-extrapolation XGBoost value net.
 and pins leaf evaluation to the fixed XGB model:
 
 - `APHRODITE_VALUE_NET_PATH` -> `train/weights/xgb_2p.json`,
-  `train/weights/xgb_4p.json`, or fallback `train/weights/xgb_top10_d6_fixed.json`
+  `train/weights/xgb_4p.json`, or fallback `train/weights/xgb_2p_old_top10.json`
 
 The corrected fleet extrapolation is now the Rust default.
 
@@ -32,21 +32,21 @@ The bundle contains only:
 
 - `main.py`
 - `aphrodite`
-- `xgb_top10_d6_fixed.json`
+- `xgb_2p_old_top10.json`
 - optional `xgb_2p.json` / `xgb_4p.json`
 
 ## Training
 
 The remaining training tree is focused on replay/data collection, SummaryV2
-feature extraction, and training/rebuilding `xgb_top10_d6_fixed.json`.
+feature extraction, and training/rebuilding `xgb_2p_old_top10.json`.
 
 Typical fixed-XGB rebuild path:
 
 ```bash
 python train/filter_top10_and_train_xgb.py \
-  --input train/data/fixed/combined_top10_fixed.npz \
-  --top10-out train/data/fixed/combined_top10_rebuilt.npz \
-  --model-out train/weights/xgb_top10_d6_fixed.json
+  --input train/data/2p/old_top10.npz \
+  --top10-out train/data/2p/old_top10_rebuilt.npz \
+  --model-out train/weights/xgb_2p_old_top10.json
 ```
 
 Train from an already-combined replay/self-play dataset:

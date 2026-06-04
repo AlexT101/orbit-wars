@@ -3,7 +3,7 @@
 This directory keeps the pipeline needed to collect Orbit Wars data, extract
 SummaryV2 features, and train the deployed fixed-extrapolation XGB model:
 
-`weights/xgb_top10_d6_fixed.json`
+`weights/xgb_2p_old_top10.json`
 
 ## Kept Pipeline Pieces
 
@@ -18,9 +18,9 @@ SummaryV2 features, and train the deployed fixed-extrapolation XGB model:
 
 ```bash
 python filter_top10_and_train_xgb.py \
-  --input data/fixed/combined_top10_fixed.npz \
-  --top10-out data/fixed/combined_top10_rebuilt.npz \
-  --model-out weights/xgb_top10_d6_fixed.json
+  --input data/2p/old_top10.npz \
+  --top10-out data/2p/old_top10_rebuilt.npz \
+  --model-out weights/xgb_2p_old_top10.json
 ```
 
 Useful split-weight commands:

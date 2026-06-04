@@ -1,7 +1,7 @@
 """Build a Kaggle-ready submission bundle for aphrodite.
 
 aphrodite is the aphrodite Rust bot paired with the *fixed-extrapolation*
-XGB model (xgb_top10_d6_fixed.json, retrained 2026-05-30). It is a
+XGB model (xgb_2p_old_top10.json, retrained 2026-05-30). It is a
 subprocess-style bot: a Python wrapper (main.py) spawns the `aphrodite`
 Rust binary and pipes one JSON observation per turn. The bundle therefore
 needs three files at the archive root:
@@ -9,7 +9,7 @@ needs three files at the archive root:
   - main.py                  (the dev wrapper verbatim; auto-detects the flat
                               bundle layout at runtime — see main.py's `_locate`)
   - aphrodite              (Linux x86_64 glibc binary, built in Kaggle image)
-  - xgb_top10_d6_fixed.json  (fallback fixed-extrapolation value-net weights)
+  - xgb_2p_old_top10.json  (fallback fixed-extrapolation value-net weights)
   - xgb_2p.json              (optional 2-player value-net weights)
   - xgb_4p.json              (optional 4-player value-net weights)
 
@@ -45,7 +45,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 APHRODITE = HERE
-WEIGHTS = APHRODITE / "train" / "weights" / "xgb_top10_d6_fixed.json"
+WEIGHTS = APHRODITE / "train" / "weights" / "xgb_2p_old_top10.json"
 WEIGHTS_2P = APHRODITE / "train" / "weights" / "xgb_2p.json"
 WEIGHTS_4P = APHRODITE / "train" / "weights" / "xgb_4p.json"
 # The submission's main.py is the dev wrapper verbatim — it auto-detects the
@@ -54,7 +54,7 @@ WEIGHTS_4P = APHRODITE / "train" / "weights" / "xgb_4p.json"
 MAIN_PY = HERE / "main.py"
 # Name the weights land under inside the flat bundle. main.py's _locate looks
 # for exactly this name next to itself.
-WEIGHTS_NAME = "xgb_top10_d6_fixed.json"
+WEIGHTS_NAME = "xgb_2p_old_top10.json"
 WEIGHTS_2P_NAME = "xgb_2p.json"
 WEIGHTS_4P_NAME = "xgb_4p.json"
 

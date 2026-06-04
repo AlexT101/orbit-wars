@@ -1,10 +1,10 @@
-"""aphrodite - the aphrodite Rust bot paired with the *fixed-extrapolation*
-XGB value net, retrained 2026-05-30:
+"""aphrodite - the aphrodite Rust bot paired with a *fixed-extrapolation*
+XGB value net:
 
-  1. **Default model**: weights/xgb_top10_d6_fixed.json — XGBoost gbtree
-     retrained against the corrected extrapolate_fleets combat. The Rust bot
-     uses corrected extrapolation by default, matching the training feature
-     extraction.
+  1. **Default model**: a per-format XGBoost gbtree chosen by player count —
+     weights/xgb_2p.json (2p) or weights/xgb_4p.json (4p), falling back to the
+     legacy weights/xgb_2p_old_top10.json. All use the corrected
+     extrapolate_fleets combat, matching the training feature extraction.
 
   2. **XGBoost-in-Rust** value net (src/xgb.rs) — pure-Rust gbtree
      inference, bit-exact parity with Python xgboost. Loaded automatically
@@ -20,11 +20,11 @@ This single file serves BOTH layouts — `_locate()` auto-detects which:
 
   * **dev**: this wrapper sits in `aphrodite/` and uses this directory's own
     build tree (binary at `target/release/aphrodite`, weights at
-    `train/weights/xgb_top10_d6_fixed.json`). Builds the binary on demand if
+    `train/weights/xgb_2p_old_top10.json`). Builds the binary on demand if
     missing.
 
   * **Kaggle submission**: `main.py`, `aphrodite`, and
-    `xgb_top10_d6_fixed.json` are bundled flat in one dir.
+    `xgb_2p_old_top10.json` are bundled flat in one dir.
     `build_submission.py` copies THIS file into the archive verbatim — do
     not fork a second copy.
 """
@@ -40,7 +40,7 @@ import threading
 _PROC = None
 _LOCK = threading.Lock()
 _BIN_NAME = "aphrodite"
-_WEIGHTS_NAME = "xgb_top10_d6_fixed.json"
+_WEIGHTS_NAME = "xgb_2p_old_top10.json"
 _WEIGHTS_2P_NAME = "xgb_2p.json"
 _WEIGHTS_4P_NAME = "xgb_4p.json"
 
@@ -123,7 +123,7 @@ def _locate():
 
 def _weight_candidates(run_cwd, build_cwd, n_players):
     names = (
-        (_WEIGHTS_4P_NAME, "xgb_top10_d6_fixed_4p.json", _WEIGHTS_NAME)
+        (_WEIGHTS_4P_NAME, _WEIGHTS_NAME)
         if n_players >= 4
         else (_WEIGHTS_2P_NAME, _WEIGHTS_NAME)
     )

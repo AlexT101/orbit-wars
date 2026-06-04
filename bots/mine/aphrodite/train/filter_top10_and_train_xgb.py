@@ -8,9 +8,9 @@ This collapses filtering and XGBoost training into one script for the
 
 Usage:
     python filter_top10_and_train_xgb.py \\
-        --input data/fixed/combined_fixed.npz \\
-        --top10-out data/fixed/combined_top10_fixed.npz \\
-        --model-out weights/xgb_top10_d6_fixed.json
+        --input data/2p/old_top10.npz \\
+        --top10-out data/2p/old_top10_rebuilt.npz \\
+        --model-out weights/xgb_2p_old_top10.json
 
     python filter_top10_and_train_xgb.py \\
         --data data/4p/train_4p_mixed.npz \\
