@@ -35,6 +35,12 @@ import sys
 from datetime import date
 from pathlib import Path
 
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 
@@ -62,7 +68,8 @@ def ramp_top_n(day: date, oldest: date, newest: date, n_start: int, n_end: int) 
 
 def run(cmd: list[str]) -> None:
     print(f"\n$ {' '.join(str(c) for c in cmd)}", flush=True)
-    subprocess.run([str(c) for c in cmd], check=True)
+    env = dict(os.environ, PYTHONUTF8="1")  # UTF-8 stdout in every child (emoji player names)
+    subprocess.run([str(c) for c in cmd], check=True, env=env)
 
 
 def main() -> None:
@@ -88,6 +95,9 @@ def main() -> None:
     p.add_argument("--top-n", type=int, default=None,
                    help="force a constant top-N for every day (overrides the start/end ramp)")
     p.add_argument("--min-games", type=int, default=5)
+    p.add_argument("--rounds", type=int, default=2000, help="max XGBoost boosting rounds (early stopping picks the real count)")
+    p.add_argument("--early-stopping", type=int, default=50,
+                   help="stop if val logloss hasn't improved in this many rounds")
     p.add_argument("--year", type=int, default=2026, help="year for parsing zip dates (sorting only)")
     p.add_argument("--workdir", type=Path, default=None,
                    help="scratch dir for per-day NPZs (default train/data/<P>p/_ladder_work)")
@@ -151,7 +161,8 @@ def main() -> None:
     run([py, HERE / "combine_npz.py", "--out", combined, *per_day])
 
     train = [py, HERE / "filter_top10_and_train_xgb.py",
-             "--data", combined, "--no-filter", "--model-out", args.model_out]
+             "--data", combined, "--no-filter", "--model-out", args.model_out,
+             "--rounds", args.rounds, "--early-stopping", args.early_stopping]
     if args.recency_halflife > 0:
         train += ["--recency-halflife", args.recency_halflife]
     if args.quality_weight:

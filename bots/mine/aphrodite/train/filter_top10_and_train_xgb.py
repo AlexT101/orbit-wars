@@ -21,11 +21,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+
+# Player names can contain emoji / non-Latin characters; force UTF-8 so
+# printing the ranking never dies on a cp1252 console or redirected pipe.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 def compute_rates(d, min_games=5):
@@ -259,7 +268,7 @@ def combine_sample_weights(*weights):
 
 
 def train_xgb(X, y, val_mask, out_json: Path,
-              max_depth=6, learning_rate=0.08, n_est=600, weight=None):
+              max_depth=6, learning_rate=0.08, n_est=600, early_stopping=40, weight=None):
     import xgboost as xgb
     yb = (y > 0).astype(np.float32)
     w_tr = weight[~val_mask] if weight is not None else None
@@ -279,7 +288,7 @@ def train_xgb(X, y, val_mask, out_json: Path,
     bst = xgb.train(
         params, dtr, num_boost_round=n_est,
         evals=[(dva, "val")],
-        early_stopping_rounds=40,
+        early_stopping_rounds=early_stopping,
         verbose_eval=False,
     )
     pred = bst.predict(dva)
@@ -287,6 +296,9 @@ def train_xgb(X, y, val_mask, out_json: Path,
     elapsed = time.time() - t0
     print(f"  XGB val sign-acc = {100*sign_acc:.3f}%  "
           f"best_iter={bst.best_iteration}  t={elapsed:.1f}s")
+    if bst.best_iteration >= n_est - 1:
+        print(f"  NOTE best_iter hit the {n_est}-round cap (no early stop) — "
+              f"raise --rounds for a likely better model")
     bst.save_model(str(out_json))
     print(f"  saved {out_json} ({out_json.stat().st_size / 1e6:.2f} MB)")
     return sign_acc, bst.best_iteration
@@ -315,6 +327,11 @@ def main():
                         "Multiplies into the recency weight. Use with --no-filter.")
     p.add_argument("--quality-floor", type=float, default=0.25,
                    help="weakest kept player's quality weight (strongest = 1.0); only with --quality-weight")
+    p.add_argument("--rounds", type=int, default=600, help="max XGBoost boosting rounds")
+    p.add_argument("--learning-rate", type=float, default=0.08)
+    p.add_argument("--max-depth", type=int, default=6)
+    p.add_argument("--early-stopping", type=int, default=40,
+                   help="stop if val logloss hasn't improved in this many rounds")
     args = p.parse_args()
 
     if not args.filter_only and args.model_out is None:
@@ -369,7 +386,9 @@ def main():
     n_val_games = len(np.unique(ms[val_mask, 0]))
     print(f"  split: train games={n_train_games}, val games={n_val_games}, "
           f"train rows={(~val_mask).sum():,}, val rows={val_mask.sum():,}")
-    train_xgb(Xs, ys, val_mask, args.model_out, weight=weight)
+    train_xgb(Xs, ys, val_mask, args.model_out, weight=weight,
+              max_depth=args.max_depth, learning_rate=args.learning_rate,
+              n_est=args.rounds, early_stopping=args.early_stopping)
 
     print("\nDone.")
 
