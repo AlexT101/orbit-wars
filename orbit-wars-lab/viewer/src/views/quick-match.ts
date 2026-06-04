@@ -11,7 +11,11 @@
 
 import { installHeaderNav } from "../components/header-nav";
 import { mountAgentPicker, PickerSelection } from "../components/agent-picker";
-import { mountMatchConfigBar, MatchConfig } from "../components/match-config-bar";
+import {
+  DEFAULT_VALUE_MODEL_PATH,
+  mountMatchConfigBar,
+  MatchConfig,
+} from "../components/match-config-bar";
 import { mountEmbeddedReplay, EmbeddedReplayHandle } from "../components/embedded-replay";
 import {
   fleetCard,
@@ -473,6 +477,7 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
     seed: "random",
     replayMap: null,
     format: "2p",
+    valueModelPath: DEFAULT_VALUE_MODEL_PATH,
   };
   let matchState: MatchState = { kind: "idle" };
   let pollTimer: number | null = null;
@@ -893,10 +898,24 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
         showToast("Replay maps work in fast and faithful modes.");
         return;
       }
+      if (config.mode === "value") {
+        showToast("Replay maps work in fast and faithful modes.");
+        return;
+      }
       if (config.replayMap.num_players && config.replayMap.num_players !== expectedPlayers) {
         showToast(
           `Replay is ${config.replayMap.num_players}p; switch format or choose a ${expectedPlayers}p replay.`,
         );
+        return;
+      }
+    }
+    if (config.mode === "value") {
+      if (config.format !== "2p") {
+        showToast("Value mode currently supports 2p XGBoost models.");
+        return;
+      }
+      if (!config.valueModelPath.trim()) {
+        showToast("Choose an XGBoost model path for value mode.");
         return;
       }
     }
@@ -939,6 +958,7 @@ export async function renderQuickMatch(root: HTMLElement): Promise<void> {
       seed_mode: seedMode,
       is_quick_match: true,
       replay_map: config.seed === "replay" ? config.replayMap : undefined,
+      value_model_path: config.mode === "value" ? config.valueModelPath : undefined,
     };
 
     try {

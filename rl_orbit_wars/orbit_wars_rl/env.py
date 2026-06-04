@@ -51,30 +51,24 @@ class StepResult:
 
 @dataclass(frozen=True)
 class RewardWeights:
-    # "terminal" is the clean 2p +1/-1 setup. "terminal_score" adds final
-    # margin. "score_delta" is a small dense score-share experiment. "shaped"
-    # enables all shaping terms below.
+    # Reward is intentionally not based on final margin. Terminal win/loss is
+    # the main objective; dense reward is only for signs of life.
     mode: str = "terminal"
 
-    # Actual competition score signal: ships on planets + ships in fleets.
-    score_delta: float = 0.006
-    score_share_delta: float = 1.25
+    # Dense per-step control signal. At maximum control this contributes about
+    # +1 over a full 500-step game, so it cannot dominate win/loss.
+    control: float = 0.002
 
-    # Captures and map control. Production share is the cleanest dense proxy
-    # for "this position will be worth more later".
-    production_delta: float = 0.025
-    production_share_delta: float = 0.60
-    planet_delta: float = 0.05
-    economy_delta: float = 0.002
-
-    # Weak stabilizers: useful for tie-breaking, too small to dominate.
-    no_planet_penalty: float = 0.02
-    fleet_exposure_delta: float = -0.001
+    # Positive-only progress signals. Losing ships, margin, and opponent growth
+    # are deliberately not punished here.
+    score_increase: float = 0.0015
+    production_increase: float = 0.04
+    planet_increase: float = 0.08
+    enemy_planet_capture_bonus: float = 0.06
 
     # Terminal objective.
-    terminal_win: float = 1.0
-    terminal_score_margin: float = 0.50
-    terminal_time: float = 0.10
+    terminal_win: float = 2.0
+    terminal_time: float = 0.25
 
 
 def compute_reward(
@@ -84,41 +78,33 @@ def compute_reward(
     raw_rewards: list[float] | None,
     weights: RewardWeights,
 ) -> tuple[float, dict[str, float]]:
-    own_score_delta = curr.own_score - prev.own_score
-    enemy_score_delta = curr.enemy_score - prev.enemy_score
+    own_score_delta = max(0.0, curr.own_score - prev.own_score)
+    production_delta = max(0.0, curr.own_production - prev.own_production)
+    planet_delta = max(0.0, float(curr.own_planets - prev.own_planets))
+    enemy_planet_captures = min(planet_delta, max(0.0, float(prev.enemy_planets - curr.enemy_planets)))
     components = {
-        "score_delta": 0.0,
-        "score_share_delta": 0.0,
-        "production_delta": 0.0,
-        "production_share_delta": 0.0,
-        "planet_delta": 0.0,
-        "economy_delta": 0.0,
-        "fleet_exposure_delta": 0.0,
-        "enemy_score_delta": 0.0,
-        "survival": 0.0,
+        "control": 0.0,
+        "score_increase": 0.0,
+        "production_increase": 0.0,
+        "planet_increase": 0.0,
+        "enemy_planet_capture": 0.0,
         "terminal_time": 0.0,
     }
 
     if weights.mode in {"score_delta", "shaped"}:
-        components["score_delta"] = weights.score_delta * own_score_delta
-        components["score_share_delta"] = weights.score_share_delta * (curr.score_share - prev.score_share)
-        components["enemy_score_delta"] = -0.003 * enemy_score_delta
+        components["score_increase"] = weights.score_increase * own_score_delta
 
     if weights.mode == "shaped":
-        components["production_delta"] = weights.production_delta * (
-            curr.own_production - prev.own_production
+        control = (
+            0.50 * curr.production_share
+            + 0.30 * curr.planet_share
+            + 0.20 * curr.score_share
         )
-        components["production_share_delta"] = weights.production_share_delta * (
-            curr.production_share - prev.production_share
-        )
-        components["planet_delta"] = weights.planet_delta * (curr.own_planets - prev.own_planets)
-        components["economy_delta"] = weights.economy_delta * (curr.economy_value - prev.economy_value)
-        components["fleet_exposure_delta"] = weights.fleet_exposure_delta * (
-            curr.own_fleet_ships - prev.own_fleet_ships
-        )
-        components["survival"] = -weights.no_planet_penalty if curr.own_planets == 0 else 0.0
+        components["control"] = weights.control * control
+        components["production_increase"] = weights.production_increase * production_delta
+        components["planet_increase"] = weights.planet_increase * planet_delta
+        components["enemy_planet_capture"] = weights.enemy_planet_capture_bonus * enemy_planet_captures
 
-    terminal_margin = 0.0
     if done and raw_rewards is not None and len(raw_rewards) >= 2:
         if raw_rewards[0] > raw_rewards[1]:
             outcome = weights.terminal_win
@@ -129,10 +115,7 @@ def compute_reward(
         if outcome:
             remaining_frac = max(0.0, min(1.0, curr.remaining / MAX_STEPS))
             components["terminal_time"] = weights.terminal_time * (1.0 if outcome > 0.0 else -1.0) * remaining_frac
-        if weights.mode in {"terminal_score", "score_delta", "shaped"}:
-            margin_den = max(1.0, curr.own_score + curr.enemy_score)
-            terminal_margin = weights.terminal_score_margin * (curr.own_score - curr.enemy_score) / margin_den
-        components["terminal"] = outcome + terminal_margin
+        components["terminal"] = outcome
     else:
         components["terminal"] = 0.0
 

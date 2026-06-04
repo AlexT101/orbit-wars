@@ -10,12 +10,16 @@ import {
 } from "../utils/replay-map";
 import { escapeHtml } from "../utils/escape";
 
+export const DEFAULT_VALUE_MODEL_PATH =
+  "/home/sunrise/orbitwars/pantheow/bots/mine/trojan_horse/train/weights/xgb_46p12e88t11_latest.json";
+
 export interface MatchConfig {
   games: number;
-  mode: "fast" | "faithful" | "ultrafast";
+  mode: "fast" | "faithful" | "ultrafast" | "value";
   seed: "random" | "replay" | number;
   replayMap?: ReplayMapConfig | null;
   format: "2p" | "4p";
+  valueModelPath: string;
 }
 
 export interface MatchConfigHandle {
@@ -33,11 +37,12 @@ export function mountMatchConfigBar(
     seed: "random",
     replayMap: null,
     format: "2p",
+    valueModelPath: DEFAULT_VALUE_MODEL_PATH,
   };
   let customSeed = 42;
 
-  function clearReplayForUltrafast() {
-    if (config.mode !== "ultrafast") return;
+  function clearReplayForNativeModes() {
+    if (config.mode !== "ultrafast" && config.mode !== "value") return;
     if (config.seed === "replay" || config.replayMap) {
       config.seed = "random";
       config.replayMap = null;
@@ -45,9 +50,9 @@ export function mountMatchConfigBar(
   }
 
   function render() {
-    clearReplayForUltrafast();
+    clearReplayForNativeModes();
     const replayLabel = replayMapLabel(config.replayMap);
-    const canUseReplay = config.mode !== "ultrafast";
+    const canUseReplay = config.mode !== "ultrafast" && config.mode !== "value";
     root.innerHTML = `
       <div class="config-bar">
         <div class="config-group">
@@ -67,9 +72,23 @@ export function mountMatchConfigBar(
         <div class="config-group">
           <span class="config-label">mode</span>
           <button class="config-pill ${config.mode === "ultrafast" ? "on" : ""}" data-k="mode" data-v="ultrafast" title="Native Rust engine, no replays (tournament throughput)">ultrafast</button>
+          <button class="config-pill ${config.mode === "value" ? "on" : ""}" data-k="mode" data-v="value" title="Native Rust engine with XGBoost value trace">value</button>
           <button class="config-pill ${config.mode === "fast" ? "on" : ""}" data-k="mode" data-v="fast" title="In-process kaggle-environments">fast</button>
           <button class="config-pill ${config.mode === "faithful" ? "on" : ""}" data-k="mode" data-v="faithful" title="Subprocess + HTTP (Kaggle protocol)">faithful</button>
         </div>
+        ${config.mode === "value"
+          ? `<div class="config-group config-group-wide">
+              <span class="config-label">model</span>
+              <input
+                id="config-value-model"
+                class="config-input config-value-path"
+                type="text"
+                spellcheck="false"
+                value="${escapeHtml(config.valueModelPath)}"
+                title="${escapeHtml(config.valueModelPath)}"
+              >
+            </div>`
+          : ""}
         <div class="config-group">
           <span class="config-label">seed</span>
           <button class="config-pill ${config.seed === "random" ? "on" : ""}" data-k="seed" data-v="random">random</button>
@@ -101,12 +120,12 @@ export function mountMatchConfigBar(
         const v = el.dataset.v!;
         if (k === "games") config.games = parseInt(v, 10);
         else if (k === "mode") {
-          config.mode = v as "fast" | "faithful" | "ultrafast";
-          clearReplayForUltrafast();
+          config.mode = v as "fast" | "faithful" | "ultrafast" | "value";
+          clearReplayForNativeModes();
         }
         else if (k === "seed") {
           if (v === "replay") {
-            if (config.mode === "ultrafast") return;
+            if (config.mode === "ultrafast" || config.mode === "value") return;
             root.querySelector<HTMLInputElement>("#config-replay-file")?.click();
             return;
           }
@@ -132,8 +151,8 @@ export function mountMatchConfigBar(
     root.querySelector<HTMLInputElement>("#config-replay-file")?.addEventListener("change", async (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
       if (!file) return;
-      if (config.mode === "ultrafast") {
-        clearReplayForUltrafast();
+      if (config.mode === "ultrafast" || config.mode === "value") {
+        clearReplayForNativeModes();
         render();
         return;
       }
@@ -146,6 +165,11 @@ export function mountMatchConfigBar(
         config.replayMap = null;
         onError?.((err as Error).message);
       }
+    });
+
+    root.querySelector<HTMLInputElement>("#config-value-model")?.addEventListener("input", (e) => {
+      config.valueModelPath = (e.target as HTMLInputElement).value.trim();
+      onChange({ ...config });
     });
   }
 

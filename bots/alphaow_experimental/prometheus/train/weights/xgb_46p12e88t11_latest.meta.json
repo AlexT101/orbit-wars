@@ -1,0 +1,15 @@
+{
+  "dataset": "/Users/yufan/Desktop/Development/orbit-wars/bots/alphaow_experimental/prometheus/train/data/pipeline/combined_46p12e88t11.npz",
+  "features": "summary_v2[46] + extras_v4[12] + engineered[88] + tempo[11]",
+  "feature_dim": 157,
+  "accuracy": 0.8822104520618372,
+  "config": {
+    "name": "xgb_46p12e88t11_d8_lr003",
+    "max_depth": 8,
+    "learning_rate": 0.03,
+    "n_est": 2400
+  },
+  "filter_strong": false,
+  "seed": 42,
+  "val_frac": 0.12
+}

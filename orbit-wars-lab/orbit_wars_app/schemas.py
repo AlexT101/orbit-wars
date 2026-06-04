@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 Bucket = Literal["baselines", "external", "mine"]
 Format = Literal["2p", "4p"]
-Mode = Literal["fast", "faithful", "ultrafast"]
+Mode = Literal["fast", "faithful", "ultrafast", "value"]
 TournamentShape = Literal["round-robin", "gauntlet"]
 SeedMode = Literal["fixed", "random", "replay"]
 MatchStatus = Literal[
@@ -127,6 +127,13 @@ class TournamentConfig(BaseModel):
     agents: list[str]
     games_per_pair: int = 3
     mode: Mode = "fast"
+    value_model_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "XGBoost model path used by mode='value'. Relative paths are "
+            "resolved from the repository root before the lab directory."
+        ),
+    )
     format: Format = "2p"
     # >=2 enables ProcessPoolExecutor (fast mode only). Capped at 16 to bound
     # RAM usage on machines with many cores — each worker re-imports

@@ -15,6 +15,12 @@ export interface ReplaySeries {
   production: number[][];
   planets: number[][];
   shipDelta: number[];
+  valueFunction?: {
+    label?: string;
+    modelPath?: string;
+    values: Array<Array<number | null>>;
+    error?: string;
+  };
 }
 
 /** `replay` should be the env.toJSON()-shaped object with `.steps`. */
@@ -71,5 +77,33 @@ export function computeReplaySeries(replay: unknown, numAgentsHint?: number): Re
       shipDelta[i] = p0 - p1;
     }
   }
-  return { totalSteps: T, numAgents, ships, production, planets: planetsCnt, shipDelta };
+  const vf = (replay as any)?.value_function;
+  const vfError = (replay as any)?.value_function_error;
+  let valueFunction: ReplaySeries["valueFunction"] | undefined;
+  if (vf && Array.isArray(vf.values)) {
+    valueFunction = {
+      label: typeof vf.label === "string" ? vf.label : undefined,
+      modelPath: typeof vf.model_path === "string" ? vf.model_path : undefined,
+      values: vf.values.map((row: any) =>
+        Array.isArray(row)
+          ? row.slice(0, T).map((v: any) => typeof v === "number" ? v : null)
+          : new Array(T).fill(null),
+      ),
+      error: typeof vfError === "string" ? vfError : undefined,
+    };
+  } else if (typeof vfError === "string") {
+    valueFunction = {
+      values: [],
+      error: vfError,
+    };
+  }
+  return {
+    totalSteps: T,
+    numAgents,
+    ships,
+    production,
+    planets: planetsCnt,
+    shipDelta,
+    valueFunction,
+  };
 }

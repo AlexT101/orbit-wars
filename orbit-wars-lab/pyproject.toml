@@ -21,6 +21,7 @@ classifiers = [
 
 dependencies = [
     "numpy>=1.26.0",
+    "xgboost>=2.0",
     "kaggle~=2.0.2",
     "kaggle-environments @ git+https://github.com/Kaggle/kaggle-environments.git@9247e74cc09f1aac8aca5d67a8b555ccd2dfb5a8",
     "fastapi>=0.110",
@@ -74,4 +75,3 @@ ignore = ["E501"]  # handled by formatter
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["F401", "F811"]  # unused imports, redefinitions — normal in test fixtures
-

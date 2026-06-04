@@ -9,34 +9,32 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
-import numpy as np
-from sb3_contrib import MaskablePPO
+import torch
+from torch.distributions import Categorical
 
 # ==== HARDCODED CONFIG ====
-HERO = "/home/sunrise/orbitwars/pantheow/experimental_arch/train/checkpoints/galaxy_selfplay_a2_g2_t44/learner/learner_step_000000004096.zip"
+HERO = "/home/sunrise/orbitwars/pantheow/experimental_arch/train_transformer/checkpoints/galaxy_a2_p44_reference_ppo_transformer_v1/latest.pt"
 OPPONENT = "self"  # "self", .zip, .py, or bot name
 
 HERO_DETERMINISTIC = False
-HERO_DETERMINISTIC = True
 OPPONENT_DETERMINISTIC = False
-OPPONENT_DETERMINISTIC = True
 
 SEED = 1
 OUT_PATH = None  # e.g. "viz/game.html"
-DEVICE = "auto"
+DEVICE = "cpu"
 # =========================
 
 EXPERIMENTAL_ARCH_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
-TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train"
+TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train_transformer"
 DEFAULT_OUT = EXPERIMENTAL_ARCH_DIR / "viz" / "orbit_wars_game.html"
-DEFAULT_CHECKPOINT_DIR = TRAIN_DIR / "checkpoints" / "galaxy_selfplay_a2_g2_t44"
+DEFAULT_CHECKPOINT_DIR = TRAIN_DIR / "checkpoints" / "galaxy_a2_p44_reference_ppo_transformer_v1"
 
 sys.path.insert(0, str(TRAIN_DIR))
 
-from arch import GalaxyMaskablePolicy  # noqa: F401
 from env import scores_from_obs
-from features import decode_action, encode_features, flat_action_mask
+from features import decode_move, encode_obs
+from model import build_policy
 from opponents import BotOpponent
 from orbit_wars_engine import OrbitWarsEngine
 
@@ -64,19 +62,36 @@ class CheckpointAgent:
         self.checkpoint = checkpoint
         self.player = player
         self.deterministic = deterministic
-        self.model = MaskablePPO.load(checkpoint, device=device)
+        self.device = torch.device(device)
+        ckpt = torch.load(checkpoint, map_location=self.device, weights_only=False)
+        config = ckpt.get("config", {})
+        self.model = build_policy(
+            config.get("model", "entity_transformer"),
+            config.get("hidden", 128),
+            config.get("transformer_layers", 3),
+            config.get("transformer_heads", 4),
+        ).to(self.device)
+        self.model.load_state_dict(ckpt["model"])
+        self.model.eval()
 
     def reset(self) -> None:
         pass
 
     def act(self, obs: dict) -> list[list[float]]:
-        model_obs, feat = encode_features(obs, player=self.player)
-        action, _ = self.model.predict(
-            model_obs,
-            deterministic=self.deterministic,
-            action_masks=flat_action_mask(feat),
-        )
-        return decode_action(feat, np.asarray(action))
+        encoded = encode_obs(obs, player=self.player)
+        batch = {
+            "planets": torch.as_tensor(encoded.planets, dtype=torch.float32, device=self.device).unsqueeze(0),
+            "planet_mask": torch.as_tensor(encoded.planet_mask, dtype=torch.float32, device=self.device).unsqueeze(0),
+            "globals_": torch.as_tensor(encoded.globals, dtype=torch.float32, device=self.device).unsqueeze(0),
+            "action_mask": torch.as_tensor(encoded.action_mask, dtype=torch.bool, device=self.device).unsqueeze(0),
+        }
+        with torch.no_grad():
+            logits, _value = self.model(**batch)
+            if self.deterministic:
+                action = torch.argmax(logits, dim=-1)
+            else:
+                action = Categorical(logits=logits).sample()
+        return decode_move(obs, int(action.item()))
 
 
 class PythonAgent:
@@ -115,7 +130,7 @@ def resolve_path(path: str | Path) -> Path:
 
 
 def default_checkpoint() -> Path:
-    for name in ("latest.zip", "final.zip", "self_play_opponent.zip"):
+    for name in ("latest.pt", "best.pt", "final.pt"):
         path = DEFAULT_CHECKPOINT_DIR / name
         if path.exists():
             return path
@@ -135,7 +150,7 @@ def make_opponent(
     if name == "self":
         return CheckpointAgent(self_checkpoint, player=player, deterministic=deterministic, device=device)
     path = resolve_path(name)
-    if path.exists() and path.suffix == ".zip":
+    if path.exists() and path.suffix == ".pt":
         return CheckpointAgent(path, player=player, deterministic=deterministic, device=device)
     if path.exists() and path.suffix == ".py":
         return PythonAgent(path)
@@ -225,7 +240,7 @@ def main() -> int:
     # --- hero ---
     hero_path = resolve_path(HERO)
 
-    if hero_path.exists() and hero_path.suffix == ".zip":
+    if hero_path.exists() and hero_path.suffix == ".pt":
         hero = CheckpointAgent(
             hero_path,
             player=0,

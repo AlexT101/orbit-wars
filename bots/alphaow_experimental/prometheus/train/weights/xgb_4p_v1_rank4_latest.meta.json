@@ -1,0 +1,21 @@
+{
+  "dataset": "/Users/yufan/Desktop/Development/orbit-wars/bots/alphaow_experimental/prometheus/train/data/pipeline/combined_4p_v1_rank4.npz",
+  "features": "4p_v1[236]: global + me + three threat-ordered opponents + aggregate/rank",
+  "feature_set": "4p_v1",
+  "label_mode": "ordinal",
+  "feature_dim": 236,
+  "objective": "regression",
+  "accuracy": 0.8450103920235233,
+  "rmse": 0.3640437722206116,
+  "baseline_2p_model": "/Users/yufan/Desktop/Development/orbit-wars/bots/alphaow_experimental/prometheus/train/weights/xgb_46p12e88t11_latest.json",
+  "config": {
+    "name": "xgb_4p_v1_rank4_d6_lr005_bin512",
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "n_est": 1800,
+    "max_bin": 512
+  },
+  "filter_strong": false,
+  "seed": 42,
+  "val_frac": 0.12
+}

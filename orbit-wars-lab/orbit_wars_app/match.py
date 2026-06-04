@@ -7,7 +7,6 @@ import copy
 import hashlib
 import importlib.util
 import inspect
-import logging
 import os
 import shutil
 import sys
@@ -21,45 +20,12 @@ from typing import Any, Callable, Literal, Optional
 _DEBUG_PREFIXES = ("[LINE]", "[DOT]", "[TEXT]")
 _REPLAY_COMET_SPAWN_STEPS = {50, 150, 250, 350, 450}
 
-_KAGGLE_LOGGING_SILENCED = False
-
 
 def silence_kaggle_environments_logging() -> None:
-    """Mute kaggle-environments' chatty import-time INFO logging.
+    """Suppress kaggle-environments import/runtime INFO chatter."""
+    import logging
 
-    On first import, ``kaggle_environments`` registers every bundled env, which
-    loads ``.../envs/open_spiel_env/open_spiel_env.py``. At *module* scope that
-    file does (see the installed package):
-
-        _log = logging.getLogger(__name__)   # ...open_spiel_env.open_spiel_env
-        _log.setLevel(logging.INFO)          # explicit level, ignores parent
-        _log.addHandler(logging.StreamHandler(sys.stdout))  # its own handler
-
-    then logs the full OpenSpiel game registry (~50 lines). Because that child
-    logger has an *explicit* level and its *own* stdout handler, raising the
-    parent ``kaggle_environments`` logger's level does nothing — the child's
-    level wins and its handler bypasses parent propagation. (That's why the
-    earlier parent-level approach never worked, and why each spawn-based pebble
-    worker re-spammed on its first import.)
-
-    A logger-level filter, unlike ``setLevel``, survives the module's own
-    ``setLevel``/``addHandler`` calls and gates records *before* they reach the
-    handler — including the one-shot logging that fires during import. So this
-    MUST run before the first ``import kaggle_environments`` to kill the startup
-    spam. We drop everything below WARNING, keeping genuine warnings/errors.
-
-    Idempotent and per-process (the module flag does not cross the spawn
-    boundary, which is exactly what we want — each worker silences itself).
-    """
-    global _KAGGLE_LOGGING_SILENCED
-    if _KAGGLE_LOGGING_SILENCED:
-        return
-    logging.getLogger(
-        "kaggle_environments.envs.open_spiel_env.open_spiel_env"
-    ).addFilter(lambda record: record.levelno >= logging.WARNING)
-    # Belt-and-suspenders for any other submodule that relies on propagation.
     logging.getLogger("kaggle_environments").setLevel(logging.WARNING)
-    _KAGGLE_LOGGING_SILENCED = True
 
 
 def _parse_debug_lines(text: str, *, player: int, step: int) -> list[dict]:
@@ -489,8 +455,6 @@ def run_match_fast(
         )
     import contextlib
     import io as _io
-
-    silence_kaggle_environments_logging()
     from kaggle_environments import make
 
     from .agent_extract import ensure_extracted
@@ -701,11 +665,12 @@ def run_match(
     agent_ids: list[str],
     agent_paths: list[Path],
     *,
-    mode: Literal["fast", "faithful", "ultrafast"] = "fast",
+    mode: Literal["fast", "faithful", "ultrafast", "value"] = "fast",
     seed: int = 0,
     log_dir: Optional[Path] = None,
     log_prefix: str = "",
     replay_map: Optional[dict] = None,
+    value_model_path: Optional[str] = None,
 ) -> MatchOutcome:
     """Dispatcher: fast (in-process kaggle-envs), faithful (subprocess+HTTP),
     or ultrafast (native Rust engine, no replay).
@@ -720,7 +685,7 @@ def run_match(
             log_dir=log_dir, log_prefix=log_prefix,
             replay_map=replay_map,
         )
-    if replay_map is not None and mode == "ultrafast":
+    if replay_map is not None and mode in ("ultrafast", "value"):
         return MatchOutcome(
             agent_ids=agent_ids,
             winner=None,
@@ -737,6 +702,12 @@ def run_match(
         return run_match_ultrafast(
             agent_ids, agent_paths, seed=seed,
             log_dir=log_dir, log_prefix=log_prefix,
+        )
+    if mode == "value":
+        return run_match_ultrafast(
+            agent_ids, agent_paths, seed=seed,
+            log_dir=log_dir, log_prefix=log_prefix,
+            record_replay=True, value_model_path=value_model_path,
         )
     return run_match_faithful(
         agent_ids, agent_paths, seed=seed,
@@ -905,6 +876,82 @@ def _write_ultrafast_error(
         pass
 
 
+def _status_for_snapshot(done: bool) -> str:
+    return "DONE" if done else "ACTIVE"
+
+
+def _synthetic_step_from_observations(
+    observations: list[dict],
+    *,
+    actions: Optional[list[Any]] = None,
+    rewards: Optional[list[Any]] = None,
+    done: bool = False,
+) -> list[dict]:
+    """Build enough env.toJSON step shape for the Orbit Wars viewer.
+
+    The Rust engine already returns Kaggle-style observation dicts. Value mode
+    wraps them into the minimal per-player step entries the renderer expects.
+    """
+    out: list[dict] = []
+    for idx, obs in enumerate(observations):
+        reward = 0
+        if rewards is not None and idx < len(rewards):
+            reward = rewards[idx]
+        action: Any = []
+        if actions is not None and idx < len(actions):
+            action = actions[idx] if actions[idx] is not None else []
+        out.append(
+            {
+                "action": action,
+                "info": {},
+                "observation": obs,
+                "reward": reward,
+                "status": _status_for_snapshot(done),
+            }
+        )
+    return out
+
+
+def _build_ultrafast_replay(
+    *,
+    steps: list[list[dict]],
+    agent_ids: list[str],
+    seed: int,
+    final_snap: dict,
+    config: dict,
+    per_agent_timings: list[list[float]],
+) -> dict:
+    rewards = final_snap.get("rewards")
+    if not isinstance(rewards, list):
+        rewards = [0 for _ in agent_ids]
+    replay = {
+        "steps": steps,
+        "rewards": rewards,
+        "statuses": [_status_for_snapshot(True) for _ in agent_ids],
+        "info": {
+            "TeamNames": list(agent_ids),
+            "Agents": list(agent_ids),
+            "seed": seed,
+            "engine": "orbit_wars_rust",
+            "mode": "value",
+        },
+        "configuration": config,
+    }
+    max_turns = max((len(v) for v in per_agent_timings), default=0)
+    durations: list[list[float | None]] = [[None for _ in agent_ids]]
+    for turn in range(max_turns):
+        row: list[float | None] = []
+        for samples in per_agent_timings:
+            row.append(samples[turn] if turn < len(samples) else None)
+        durations.append(row)
+    if len(durations) < len(steps):
+        durations.extend(
+            [[None for _ in agent_ids] for _ in range(len(steps) - len(durations))]
+        )
+    replay["durations"] = durations[: len(steps)]
+    return replay
+
+
 def run_match_ultrafast(
     agent_ids: list[str],
     agent_paths: list[Path],
@@ -912,6 +959,8 @@ def run_match_ultrafast(
     seed: int = 0,
     log_dir: Optional[Path] = None,
     log_prefix: str = "",
+    record_replay: bool = False,
+    value_model_path: Optional[str] = None,
 ) -> MatchOutcome:
     """Run a match against the native Rust engine, in-process.
 
@@ -985,9 +1034,21 @@ def run_match_ultrafast(
     init_snap: dict = payload["snapshot"]
     config: dict = init_snap.get("configuration", {}) or {}
     done = bool(init_snap.get("done", False))
-    # Prefer the snapshot-skipping step variant when available; fall back to
-    # full `step` if the Rust crate predates it.
-    step_fn = getattr(core, "step_observations_only", None) or core.step
+    replay_steps: list[list[dict]] = []
+    if record_replay:
+        replay_steps.append(
+            _synthetic_step_from_observations(
+                obs_list,
+                rewards=init_snap.get("rewards"),
+                done=done,
+            )
+        )
+    # Prefer the snapshot-skipping step variant for plain ultrafast; value mode
+    # needs snapshots so it can build a replay timeline.
+    step_fn = core.step if record_replay else (
+        getattr(core, "step_observations_only", None) or core.step
+    )
+    last_snap: dict = init_snap
 
     turns = 0
     crash_status: Optional[str] = None
@@ -1040,6 +1101,18 @@ def run_match_ultrafast(
 
         obs_list = list(payload["observations"])
         done = bool(payload.get("done", False))
+        if record_replay:
+            snap_payload = payload.get("snapshot")
+            if isinstance(snap_payload, dict):
+                last_snap = snap_payload
+            replay_steps.append(
+                _synthetic_step_from_observations(
+                    obs_list,
+                    actions=actions,
+                    rewards=last_snap.get("rewards"),
+                    done=done,
+                )
+            )
         turns += 1
 
     # Fetch final snapshot once for score/winner extraction. With the
@@ -1047,12 +1120,15 @@ def run_match_ultrafast(
     # after reset.
     snap: dict
     if crash_status is None:
-        try:
-            snap = core.snapshot()
-        except Exception as e:
-            crash_status = "crashed"
-            crash_msg = f"snapshot fetch failed: {e}\n{traceback.format_exc()}"
-            snap = {}
+        if record_replay:
+            snap = last_snap
+        else:
+            try:
+                snap = core.snapshot()
+            except Exception as e:
+                crash_status = "crashed"
+                crash_msg = f"snapshot fetch failed: {e}\n{traceback.format_exc()}"
+                snap = {}
     else:
         snap = {}
 
@@ -1071,14 +1147,36 @@ def run_match_ultrafast(
     winner = _winner_from_rewards(snap.get("rewards"), agent_ids)
     status: str = "ok" if winner is not None else "draw"
 
-    # Ultrafast skips the full kaggle-envs replay, but we still surface the
-    # captured agent stdout as `replay["debug"]["messages"]` so anything that
-    # *does* read this outcome (e.g. a per-match debug dump) gets the same
-    # `[LINE]`/`[DOT]`/`[TEXT]` markers the fast-mode viewer overlay uses.
-    ultrafast_replay: dict = {}
+    # Plain ultrafast skips the full kaggle-envs replay. Value mode records a
+    # compact replay from Rust observations so the viewer can render a timeline.
+    ultrafast_replay: dict = (
+        _build_ultrafast_replay(
+            steps=replay_steps,
+            agent_ids=agent_ids,
+            seed=seed,
+            final_snap=snap,
+            config=config,
+            per_agent_timings=per_agent_timings,
+        )
+        if record_replay
+        else {}
+    )
     _attach_debug_output_from_capture(
         ultrafast_replay, per_step_stdout, num_players, env_logs=[]
     )
+    if record_replay:
+        try:
+            from .value_evaluator import attach_value_predictions
+
+            attach_value_predictions(
+                ultrafast_replay,
+                model_path=value_model_path,
+                agent_ids=agent_ids,
+            )
+        except Exception as e:
+            msg = f"value function evaluation failed: {e}\n{traceback.format_exc()}"
+            _write_ultrafast_error(log_dir, log_prefix, msg)
+            ultrafast_replay["value_function_error"] = str(e)
 
     return MatchOutcome(
         agent_ids=agent_ids,

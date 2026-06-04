@@ -1,4 +1,5 @@
 numpy>=1.26.0
+xgboost>=2.0
 # 2026-05-12: switched back to the published PyPI wheel now that the
 # rotational-symmetry fix has landed in releases. Exact pin keeps installs
 # reproducible and avoids Windows git-checkout path-length failures.

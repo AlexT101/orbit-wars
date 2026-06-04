@@ -1,0 +1,21 @@
+{
+  "dataset": "data/pipeline/rank1/combined_170.npz",
+  "features": "summary_v2[46] + extras_v4[12] + engineered[88] + tempo[11]",
+  "feature_dim": 170,
+  "objective": "binary",
+  "accuracy": 0.9676935790748179,
+  "config": {
+    "max_depth": 8,
+    "learning_rate": 0.04,
+    "n_est": 280,
+    "min_child_weight": 1.0,
+    "reg_lambda": 1.0,
+    "reg_alpha": 0.0,
+    "gamma": 0.0,
+    "max_bin": 256
+  },
+  "n_games": 964,
+  "n_rows": 822424,
+  "seed": 42,
+  "val_folds": 8
+}
