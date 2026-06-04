@@ -41,6 +41,8 @@ _PROC = None
 _LOCK = threading.Lock()
 _BIN_NAME = "aphrodite"
 _WEIGHTS_NAME = "xgb_top10_d6_fixed.json"
+_WEIGHTS_2P_NAME = "xgb_2p.json"
+_WEIGHTS_4P_NAME = "xgb_4p.json"
 
 
 def _pump_stderr(pipe):
@@ -119,6 +121,48 @@ def _locate():
     return binary, (weights if os.path.isfile(weights) else None), crate_dir, crate_dir
 
 
+def _weight_candidates(run_cwd, build_cwd, n_players):
+    names = (
+        (_WEIGHTS_4P_NAME, "xgb_top10_d6_fixed_4p.json", _WEIGHTS_NAME)
+        if n_players >= 4
+        else (_WEIGHTS_2P_NAME, _WEIGHTS_NAME)
+    )
+    dirs = []
+    for d in (run_cwd, build_cwd):
+        if d and d not in dirs:
+            dirs.append(d)
+            tw = os.path.join(d, "train", "weights")
+            if tw not in dirs:
+                dirs.append(tw)
+    for d in dirs:
+        for name in names:
+            p = os.path.join(d, name)
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def _infer_num_players(payload):
+    seen = set()
+    for planet in payload.get("planets", []) or []:
+        try:
+            owner = int(planet[1])
+        except Exception:
+            continue
+        if owner >= 0:
+            seen.add(owner)
+    for fleet in payload.get("fleets", []) or []:
+        try:
+            owner = int(fleet[1])
+        except Exception:
+            continue
+        if owner >= 0:
+            seen.add(owner)
+    if len(seen) > 2 or any(p >= 2 for p in seen):
+        return 4
+    return 2
+
+
 def _build_if_needed(path, build_cwd):
     if os.path.isfile(path):
         return
@@ -152,7 +196,7 @@ def _norm(o):
     }
 
 
-def _ensure():
+def _ensure(payload=None):
     global _PROC
     if _PROC is not None and _PROC.poll() is None:
         return _PROC
@@ -161,9 +205,12 @@ def _ensure():
     _ensure_executable(binary)
     env = dict(os.environ)
     env.setdefault("APHRODITE_BUDGET_MS", "500")
-    # Default to the fixed XGB model unless the caller set their own.
-    if weights:
-        env.setdefault("APHRODITE_VALUE_NET_PATH", weights)
+    # Default to format-specific XGB weights unless the caller set their own.
+    if "APHRODITE_VALUE_NET_PATH" not in env:
+        n_players = _infer_num_players(payload or {})
+        weights = _weight_candidates(run_cwd, build_cwd, n_players) or weights
+        if weights:
+            env["APHRODITE_VALUE_NET_PATH"] = weights
     _PROC = subprocess.Popen(
         [binary],
         stdin=subprocess.PIPE,
@@ -190,7 +237,7 @@ def agent(obs, config=None):
         if cfg:
             p["config"] = cfg
     with _LOCK:
-        proc = _ensure()
+        proc = _ensure(p)
         try:
             proc.stdin.write((json.dumps(p, separators=(",", ":")) + "\n").encode())
             proc.stdin.flush()

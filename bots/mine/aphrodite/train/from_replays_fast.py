@@ -33,6 +33,17 @@ SUMMARY_V2_DIM = 46
 RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM  # 196
 
 
+def label_for_rewards(rewards, slot: int) -> float:
+    if len(rewards) >= 4:
+        vals = [float(r) for r in rewards]
+        best = max(vals)
+        winners = [i for i, r in enumerate(vals) if r == best]
+        if len(winners) != 1:
+            return 0.0
+        return 1.0 if slot == winners[0] else -1.0
+    return float(rewards[slot])
+
+
 def normalize_obs(o: dict) -> dict:
     return {
         "player": int(o.get("player", 0)),
@@ -47,7 +58,7 @@ def normalize_obs(o: dict) -> dict:
 
 
 def process_chunk(args):
-    files, worker_id = args
+    files, worker_id, n_players = args
     proc = subprocess.Popen(
         [str(BIN)],
         stdin=subprocess.PIPE,
@@ -86,18 +97,15 @@ def process_chunk(args):
             continue
         rewards = data.get("rewards") or []
         steps = data.get("steps") or []
-        if len(rewards) != 2 or not steps:
-            skipped += 1
-            continue
-        if len(rewards) != 2:
+        if len(rewards) != n_players or not steps:
             skipped += 1
             continue
 
         wrote_any = False
         for tick_idx, step in enumerate(steps):
-            if not isinstance(step, list) or len(step) < 2:
+            if not isinstance(step, list) or len(step) < n_players:
                 continue
-            for slot in range(2):
+            for slot in range(n_players):
                 entry = step[slot]
                 if not isinstance(entry, dict):
                     continue
@@ -110,7 +118,7 @@ def process_chunk(args):
                     proc.stdin.write(line.encode())
                 except BrokenPipeError:
                     return None
-                sent_meta.append((file_idx, slot, float(rewards[slot])))
+                sent_meta.append((file_idx, slot, label_for_rewards(rewards, slot)))
                 wrote_any = True
         if wrote_any:
             try:
@@ -149,7 +157,7 @@ def process_chunk(args):
         file_idx, slot, reward = sent_meta[i]
         feats_list.append(v2)
         labels_list.append(reward)
-        meta_list.append((file_idx, step, player, 1 - player))
+        meta_list.append((file_idx, step, player, n_players))
 
     return (
         np.stack(feats_list).astype(np.float32),
@@ -167,6 +175,7 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--players", type=int, choices=(2, 4), default=2)
     args = p.parse_args()
 
     if args.manifest:
@@ -187,7 +196,7 @@ def main():
     chunks = [files[i :: args.workers] for i in range(args.workers)]
     t0 = time.time()
     with mp.Pool(args.workers) as pool:
-        results = pool.map(process_chunk, [(c, i) for i, c in enumerate(chunks)])
+        results = pool.map(process_chunk, [(c, i, args.players) for i, c in enumerate(chunks)])
 
     elapsed = time.time() - t0
     feats_all, labels_all, meta_all = [], [], []

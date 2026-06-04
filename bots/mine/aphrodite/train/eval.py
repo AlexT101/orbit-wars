@@ -35,7 +35,6 @@ def run_one(bot0: str, bot1: str, seed: int, budget_ms: int, weights_path: Path 
                 dump_path=None,
                 budget_ms=budget_ms,
                 weights_path=weights_path,
-                value_net_off=(weights_path is None),
             )
             agent_funcs[i] = d
             closers.append(d.close)

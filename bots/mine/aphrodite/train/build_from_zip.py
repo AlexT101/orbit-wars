@@ -6,8 +6,8 @@ Designed for a ~20GB / 5000-game archive on a disk-constrained machine:
 games are read one at a time via zipfile.read() and never unpacked to disk.
 
 Single parse pass:
-  * filter out 4-player games (len(rewards) != 2),
-  * extract all 2p observations -> 46-d summary_v2 features,
+  * keep games matching --players (2 by default, or 4 for FFA),
+  * extract all player observations -> 46-d summary_v2 features,
   * collect each game's agent names + rewards so the "strong player"
     gate (both players above the median win rate) can be computed in
     memory afterward and stored as a per-sample is_strong flag.
@@ -45,6 +45,17 @@ MIN_GAMES = 3   # min games a player needs before their win rate counts
 SEED = 0
 
 
+def label_for_rewards(rewards, slot: int) -> float:
+    if len(rewards) >= 4:
+        vals = [float(r) for r in rewards]
+        best = max(vals)
+        winners = [i for i, r in enumerate(vals) if r == best]
+        if len(winners) != 1:
+            return 0.0
+        return 1.0 if slot == winners[0] else -1.0
+    return float(rewards[slot])
+
+
 def normalize_obs(o: dict) -> dict:
     return {
         "player": int(o.get("player", 0)),
@@ -66,7 +77,7 @@ def _agent_names(d: dict) -> list:
 def process_chunk(args):
     """One worker: open its own zip handle + one extract_v2 subprocess,
     stream all assigned games through it."""
-    zip_path, names, worker_id, zip_tag = args
+    zip_path, names, worker_id, zip_tag, n_players = args
     zf = zipfile.ZipFile(zip_path)
     proc = subprocess.Popen(
         [str(BIN)],
@@ -92,10 +103,11 @@ def process_chunk(args):
     rt.start()
 
     sent_meta = []        # parallel to records: (local_gid, slot, reward)
-    game_info = []        # local_gid -> (name0, name1, r0, r1)
+    game_names = []       # local_gid -> tuple(names)
+    game_rewards = []     # local_gid -> tuple(rewards)
     game_files = []       # local_gid -> "tag:entry" source filename
     gid = -1
-    skip_4p = 0
+    skip_format = 0
     skip_other = 0
 
     for entry in names:
@@ -105,29 +117,29 @@ def process_chunk(args):
             skip_other += 1
             continue
         rewards = data.get("rewards") or []
-        if len(rewards) == 4:
-            skip_4p += 1
+        if len(rewards) != n_players:
+            skip_format += 1
             continue
         steps = data.get("steps") or []
         agents = _agent_names(data)
         if (
-            len(rewards) != 2
-            or len(agents) != 2
-            or any(r is None for r in rewards[:2])
+            len(agents) != n_players
+            or any(r is None for r in rewards[:n_players])
             or not steps
         ):
             skip_other += 1
             continue
 
         gid += 1
-        game_info.append((agents[0], agents[1], float(rewards[0]), float(rewards[1])))
+        game_names.append(tuple(agents[:n_players]))
+        game_rewards.append(tuple(float(r) for r in rewards[:n_players]))
         game_files.append(f"{zip_tag}:{entry}")
 
         wrote_any = False
         for step in steps:
-            if not isinstance(step, list) or len(step) < 2:
+            if not isinstance(step, list) or len(step) < n_players:
                 continue
-            for slot in range(2):
+            for slot in range(n_players):
                 entry_obj = step[slot]
                 if not isinstance(entry_obj, dict):
                     continue
@@ -140,7 +152,7 @@ def process_chunk(args):
                     proc.stdin.write(line.encode())
                 except BrokenPipeError:
                     return None
-                sent_meta.append((gid, slot, float(rewards[slot])))
+                sent_meta.append((gid, slot, label_for_rewards(rewards, slot)))
                 wrote_any = True
         if wrote_any:
             try:
@@ -169,7 +181,7 @@ def process_chunk(args):
     if n < len(sent_meta):
         print(f"  [w{worker_id}] WARN got {len(records)} records for {len(sent_meta)} sent", flush=True)
     if n == 0:
-        return ([], [], [], game_info, game_files, gid + 1, skip_4p, skip_other)
+        return ([], [], [], game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
 
     feats = np.empty((n, SUMMARY_V2_DIM), dtype=np.float32)
     labels = np.empty(n, dtype=np.float32)
@@ -179,18 +191,19 @@ def process_chunk(args):
         local_gid, slot, reward = sent_meta[i]
         feats[i] = v2
         labels[i] = reward
-        meta[i] = (local_gid, step, player, 1 - player)
+        meta[i] = (local_gid, step, player, n_players)
 
-    return (feats, labels, meta, game_info, game_files, gid + 1, skip_4p, skip_other)
+    return (feats, labels, meta, game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
 
 
-def build(zip_paths, out_npz: str, n_workers: int, limit=None):
+def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 2):
     if isinstance(zip_paths, str):
         zip_paths = [zip_paths]
     feats_all, labels_all, meta_all = [], [], []
-    game_info_all = []  # global_gid -> (name0, name1, r0, r1)
+    game_names_all = []  # global_gid -> tuple(names)
+    game_rewards_all = [] # global_gid -> tuple(rewards)
     game_files_all = [] # global_gid -> "tag:entry"
-    total_games = total_4p = total_other = 0
+    total_games = total_wrong_format = total_other = 0
     elapsed = 0.0
 
     for zi, zip_path in enumerate(zip_paths):
@@ -205,22 +218,23 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None):
         chunks = [names[i::n_workers] for i in range(n_workers)]
         t0 = time.time()
         with mp.Pool(n_workers) as pool:
-            results = pool.map(process_chunk, [(zip_path, c, i, tag) for i, c in enumerate(chunks)])
+            results = pool.map(process_chunk, [(zip_path, c, i, tag, n_players) for i, c in enumerate(chunks)])
         elapsed += time.time() - t0
         for res in results:
             if res is None:
                 continue
-            f, lbl, m, ginfo, gfiles, n_games, s4p, soth = res
+            f, lbl, m, gnames, grewards, gfiles, n_games, sfmt, soth = res
             if len(f):
                 m = m.copy()
                 m[:, 0] += total_games  # offset local gids -> global
                 feats_all.append(f)
                 labels_all.append(lbl)
                 meta_all.append(m)
-            game_info_all.extend(ginfo)
+            game_names_all.extend(gnames)
+            game_rewards_all.extend(grewards)
             game_files_all.extend(gfiles)
             total_games += n_games
-            total_4p += s4p
+            total_wrong_format += sfmt
             total_other += soth
 
     if not feats_all:
@@ -232,20 +246,20 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None):
 
     # --- strong-player gate (computed in memory, stored as a flag) ---
     pg, pw = defaultdict(int), defaultdict(int)
-    for n0, n1, r0, r1 in game_info_all:
-        pg[n0] += 1
-        pg[n1] += 1
-        if r0 > r1:
-            pw[n0] += 1
-        elif r1 > r0:
-            pw[n1] += 1
+    for names, rewards in zip(game_names_all, game_rewards_all):
+        for name in names:
+            pg[name] += 1
+        best = max(rewards)
+        winners = [i for i, reward in enumerate(rewards) if reward == best]
+        if len(winners) == 1:
+            pw[names[winners[0]]] += 1
     rates = {pl: pw[pl] / pg[pl] for pl in pg if pg[pl] >= MIN_GAMES}
     sr = sorted(rates.values())
     median = sr[len(sr) // 2] if sr else 0.0
     above = {pl for pl, r in rates.items() if r > median}
     strong_gids = {
-        gid for gid, (n0, n1, _r0, _r1) in enumerate(game_info_all)
-        if n0 in above and n1 in above
+        gid for gid, names in enumerate(game_names_all)
+        if all(name in above for name in names)
     }
     is_strong = np.fromiter(
         (1 if g in strong_gids else 0 for g in meta[:, 0]),
@@ -254,11 +268,11 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None):
 
     slots = sorted(np.unique(meta[:, 2]).tolist())
     print(f"\n=== build summary ===")
-    print(f"2-player games extracted : {total_games}")
-    print(f"4-player games filtered  : {total_4p}")
+    print(f"{n_players}-player games extracted : {total_games}")
+    print(f"wrong-format games skipped: {total_wrong_format}")
     print(f"other/invalid skipped    : {total_other}")
     print(f"observations             : {feats.shape[0]}")
-    print(f"player slots present     : {slots}   (must be [0, 1])")
+    print(f"player slots present     : {slots}   (expected {list(range(n_players))})")
     print(f"unique players (>= {MIN_GAMES} games): {len(rates)}   median win rate: {median:.3f}")
     print(f"strong games             : {len(strong_gids)} / {total_games}")
     print(f"strong observations      : {int(is_strong.sum())} / {is_strong.shape[0]}")
@@ -266,8 +280,9 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None):
     print(f"label values             : {sorted(np.unique(labels).tolist())[:6]}...")
     print(f"extraction time          : {elapsed:.1f}s")
 
-    # game_names: shape (n_games, 2) of unicode strings, indexed by global_gid
-    name_arr = np.array([(g[0], g[1]) for g in game_info_all], dtype="<U64")
+    # game_names: shape (n_games, n_players) of unicode strings, indexed by global_gid
+    name_arr = np.array(game_names_all, dtype="<U64")
+    reward_arr = np.array(game_rewards_all, dtype=np.float32)
     file_arr = np.array(game_files_all, dtype="<U200")
 
     out = Path(out_npz)
@@ -275,7 +290,7 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None):
     np.savez_compressed(
         out,
         summary_v2=feats, labels=labels, meta=meta, is_strong=is_strong,
-        game_names=name_arr, game_files=file_arr,
+        game_names=name_arr, game_rewards=reward_arr, game_files=file_arr,
     )
     print(f"wrote {out}  ({out.stat().st_size / 1e6:.1f} MB)")
 
@@ -286,13 +301,15 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 1))
     p.add_argument("--limit", type=int, default=None, help="cap entries per zip (debug)")
+    p.add_argument("--players", type=int, choices=(2, 4), default=2)
     args = p.parse_args()
-    build(args.zip, args.out, args.workers, args.limit)
+    build(args.zip, args.out, args.workers, args.limit, args.players)
 
 
 if __name__ == "__main__":
-    try:
-        mp.set_start_method("fork", force=True)
-    except RuntimeError:
-        pass
+    if os.name != "nt":
+        try:
+            mp.set_start_method("fork", force=True)
+        except RuntimeError:
+            pass
     main()

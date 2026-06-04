@@ -9,7 +9,9 @@ needs three files at the archive root:
   - main.py                  (the dev wrapper verbatim; auto-detects the flat
                               bundle layout at runtime — see main.py's `_locate`)
   - aphrodite              (Linux x86_64 glibc binary, built in Kaggle image)
-  - xgb_top10_d6_fixed.json  (fixed-extrapolation value-net weights)
+  - xgb_top10_d6_fixed.json  (fallback fixed-extrapolation value-net weights)
+  - xgb_2p.json              (optional 2-player value-net weights)
+  - xgb_4p.json              (optional 4-player value-net weights)
 
 The corrected `extrapolate_fleets` path is the runtime default, matching the
 fixed training feature extraction.
@@ -44,6 +46,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 APHRODITE = HERE
 WEIGHTS = APHRODITE / "train" / "weights" / "xgb_top10_d6_fixed.json"
+WEIGHTS_2P = APHRODITE / "train" / "weights" / "xgb_2p.json"
+WEIGHTS_4P = APHRODITE / "train" / "weights" / "xgb_4p.json"
 # The submission's main.py is the dev wrapper verbatim — it auto-detects the
 # flat-bundle layout at runtime, so there is no second Kaggle-only copy to keep
 # in sync. (See main.py's `_locate`.)
@@ -51,6 +55,8 @@ MAIN_PY = HERE / "main.py"
 # Name the weights land under inside the flat bundle. main.py's _locate looks
 # for exactly this name next to itself.
 WEIGHTS_NAME = "xgb_top10_d6_fixed.json"
+WEIGHTS_2P_NAME = "xgb_2p.json"
+WEIGHTS_4P_NAME = "xgb_4p.json"
 
 # Pin a digest in production for reproducibility; `latest` keeps the
 # scripts simple while we iterate.
@@ -78,8 +84,11 @@ cargo build --release --bin aphrodite
 
 
 def main() -> int:
-    if not WEIGHTS.is_file():
-        sys.exit(f"weights file missing: {WEIGHTS}")
+    if not any(p.is_file() for p in (WEIGHTS, WEIGHTS_2P, WEIGHTS_4P)):
+        sys.exit(
+            "weights missing: expected at least one of "
+            f"{WEIGHTS}, {WEIGHTS_2P}, or {WEIGHTS_4P}"
+        )
 
     print(f"Building aphrodite inside {KAGGLE_IMAGE}...")
     rc = subprocess.run(
@@ -105,9 +114,17 @@ def main() -> int:
         shutil.copy(MAIN_PY, td / "main.py")
         shutil.copy(BIN_OUT, td / "aphrodite")
         os.chmod(td / "aphrodite", 0o755)
-        shutil.copy(WEIGHTS, td / WEIGHTS_NAME)
+        staged = ["main.py", "aphrodite"]
+        for src, name in (
+            (WEIGHTS, WEIGHTS_NAME),
+            (WEIGHTS_2P, WEIGHTS_2P_NAME),
+            (WEIGHTS_4P, WEIGHTS_4P_NAME),
+        ):
+            if src.is_file():
+                shutil.copy(src, td / name)
+                staged.append(name)
         with tarfile.open(bundle, "w:gz") as tar:
-            for name in ("main.py", "aphrodite", WEIGHTS_NAME):
+            for name in staged:
                 tar.add(td / name, arcname=name)
     print(f"Wrote {bundle} ({bundle.stat().st_size:,} bytes)")
     print()

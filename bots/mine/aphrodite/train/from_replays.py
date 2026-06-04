@@ -13,7 +13,7 @@ Two-player replays only (we skip 4-player for now since the value-net
 output is binary).
 
 Output NPZ: features (2728), labels (±1 or 0), meta (game_idx, tick,
-player, opp_id), summary_v2 (46).
+player, num_players), summary_v2 (46).
 """
 
 from __future__ import annotations
@@ -41,6 +41,17 @@ DIST_BLOCK = MAX_OBJECTS * MAX_OBJECTS
 INPUT_DIM = 2 * PER_BLOCK + DIST_BLOCK
 SUMMARY_V2_DIM = 46
 RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM + 4 * SUMMARY_V2_DIM
+
+
+def label_for_rewards(rewards, slot: int) -> float:
+    if len(rewards) >= 4:
+        vals = [float(r) for r in rewards]
+        best = max(vals)
+        winners = [i for i, r in enumerate(vals) if r == best]
+        if len(winners) != 1:
+            return 0.0
+        return 1.0 if slot == winners[0] else -1.0
+    return float(rewards[slot])
 
 
 def spawn_bot(dump_path: Path) -> subprocess.Popen:
@@ -89,26 +100,24 @@ def read_dump(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return feats, steps, v2
 
 
-def process_replay(path: Path, scratch: Path, game_idx: int):
+def process_replay(path: Path, scratch: Path, game_idx: int, expected_players: int):
     data = json.loads(path.read_text())
     rewards = data.get("rewards") or []
     steps = data.get("steps") or []
-    if len(rewards) != 2 or not steps:
+    if len(rewards) != expected_players or not steps:
         return None
     n_players = len(rewards)
-    if n_players != 2:
-        return None  # 2P only for now
 
-    dumps = [scratch / f"dump_{game_idx}_p{i}.bin" for i in range(2)]
+    dumps = [scratch / f"dump_{game_idx}_p{i}.bin" for i in range(n_players)]
     for d in dumps:
         d.write_bytes(b"")
-    procs = [spawn_bot(dumps[i]) for i in range(2)]
+    procs = [spawn_bot(dumps[i]) for i in range(n_players)]
 
     try:
         for tick_idx, step in enumerate(steps):
-            if not isinstance(step, list) or len(step) < 2:
+            if not isinstance(step, list) or len(step) < n_players:
                 continue
-            for slot in range(2):
+            for slot in range(n_players):
                 entry = step[slot]
                 if not isinstance(entry, dict):
                     continue
@@ -140,18 +149,18 @@ def process_replay(path: Path, scratch: Path, game_idx: int):
                     pass
 
     out = []
-    for slot in range(2):
+    for slot in range(n_players):
         feats, ticks, v2 = read_dump(dumps[slot])
         if feats.size == 0:
             continue
-        label = float(rewards[slot])
+        label = label_for_rewards(rewards, slot)
         labels = np.full(feats.shape[0], label, dtype=np.float32)
         meta = np.stack(
             [
                 np.full(feats.shape[0], game_idx, dtype=np.int32),
                 ticks.astype(np.int32),
                 np.full(feats.shape[0], slot, dtype=np.int32),
-                np.full(feats.shape[0], 1 - slot, dtype=np.int32),
+                np.full(feats.shape[0], n_players, dtype=np.int32),
             ],
             axis=1,
         )
@@ -168,6 +177,7 @@ def main():
     p.add_argument("--replays", default=str(REPO / "replays"), help="dir of replay JSONs")
     p.add_argument("--out", required=True)
     p.add_argument("--limit", type=int, default=None, help="max replays")
+    p.add_argument("--players", type=int, choices=(2, 4), default=2)
     args = p.parse_args()
 
     replay_dir = Path(args.replays)
@@ -184,9 +194,9 @@ def main():
     total = 0
     t0 = time.time()
     for gi, path in enumerate(files):
-        result = process_replay(path, scratch, gi)
+        result = process_replay(path, scratch, gi, args.players)
         if result is None:
-            print(f"  [{gi+1}/{len(files)}] {path.name} SKIP (not 2P or empty)")
+            print(f"  [{gi+1}/{len(files)}] {path.name} SKIP (not {args.players}P or empty)")
             continue
         rows, rewards = result
         n_added = 0

@@ -7,9 +7,10 @@ features are labeled with the final-game reward of the player who saw
 that state.
 
 Output: a single NPZ with arrays
-  features: float32 [N, INPUT_DIM=2728]
-  labels:   float32 [N]                  (-1, 0, +1)
-  meta:     int32   [N, 4]               (game_idx, step, player, opponent_id)
+  features:   float32 [N, INPUT_DIM=2728]
+  labels:     float32 [N]                  (final reward for that player)
+  meta:       int32   [N, 4]               (game_idx, step, player, num_players)
+  summary_v2: float32 [N, 46]
 """
 
 from __future__ import annotations
@@ -46,6 +47,17 @@ RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM + 4 * SUMMARY_V2_DIM
 # Old layout (pre-v2): step(i64) + player(i32) + features only
 LEGACY_RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM
 MAX_STEPS = 500
+
+
+def label_for_rewards(rewards, slot: int) -> float:
+    if len(rewards) >= 4:
+        vals = [float(r) for r in rewards]
+        best = max(vals)
+        winners = [i for i, r in enumerate(vals) if r == best]
+        if len(winners) != 1:
+            return 0.0
+        return 1.0 if slot == winners[0] else -1.0
+    return float(rewards[slot])
 
 
 def _silence():
@@ -217,14 +229,21 @@ def read_dump(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return feats, steps, v2
 
 
-def run_match(bot0: str, bot1: str, seed: int, scratch: Path, budget_ms: int, weights_path: Path | None):
+def run_match(
+    bots: list[str],
+    seed: int,
+    scratch: Path,
+    budget_ms: int,
+    weights_path: Path | None,
+):
     from engine_parity_checker.candidates.rust import RustEngine
 
-    dumps: list[Path | None] = [None, None]
-    agent_funcs: list = [None, None]
+    n_players = len(bots)
+    dumps: list[Path | None] = [None] * n_players
+    agent_funcs: list = [None] * n_players
     closers: list = []  # callables that tear down a side
 
-    for i, name in enumerate([bot0, bot1]):
+    for i, name in enumerate(bots):
         if name == "aphrodite":
             dumps[i] = scratch / f"feat_{seed}_p{i}.bin"
             dumps[i].write_bytes(b"")
@@ -241,15 +260,15 @@ def run_match(bot0: str, bot1: str, seed: int, scratch: Path, budget_ms: int, we
             closers.append(lambda m=mod: teardown_other(m))
 
     engine = RustEngine()
-    obs = engine.reset(seed, 2)
+    obs = engine.reset(seed, n_players)
     done = False
     for _ in range(MAX_STEPS):
-        actions = [agent_funcs[i](obs[i].as_dict()) for i in range(2)]
+        actions = [agent_funcs[i](obs[i].as_dict()) for i in range(n_players)]
         obs, done = engine.step(actions)
         if done:
             break
     snap = engine.snapshot()
-    rewards = snap.rewards or [0.0, 0.0]
+    rewards = snap.rewards or [0.0] * n_players
 
     for c in closers:
         try:
@@ -258,20 +277,19 @@ def run_match(bot0: str, bot1: str, seed: int, scratch: Path, budget_ms: int, we
             pass
 
     data = []
-    for i in range(2):
+    for i in range(n_players):
         if dumps[i] is None:
             continue
         feats, steps, v2 = read_dump(dumps[i])
         if feats.size == 0:
             continue
-        labels = np.full(feats.shape[0], float(rewards[i]), dtype=np.float32)
-        opp_id = (1 if i == 0 else 0)
+        labels = np.full(feats.shape[0], label_for_rewards(rewards, i), dtype=np.float32)
         meta = np.stack(
             [
                 np.zeros(feats.shape[0], dtype=np.int32),  # placeholder game_idx
                 steps.astype(np.int32),
                 np.full(feats.shape[0], i, dtype=np.int32),
-                np.full(feats.shape[0], opp_id, dtype=np.int32),
+                np.full(feats.shape[0], n_players, dtype=np.int32),
             ],
             axis=1,
         )
@@ -287,29 +305,38 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--out", required=True, help="output NPZ path")
     p.add_argument("--games", type=int, default=40)
+    p.add_argument("--players", type=int, choices=(2, 4), default=2)
     p.add_argument("--budget-ms", type=int, default=200, help="aphrodite MCTS budget per turn")
     p.add_argument(
         "--pairings",
         default="aphrodite:aphrodite:1.0",
-        help="Comma-separated bot1:bot2:weight; one is sampled per game. Use aphrodite on at least one side to collect data.",
+        help=(
+            "Comma-separated bot specs. For 2p use bot0:bot1:weight; "
+            "for 4p use bot0:bot1:bot2:bot3:weight. "
+            "Use aphrodite on at least one side to collect daemon feature dumps."
+        ),
     )
     p.add_argument("--seed", type=int, default=0, help="base seed (game_i uses seed+i)")
     p.add_argument("--weights", default=None, help="APHRODITE_VALUE_NET_PATH for collection rollouts (None = heuristic)")
     args = p.parse_args()
 
-    pairings = []
+    pairings: list[tuple[list[str], float]] = []
     for spec in args.pairings.split(","):
         parts = spec.strip().split(":")
-        if len(parts) != 3:
-            raise SystemExit(f"bad pairing: {spec}")
-        b1, b2, w = parts[0], parts[1], float(parts[2])
-        pairings.append((b1, b2, w))
-    total_w = sum(p[2] for p in pairings)
+        expected = args.players + 1
+        if len(parts) != expected:
+            raise SystemExit(f"bad {args.players}p pairing: {spec} (expected {expected} colon-separated fields)")
+        bots = parts[: args.players]
+        w = float(parts[-1])
+        if "aphrodite" not in bots:
+            raise SystemExit(f"pairing has no aphrodite side to collect from: {spec}")
+        pairings.append((bots, w))
+    total_w = sum(p[1] for p in pairings)
     cum = []
     acc = 0.0
-    for b1, b2, w in pairings:
+    for bots, w in pairings:
         acc += w / total_w
-        cum.append((acc, b1, b2))
+        cum.append((acc, bots))
 
     rng = random.Random(args.seed)
     scratch = Path(tempfile.mkdtemp(prefix="aphrodite_collect_"))
@@ -345,19 +372,21 @@ def main():
     flush_every = max(1, args.games // 10)
     for gi in range(args.games):
         r = rng.random()
-        bot1 = bot2 = None
-        for thr, b1, b2 in cum:
+        bots = None
+        for thr, candidates in cum:
             if r < thr:
-                bot1, bot2 = b1, b2
+                bots = list(candidates)
                 break
-        if bot1 is None:
-            bot1, bot2 = cum[-1][1], cum[-1][2]
-        # 50% swap sides
-        if rng.random() < 0.5:
-            bot1, bot2 = bot2, bot1
+        if bots is None:
+            bots = list(cum[-1][1])
+        rng.shuffle(bots)
         seed = args.seed * 10_000 + gi
-        print(f"[{gi+1}/{args.games}] {bot1} vs {bot2} seed={seed} budget={args.budget_ms}ms", flush=True)
-        data, rewards = run_match(bot1, bot2, seed, scratch, args.budget_ms, Path(args.weights) if args.weights else None)
+        print(
+            f"[{gi+1}/{args.games}] {' vs '.join(bots)} seed={seed} "
+            f"players={args.players} budget={args.budget_ms}ms",
+            flush=True,
+        )
+        data, rewards = run_match(bots, seed, scratch, args.budget_ms, Path(args.weights) if args.weights else None)
         n_added = 0
         for feats, labels, meta, v2 in data:
             meta[:, 0] = gi

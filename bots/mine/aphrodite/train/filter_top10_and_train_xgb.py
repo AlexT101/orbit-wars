@@ -11,6 +11,11 @@ Usage:
         --input data/fixed/combined_fixed.npz \\
         --top10-out data/fixed/combined_top10_fixed.npz \\
         --model-out weights/xgb_top10_d6_fixed.json
+
+    python filter_top10_and_train_xgb.py \\
+        --data data/4p/train_4p_mixed.npz \\
+        --no-filter \\
+        --model-out weights/xgb_4p.json
 """
 
 from __future__ import annotations
@@ -29,34 +34,34 @@ def compute_top_n(d, n_top=10, min_games=5):
     y = d["labels"]
     game_names = d["game_names"]
     n_games = game_names.shape[0]
+    n_players = game_names.shape[1]
+    game_rewards = d["game_rewards"] if "game_rewards" in d.files else None
 
-    # First row of each game-slot has the same reward; just dedupe by gid.
     pg = defaultdict(int)
     pw = defaultdict(int)
     for gid in range(n_games):
-        n0 = str(game_names[gid, 0])
-        n1 = str(game_names[gid, 1])
-        pg[n0] += 1
-        pg[n1] += 1
+        for slot in range(n_players):
+            pg[str(game_names[gid, slot])] += 1
 
-    # Recover reward[0] per game from labels (slot 0's label).
-    r0_by_gid = {}
-    seen = set()
-    for i in range(0, meta.shape[0], 2):  # every other row is slot 0 in build order
-        gid = int(meta[i, 0])
-        if gid in seen:
+    rewards_by_gid: dict[int, list[float]] = {}
+    if game_rewards is not None:
+        for gid in range(n_games):
+            rewards_by_gid[gid] = [float(x) for x in game_rewards[gid]]
+    else:
+        for i in range(meta.shape[0]):
+            gid = int(meta[i, 0])
+            slot = int(meta[i, 2])
+            if gid not in rewards_by_gid:
+                rewards_by_gid[gid] = [0.0] * n_players
+            rewards_by_gid[gid][slot] = float(y[i])
+
+    for gid, rewards in rewards_by_gid.items():
+        if gid >= n_games or not rewards:
             continue
-        seen.add(gid)
-        r0_by_gid[gid] = float(y[i])
-
-    for gid in range(n_games):
-        r0 = r0_by_gid.get(gid, 0.0)
-        n0 = str(game_names[gid, 0])
-        n1 = str(game_names[gid, 1])
-        if r0 > 0:
-            pw[n0] += 1
-        elif r0 < 0:
-            pw[n1] += 1
+        best = max(rewards)
+        winners = [slot for slot, reward in enumerate(rewards) if reward == best]
+        if len(winners) == 1:
+            pw[str(game_names[gid, winners[0]])] += 1
 
     rates = {pl: pw[pl] / pg[pl] for pl in pg if pg[pl] >= min_games}
     sorted_rates = sorted(rates.items(), key=lambda kv: -kv[1])
@@ -71,8 +76,9 @@ def filter_top_n(d, top_set, out_path: Path):
     meta = d["meta"]
     game_names = d["game_names"]
     n_games = game_names.shape[0]
+    n_players = game_names.shape[1]
     game_in_top = np.array([
-        (str(game_names[g, 0]) in top_set and str(game_names[g, 1]) in top_set)
+        all(str(game_names[g, slot]) in top_set for slot in range(n_players))
         for g in range(n_games)
     ])
     sub = game_in_top[meta[:, 0].astype(np.int64)]
@@ -88,7 +94,8 @@ def filter_top_n(d, top_set, out_path: Path):
         labels=ys.astype(np.float32),
         meta=ms.astype(np.int32),
         game_names=game_names,
-        game_files=d["game_files"],
+        **({"game_files": d["game_files"]} if "game_files" in d.files else {}),
+        **({"game_rewards": d["game_rewards"]} if "game_rewards" in d.files else {}),
     )
     print(f"  wrote {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
     return Xs, ys, ms
@@ -139,23 +146,34 @@ def train_xgb(X, y, val_mask, out_json: Path,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--input", required=True, type=Path,
+    p.add_argument("--input", "--data", required=True, type=Path,
                    help="combined NPZ from build_from_zip.py")
-    p.add_argument("--top10-out", required=True, type=Path)
+    p.add_argument("--top10-out", type=Path)
     p.add_argument("--model-out", required=True, type=Path)
     p.add_argument("--top-n", type=int, default=10)
     p.add_argument("--min-games", type=int, default=5)
+    p.add_argument("--no-filter", action="store_true", help="train on all rows; useful for combined self-play/candidate datasets")
     args = p.parse_args()
 
     print(f"Loading {args.input}...")
     d = np.load(args.input, allow_pickle=False)
-    n_games = d["game_names"].shape[0]
+    n_games = len(np.unique(d["meta"][:, 0])) if "game_names" not in d.files else d["game_names"].shape[0]
     n_rows = d["summary_v2"].shape[0]
     print(f"  {n_games} games / {n_rows:,} rows")
 
-    print(f"\n=== STEP 1: top-{args.top_n} filter (min {args.min_games} games) ===")
-    top_set = compute_top_n(d, n_top=args.top_n, min_games=args.min_games)
-    Xs, ys, ms = filter_top_n(d, top_set, args.top10_out)
+    if args.no_filter or "game_names" not in d.files:
+        print("\n=== STEP 1: no top-N filter ===")
+        if not args.no_filter and "game_names" not in d.files:
+            print("  input has no game_names; training on all rows")
+        Xs = d["summary_v2"].astype(np.float32)
+        ys = d["labels"].astype(np.float32)
+        ms = d["meta"].astype(np.int32)
+    else:
+        if args.top10_out is None:
+            raise SystemExit("--top10-out is required unless --no-filter is set")
+        print(f"\n=== STEP 1: top-{args.top_n} filter (min {args.min_games} games) ===")
+        top_set = compute_top_n(d, n_top=args.top_n, min_games=args.min_games)
+        Xs, ys, ms = filter_top_n(d, top_set, args.top10_out)
 
     print(f"\n=== STEP 2: train XGB (binary:logistic d=6 lr=0.08 n_est=600) ===")
     val_mask = game_level_split_mask(ms, frac=0.12, seed=42)
