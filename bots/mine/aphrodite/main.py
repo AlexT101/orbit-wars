@@ -2,11 +2,9 @@
 XGB value net, retrained 2026-05-30:
 
   1. **Default model**: weights/xgb_top10_d6_fixed.json — XGBoost gbtree
-     retrained against the corrected extrapolate_fleets combat. It MUST be
-     paired with APHRODITE_EXTRAP_FIX=1 (set below) so the deployed bot's
-     extrapolation matches the training feature extraction. WITHOUT that
-     env the bot's extrapolate_fleets uses the buggy combat the model was
-     NOT trained on — silently mispredicting.
+     retrained against the corrected extrapolate_fleets combat. The Rust bot
+     uses corrected extrapolation by default, matching the training feature
+     extraction.
 
   2. **XGBoost-in-Rust** value net (src/xgb.rs) — pure-Rust gbtree
      inference, bit-exact parity with Python xgboost. Loaded automatically
@@ -163,10 +161,6 @@ def _ensure():
     _ensure_executable(binary)
     env = dict(os.environ)
     env.setdefault("APHRODITE_BUDGET_MS", "500")
-    # Pair the fixed model with the fixed extrapolation. WITHOUT this env,
-    # the bot's extrapolate_fleets uses the buggy combat that the model was
-    # NOT trained on — silently mispredicting.
-    env["APHRODITE_EXTRAP_FIX"] = "1"
     # Default to the fixed XGB model unless the caller set their own.
     if weights:
         env.setdefault("APHRODITE_VALUE_NET_PATH", weights)

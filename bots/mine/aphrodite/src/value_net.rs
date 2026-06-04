@@ -4,9 +4,8 @@
 //!   1. CURRENT — `(owner, ships, radius, type, production)` for every
 //!      object (planets + comets).
 //!   2. EXTRAPOLATED — same per-object features but with every in-flight
-//!      fleet already resolved into its predicted target (no production
-//!      added — per user spec, this is "ships extrapolated", not a
-//!      timed forward sim).
+//!      fleet already resolved into its predicted target with the corrected
+//!      extrapolation combat.
 //!
 //! Plus a pairwise Euclidean-distance matrix between all objects.
 //!
@@ -98,75 +97,13 @@ fn pack_object(
 }
 
 /// Resolve all in-flight fleets into a predicted `(owner, ships)` per
-/// planet. NO production is applied — purely "what does the board look
-/// like once the current flights land". Fleets that die in the sun or
-/// fly off the board contribute nothing.
+/// planet. Fleets that die in the sun or fly off the board contribute
+/// nothing.
 ///
-/// Combat at each planet: process arrivals in arrival-time order. Mirror
-/// the simple combat rule (attacker > defender → flip; attacker ≤
-/// defender → defender shaves attacker's ships off). Ignores
-/// same-step multi-fleet engine logic for simplicity (the value net is
-/// an approximation anyway).
-///
-/// Two implementations exist:
-///   - BUGGY (default): the original simple combat with NO production
-///     accrual during fleet flight and no same-tick aggregation. This is
-///     what older deployed models were trained against.
-///   - FIXED (env `APHRODITE_EXTRAP_FIX=1`): adds production accrual on
-///     owned planets between arrival ticks, groups same-tick arrivals
-///     by owner before combat, and handles the tied-attacker rule.
-///     Use this when REBUILDING the training NPZ via `extract_v2`; do
-///     NOT enable it for the deployed bot until the matching model is
-///     retrained on the fixed features.
+/// Combat at each planet processes arrivals in arrival-time order, adds
+/// production on owned planets between arrival ticks, groups same-tick
+/// arrivals by owner before combat, and handles the tied-attacker rule.
 pub fn extrapolate_fleets(state: &GameState) -> HashMap<i64, (i32, i64)> {
-    if use_extrap_fix() {
-        extrapolate_fleets_fixed(state)
-    } else {
-        extrapolate_fleets_buggy(state)
-    }
-}
-
-fn use_extrap_fix() -> bool {
-    use std::sync::OnceLock;
-    static FIX: OnceLock<bool> = OnceLock::new();
-    *FIX.get_or_init(|| std::env::var("APHRODITE_EXTRAP_FIX").is_ok())
-}
-
-fn extrapolate_fleets_buggy(state: &GameState) -> HashMap<i64, (i32, i64)> {
-    let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
-    for fleet in &state.fleets {
-        if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {
-            arrivals
-                .entry(pid)
-                .or_default()
-                .push((dt, fleet.owner, fleet.ships));
-        }
-    }
-    let mut result: HashMap<i64, (i32, i64)> = state
-        .planets
-        .iter()
-        .map(|p| (p.id, (p.owner, p.ships)))
-        .collect();
-    for (pid, mut arrs) in arrivals {
-        arrs.sort_by_key(|x| x.0);
-        let entry = result.entry(pid).or_insert((-1, 0));
-        let (mut owner, mut ships) = *entry;
-        for (_t, f_owner, f_ships) in arrs {
-            if f_owner == owner {
-                ships += f_ships;
-            } else if f_ships > ships {
-                owner = f_owner;
-                ships = f_ships - ships;
-            } else {
-                ships -= f_ships;
-            }
-        }
-        *entry = (owner, ships);
-    }
-    result
-}
-
-fn extrapolate_fleets_fixed(state: &GameState) -> HashMap<i64, (i32, i64)> {
     let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
     for fleet in &state.fleets {
         if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {

@@ -5,11 +5,12 @@ generator and final redirect pass, with a fixed-extrapolation XGBoost value net.
 
 ## Runtime
 
-`main.py` is the Kaggle/dev wrapper. It launches the Rust `aphrodite` daemon,
-pins leaf evaluation to the fixed XGB model, and sets:
+`main.py` is the Kaggle/dev wrapper. It launches the Rust `aphrodite` daemon
+and pins leaf evaluation to the fixed XGB model:
 
 - `APHRODITE_VALUE_NET_PATH` -> `train/weights/xgb_top10_d6_fixed.json`
-- `APHRODITE_EXTRAP_FIX=1`
+
+The corrected fleet extrapolation is now the Rust default.
 
 The Rust bot uses DUCT only. Apollo candidate generation and Apollo's final
 `redirect_moves`-style pass are part of the active path.

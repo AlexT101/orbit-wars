@@ -11,9 +11,8 @@ needs three files at the archive root:
   - aphrodite              (Linux x86_64 glibc binary, built in Kaggle image)
   - xgb_top10_d6_fixed.json  (fixed-extrapolation value-net weights)
 
-The only differences from aphrodite_newest's bundle are the weights file
-(the *_fixed.json variant) and that main.py sets APHRODITE_EXTRAP_FIX=1 so
-the bot's extrapolate_fleets matches the training feature extraction.
+The corrected `extrapolate_fleets` path is the runtime default, matching the
+fixed training feature extraction.
 
 Build process:
 
