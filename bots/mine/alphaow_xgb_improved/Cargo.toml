@@ -1,0 +1,66 @@
+[package]
+name = "alphaow-bot"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "alphaow_bot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "alphaow-bot"
+path = "src/main.rs"
+
+[[bin]]
+name = "validator"
+path = "src/bin/validator.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "init_weights"
+path = "src/bin/init_weights.rs"
+
+[[bin]]
+name = "bench_valnet"
+path = "src/bin/bench_valnet.rs"
+
+[[bin]]
+name = "summary_parity"
+path = "src/bin/summary_parity.rs"
+
+[[bin]]
+name = "extract_v2"
+path = "src/bin/extract_v2.rs"
+
+[[bin]]
+name = "xgb_parity"
+path = "src/bin/xgb_parity.rs"
+
+[[bin]]
+name = "extract_v3"
+path = "src/bin/extract_v3.rs"
+
+[[bin]]
+name = "extract_v4"
+path = "src/bin/extract_v4.rs"
+
+[features]
+# Mirrors the vendored apollo engine: cfg-gates its per-section timers.
+profile = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustc-hash = "1.1"
+sha2 = "0.10"
+# Faster uncontended Mutex than std (no poisoning, lighter fast path) for the
+# hot aim caches.
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
