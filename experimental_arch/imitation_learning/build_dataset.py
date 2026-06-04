@@ -19,8 +19,9 @@ except ImportError:  # pragma: no cover - optional progress nicety.
     tqdm = None
 
 IL_DIR = Path(__file__).resolve().parent
-TRAIN_DIR = IL_DIR.parent / "train_transformer"
-REPO_ROOT = IL_DIR.parents[1]
+EXPERIMENTAL_ARCH_DIR = IL_DIR.parent
+TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train_transformer"
+REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 TROJAN_TRAIN_DIR = REPO_ROOT / "bots" / "mine" / "trojan_horse" / "train"
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
@@ -36,13 +37,11 @@ from orbit_wars_model import encode_obs as rust_encode_obs  # noqa: E402
 
 
 REPLAY_DIRS = [
-    Path("/home/sunrise/orbitwars/pantheow/experimental_arch/replays"),
+    EXPERIMENTAL_ARCH_DIR / "replays",
 ]
 ISAIAH_NAME = "Isaiah @ Tufa Labs"
-XGB_MODEL_PATH = Path(
-    "/home/sunrise/orbitwars/pantheow/bots/mine/trojan_horse/train/weights/xgb_46p12e88t11_latest.json"
-)
-EXTRACT_V4_BIN = Path("/home/sunrise/orbitwars/pantheow/bots/mine/trojan_horse/target/release/extract_v4")
+XGB_MODEL_PATH = TROJAN_TRAIN_DIR / "weights" / "xgb_46p12e88t11_latest.json"
+EXTRACT_V4_BIN = REPO_ROOT / "bots" / "mine" / "trojan_horse" / "target" / "release" / "extract_v4"
 OUT_DIR = IL_DIR / "data"
 DATASET_STATS_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_stats.json"
 DATASET_DIR = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_chunks"

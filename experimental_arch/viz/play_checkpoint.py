@@ -12,8 +12,7 @@ from typing import Protocol
 import torch
 from torch.distributions import Categorical
 
-# ==== HARDCODED CONFIG ====
-HERO = "/home/sunrise/orbitwars/pantheow/experimental_arch/train_transformer/checkpoints/galaxy_a2_p44_reference_ppo_transformer_v1/latest.pt"
+HERO = "/home/ec2-user/orbit-wars-osteo/experimental_arch/imitation_learning/checkpoints/isaiah_bc_transformer/latest.pt"
 OPPONENT = "self"  # "self", .zip, .py, or bot name
 
 HERO_DETERMINISTIC = False

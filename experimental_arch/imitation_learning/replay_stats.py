@@ -5,7 +5,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-REPLAY_DIR = Path("/home/sunrise/orbitwars/pantheow/experimental_arch/replays")
+EXPERIMENTAL_ARCH_DIR = Path(__file__).resolve().parent.parent
+REPLAY_DIR = EXPERIMENTAL_ARCH_DIR / "replays"
 ISAIAH = "Isaiah @ Tufa Labs"
 TOP_OPPONENTS = 30
 

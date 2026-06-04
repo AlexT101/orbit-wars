@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
+from multiprocessing.connection import Listener
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +23,7 @@ except ImportError:  # pragma: no cover - wandb is optional for local smoke test
 IL_DIR = Path(__file__).resolve().parent
 EXPERIMENTAL_ARCH_DIR = IL_DIR.parent
 TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train_transformer"
-REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parents[0]
+REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
 
@@ -37,13 +39,20 @@ METRICS_JSONL = OUT_DIR / "metrics.jsonl"
 DATASET_STATS_JSON = OUT_DIR / "dataset_stats.json"
 
 SEED = 123
-DEVICE = "cpu"
+DEVICE = "cuda"
 MODEL = "entity_transformer"
 HIDDEN = 128
 TRANSFORMER_LAYERS = 3
 TRANSFORMER_HEADS = 4
 EPOCHS = 12
 BATCH_SIZE = 64
+DATALOADER_WORKERS = min(8, os.cpu_count() or 1)
+DATALOADER_PREFETCH_FACTOR = 4
+USE_AMP = True
+AMP_DTYPE = "bfloat16"
+LOG_EVERY_STEPS = 200
+CHECKPOINT_EVERY_STEPS = 1000
+CHECKPOINT_EVERY_EPOCHS = 1
 LEARNING_RATE = 1.0e-4
 WEIGHT_DECAY = 1.0e-4
 MAX_GRAD_NORM = 1.0
@@ -52,6 +61,25 @@ USE_WANDB = True
 WANDB_PROJECT = "orbit-wars"
 WANDB_RUN_NAME = "isaiah-bc-transformer"
 ISAIAH_NAME = "Isaiah @ Tufa Labs"
+
+
+def rebase_legacy_path(path: str | Path, *, manifest_dir: Path) -> Path:
+    candidate = Path(path)
+
+    if candidate.is_absolute():
+        if candidate.exists():
+            return candidate
+        parts = candidate.parts
+        if "experimental_arch" in parts:
+            suffix = parts[parts.index("experimental_arch") + 1 :]
+            return EXPERIMENTAL_ARCH_DIR.joinpath(*suffix)
+        return candidate
+
+    for base in (manifest_dir, IL_DIR, REPO_ROOT, Path.cwd()):
+        rebased = base / candidate
+        if rebased.exists():
+            return rebased
+    return IL_DIR / candidate
 
 
 @dataclass(frozen=True)
@@ -67,6 +95,13 @@ class ILConfig:
     transformer_heads: int
     epochs: int
     batch_size: int
+    dataloader_workers: int
+    dataloader_prefetch_factor: int
+    use_amp: bool
+    amp_dtype: str
+    log_every_steps: int
+    checkpoint_every_steps: int
+    checkpoint_every_epochs: int
     learning_rate: float
     weight_decay: float
     val_fraction: float
@@ -76,9 +111,9 @@ class ILConfig:
 
 
 class ChunkedILDataset(Dataset):
-    def __init__(self, chunks: list[dict], cache_size: int = 2) -> None:
+    def __init__(self, chunks: list[dict], manifest_dir: Path, cache_size: int = 2) -> None:
         self.chunks = chunks
-        self.paths = [Path(chunk["path"]) for chunk in chunks]
+        self.paths = [rebase_legacy_path(chunk["path"], manifest_dir=manifest_dir) for chunk in chunks]
         self.lengths = [int(chunk["rows"]) for chunk in chunks]
         self.game_ids_by_chunk = [str(chunk["game_id"]) for chunk in chunks]
         self.offsets = [0]
@@ -205,6 +240,40 @@ def append_jsonl(path: Path, row: dict) -> None:
         f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def checkpoint_payload(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    cfg: ILConfig,
+    epoch: int,
+    global_step: int,
+    metrics: dict,
+) -> dict:
+    return {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "config": asdict(cfg),
+        "epoch": epoch,
+        "global_step": global_step,
+        "metrics": metrics,
+    }
+
+
+def save_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    cfg: ILConfig,
+    epoch: int,
+    global_step: int,
+    metrics: dict,
+    run,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint_payload(model, optimizer, cfg, epoch, global_step, metrics), path)
+    if run is not None:
+        wandb.save(str(path), policy="now")
+
+
 def make_config() -> ILConfig:
     return ILConfig(
         dataset_path=str(DATASET_PATH),
@@ -218,6 +287,13 @@ def make_config() -> ILConfig:
         transformer_heads=TRANSFORMER_HEADS,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
+        dataloader_workers=DATALOADER_WORKERS,
+        dataloader_prefetch_factor=DATALOADER_PREFETCH_FACTOR,
+        use_amp=USE_AMP,
+        amp_dtype=AMP_DTYPE,
+        log_every_steps=LOG_EVERY_STEPS,
+        checkpoint_every_steps=CHECKPOINT_EVERY_STEPS,
+        checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         learning_rate=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         val_fraction=VAL_FRACTION,
@@ -231,7 +307,7 @@ def load_prebuilt_dataset(path: Path, expected_player_name: str) -> tuple[Chunke
     if not path.exists():
         raise FileNotFoundError(
             f"prebuilt IL manifest not found: {path}\n"
-            "Run: python /home/sunrise/orbitwars/pantheow/experimental_arch/imitation_learning/build_dataset.py"
+            f"Run: python {IL_DIR / 'build_dataset.py'}"
         )
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("format_version") != 2:
@@ -242,7 +318,7 @@ def load_prebuilt_dataset(path: Path, expected_player_name: str) -> tuple[Chunke
     chunks = list(payload.get("chunks") or [])
     if not chunks:
         raise ValueError(f"IL manifest has no chunks: {path}")
-    return ChunkedILDataset(chunks), dict(payload.get("stats") or {})
+    return ChunkedILDataset(chunks, manifest_dir=path.parent), dict(payload.get("stats") or {})
 
 
 def split_chunks_by_game(dataset: ChunkedILDataset, val_fraction: float, seed: int) -> tuple[list[int], list[int]]:
@@ -264,6 +340,9 @@ def make_loaders(
     batch_size: int,
     val_fraction: float,
     seed: int,
+    num_workers: int,
+    pin_memory: bool,
+    prefetch_factor: int,
 ) -> tuple[DataLoader, DataLoader, int, int]:
     train_chunks, val_chunks = split_chunks_by_game(dataset, val_fraction, seed)
     if not val_chunks:
@@ -271,6 +350,13 @@ def make_loaders(
         train_chunks = train_chunks[1:] or val_chunks
     train_rows = sum(dataset.lengths[i] for i in train_chunks)
     val_rows = sum(dataset.lengths[i] for i in val_chunks)
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": num_workers > 0,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
     train_loader = DataLoader(
         dataset,
         batch_sampler=WeightedChunkBatchSampler(
@@ -280,16 +366,51 @@ def make_loaders(
             num_samples=train_rows,
             seed=seed,
         ),
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         dataset,
         batch_sampler=ChunkBatchSampler(dataset, val_chunks, batch_size, shuffle=False, seed=seed),
+        **loader_kwargs,
     )
     return train_loader, val_loader, train_rows, val_rows
 
 
 def batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
-    return {key: value.to(device, non_blocking=False) for key, value in batch.items()}
+    return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+
+
+def can_use_dataloader_workers() -> bool:
+    try:
+        listener = Listener(authkey=b"torch-dataloader-probe", backlog=128)
+        listener.close()
+    except OSError:
+        return False
+    return True
+
+
+def resolve_device(device_name: str) -> torch.device:
+    device = torch.device(device_name)
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "DEVICE='cuda' but PyTorch cannot see CUDA. Check the NVIDIA driver/container GPU access; "
+                "training will not silently fall back to CPU."
+            )
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+    return device
+
+
+def resolve_amp_dtype(dtype_name: str) -> torch.dtype:
+    if dtype_name == "float16":
+        return torch.float16
+    if dtype_name == "bfloat16":
+        if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+            raise RuntimeError("AMP_DTYPE='bfloat16' but this CUDA device does not support bfloat16")
+        return torch.bfloat16
+    raise ValueError(f"unsupported AMP_DTYPE={dtype_name!r}; expected 'bfloat16' or 'float16'")
 
 
 def ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -297,7 +418,13 @@ def ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def evaluate(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
     total = 0
@@ -308,7 +435,8 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -
     noop_correct = 0
     for raw_batch in loader:
         batch = batch_to_device(raw_batch, device)
-        logits, _value = model(batch["planets"], batch["planet_mask"], batch["globals_"], batch["action_mask"])
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            logits, _value = model(batch["planets"], batch["planet_mask"], batch["globals_"], batch["action_mask"])
         loss_rows = F.cross_entropy(logits, batch["label"], reduction="none")
         pred = torch.argmax(logits, dim=-1)
         total_loss += float(loss_rows.sum().item())
@@ -332,6 +460,10 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -
 def main() -> int:
     cfg = make_config()
     run = None
+    device = resolve_device(cfg.device)
+    amp_enabled = bool(cfg.use_amp and device.type == "cuda")
+    amp_dtype = resolve_amp_dtype(cfg.amp_dtype) if amp_enabled else torch.float32
+    actual_workers = cfg.dataloader_workers if can_use_dataloader_workers() else 0
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -351,6 +483,7 @@ def main() -> int:
             name=cfg.wandb_run_name,
             config={
                 **asdict(cfg),
+                "actual_dataloader_workers": actual_workers,
                 "out_dir": str(OUT_DIR),
                 "latest_checkpoint": str(LATEST_CHECKPOINT),
                 "best_checkpoint": str(BEST_CHECKPOINT),
@@ -389,7 +522,8 @@ def main() -> int:
         f"launch={dataset_stats.get('launch_rows', 0)} noop={dataset_stats.get('noop_rows', 0)} "
         f"invalid={dataset_stats.get('skipped_invalid', 0)} "
         f"bad_frac={dataset_stats.get('skipped_bad_ship_fraction', 0)} "
-        f"weight_mean={stats_payload.get('sample_weight_mean', 0.0):.3f}"
+        f"weight_mean={stats_payload.get('sample_weight_mean', 0.0):.3f} "
+        f"device={device} amp={int(amp_enabled)} amp_dtype={cfg.amp_dtype} workers={actual_workers}"
     )
 
     train_loader, val_loader, train_rows, val_rows = make_loaders(
@@ -397,33 +531,120 @@ def main() -> int:
         cfg.batch_size,
         cfg.val_fraction,
         cfg.seed,
+        actual_workers,
+        cfg.device.startswith("cuda"),
+        cfg.dataloader_prefetch_factor,
     )
 
-    device = torch.device(cfg.device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and amp_dtype == torch.float16)
     model = build_policy(cfg.model, cfg.hidden, cfg.transformer_layers, cfg.transformer_heads).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     best_val = float("inf")
+    global_step = 0
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         train_losses: list[float] = []
         train_accs: list[float] = []
+        recent_losses: list[float] = []
+        recent_accs: list[float] = []
+        epoch_rows = 0
+        epoch_t0 = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
+        log_t0 = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
+        wall_t0 = None
+        if device.type == "cuda":
+            assert epoch_t0 is not None and log_t0 is not None
+            epoch_t0.record()
+            log_t0.record()
+        else:
+            import time
+
+            wall_t0 = time.perf_counter()
         for raw_batch in train_loader:
+            global_step += 1
             batch = batch_to_device(raw_batch, device)
-            logits, _value = model(batch["planets"], batch["planet_mask"], batch["globals_"], batch["action_mask"])
-            loss = ce_loss(logits, batch["label"])
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+                logits, _value = model(batch["planets"], batch["planet_mask"], batch["globals_"], batch["action_mask"])
+                loss = ce_loss(logits, batch["label"])
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             with torch.no_grad():
                 pred = torch.argmax(logits, dim=-1)
-                train_accs.append(float((pred == batch["label"]).float().mean().item()))
-                train_losses.append(float(loss.item()))
+                acc = float((pred == batch["label"]).float().mean().item())
+                loss_value = float(loss.item())
+                batch_rows = int(batch["label"].numel())
+                epoch_rows += batch_rows
+                train_accs.append(acc)
+                train_losses.append(loss_value)
+                recent_accs.append(acc)
+                recent_losses.append(loss_value)
 
-        val = evaluate(model, val_loader, device)
+            if cfg.log_every_steps and global_step % cfg.log_every_steps == 0:
+                if device.type == "cuda":
+                    now = torch.cuda.Event(enable_timing=True)
+                    now.record()
+                    torch.cuda.synchronize()
+                    assert log_t0 is not None
+                    dt = log_t0.elapsed_time(now) / 1000.0
+                    log_t0 = now
+                else:
+                    import time
+
+                    assert wall_t0 is not None
+                    now_wall = time.perf_counter()
+                    dt = now_wall - wall_t0
+                    wall_t0 = now_wall
+                rows_per_sec = cfg.log_every_steps * cfg.batch_size / max(dt, 1.0e-9)
+                log_row = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "train/loss_recent": float(np.mean(recent_losses)),
+                    "train/accuracy_recent": float(np.mean(recent_accs)),
+                    "train/rows_per_sec": rows_per_sec,
+                }
+                print(
+                    f"step {global_step} epoch={epoch:02d} "
+                    f"loss={log_row['train/loss_recent']:.4f} "
+                    f"acc={log_row['train/accuracy_recent']:.3f} "
+                    f"rows/s={rows_per_sec:.0f}",
+                    flush=True,
+                )
+                if run is not None:
+                    wandb.log(log_row, step=global_step)
+                recent_losses.clear()
+                recent_accs.clear()
+
+            if cfg.checkpoint_every_steps and global_step % cfg.checkpoint_every_steps == 0:
+                save_checkpoint(
+                    LATEST_CHECKPOINT,
+                    model,
+                    optimizer,
+                    cfg,
+                    epoch,
+                    global_step,
+                    {"train_loss_recent": float(np.mean(train_losses[-100:])), "epoch_rows": epoch_rows},
+                    run,
+                )
+
+        val = evaluate(model, val_loader, device, amp_enabled, amp_dtype)
+        if device.type == "cuda":
+            epoch_end = torch.cuda.Event(enable_timing=True)
+            epoch_end.record()
+            torch.cuda.synchronize()
+            assert epoch_t0 is not None
+            epoch_seconds = epoch_t0.elapsed_time(epoch_end) / 1000.0
+        else:
+            import time
+
+            assert wall_t0 is not None
+            epoch_seconds = time.perf_counter() - wall_t0
         row = {
             "epoch": epoch,
+            "global_step": global_step,
             "train_loss": float(np.mean(train_losses)),
             "train_accuracy": float(np.mean(train_accs)),
             "val_loss": val["loss"],
@@ -432,6 +653,7 @@ def main() -> int:
             "val_noop_accuracy": val["noop_accuracy"],
             "train_rows": int(train_rows),
             "val_rows": int(val_rows),
+            "train_rows_per_sec": epoch_rows / max(epoch_seconds, 1.0e-9),
         }
         append_jsonl(METRICS_JSONL, row)
         if run is not None:
@@ -445,26 +667,23 @@ def main() -> int:
                     "val/noop_accuracy": row["val_noop_accuracy"],
                     "rows/train": row["train_rows"],
                     "rows/val": row["val_rows"],
+                    "train/rows_per_sec_epoch": row["train_rows_per_sec"],
                     "epoch": epoch,
                 }
             )
         print(
             f"epoch {epoch:02d} train_loss={row['train_loss']:.4f} "
             f"train_acc={row['train_accuracy']:.3f} val_loss={row['val_loss']:.4f} "
-            f"val_acc={row['val_accuracy']:.3f} launch={row['val_launch_accuracy']:.3f}"
+            f"val_acc={row['val_accuracy']:.3f} launch={row['val_launch_accuracy']:.3f} "
+            f"rows/s={row['train_rows_per_sec']:.0f}"
         )
 
-        payload = {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "config": asdict(cfg),
-            "epoch": epoch,
-            "metrics": row,
-        }
-        torch.save(payload, LATEST_CHECKPOINT)
+        save_checkpoint(LATEST_CHECKPOINT, model, optimizer, cfg, epoch, global_step, row, run)
+        if cfg.checkpoint_every_epochs and epoch % cfg.checkpoint_every_epochs == 0:
+            save_checkpoint(OUT_DIR / f"epoch_{epoch:03d}.pt", model, optimizer, cfg, epoch, global_step, row, run)
         if row["val_loss"] < best_val:
             best_val = row["val_loss"]
-            torch.save(payload, BEST_CHECKPOINT)
+            save_checkpoint(BEST_CHECKPOINT, model, optimizer, cfg, epoch, global_step, row, run)
 
     print(f"wrote {LATEST_CHECKPOINT}")
     print(f"best {BEST_CHECKPOINT}")
