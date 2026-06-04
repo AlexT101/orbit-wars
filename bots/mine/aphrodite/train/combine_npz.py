@@ -28,6 +28,8 @@ def main() -> None:
     ys: list[np.ndarray] = []
     metas: list[np.ndarray] = []
     sources: list[np.ndarray] = []
+    win_rates: list[np.ndarray] = []
+    have_win_rate = True
     game_offset = 0
 
     for source_idx, path in enumerate(args.inputs):
@@ -50,10 +52,20 @@ def main() -> None:
         ys.append(y)
         metas.append(meta)
         sources.append(np.full(x.shape[0], source_idx, dtype=np.int16))
+        # Per-row strength carried through only if every input has it.
+        if "win_rate" in d.files:
+            win_rates.append(d["win_rate"].astype(np.float32))
+        else:
+            have_win_rate = False
         print(f"{path}: rows={x.shape[0]:,} games={unique_games.shape[0]:,}")
 
     out = args.out
     out.parent.mkdir(parents=True, exist_ok=True)
+    extra = {}
+    if have_win_rate:
+        extra["win_rate"] = np.concatenate(win_rates).astype(np.float32)
+    else:
+        print("note: not all inputs had `win_rate`; dropping it from the combined NPZ")
     np.savez_compressed(
         out,
         summary_v2=np.concatenate(xs).astype(np.float32),
@@ -61,6 +73,7 @@ def main() -> None:
         meta=np.concatenate(metas).astype(np.int32),
         source=np.concatenate(sources).astype(np.int16),
         source_files=np.array([str(p) for p in args.inputs], dtype="<U260"),
+        **extra,
     )
     print(f"wrote {out} rows={sum(x.shape[0] for x in xs):,} games={game_offset:,}")
 
