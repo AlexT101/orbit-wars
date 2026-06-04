@@ -485,6 +485,74 @@ def labels_for_step(state_t, state_tp1, player, planet_ids):
     return labels
 
 
+def labels_and_offensive_for_step(state_t, state_tp1, player, planet_ids,
+                                   future_states, t_now, future_fleet_dests):
+    """Like labels_for_step, but also computes `offensive_labels`: same as labels
+    except support launches are zeroed.
+
+    A *support* launch is one where:
+      (a) the target planet is currently owned by `player` (per state_t), AND
+      (b) no enemy fleet targets the same planet during the window [t, t+eta]
+          (either already in flight in state(t+k), or launched into being).
+
+    `future_fleet_dests[k]` is a dict {fleet_id: dest_pid} pre-computed via
+    predict_fleet_collision on state(t+k) for all fleets in that state.
+    """
+    old_ids = {f["id"] for f in state_t["fleets"]}
+    new_fleets = [f for f in state_tp1["fleets"] if f["id"] not in old_ids and f["owner"] == player]
+    pid_to_idx = {pid: i for i, pid in enumerate(planet_ids)}
+    pid_to_owner = {p["id"]: p["owner"] for p in state_t["planets"]}
+
+    labels = np.zeros(len(planet_ids), dtype=F32)
+    offensive = np.zeros(len(planet_ids), dtype=F32)
+
+    n_future = len(future_states)
+    for f in new_fleets:
+        pred = predict_fleet_collision(state_tp1, f)
+        if pred is None:
+            continue
+        dest_pid, eta = pred
+        idx = pid_to_idx.get(dest_pid)
+        if idx is None:
+            continue
+        labels[idx] = 1.0
+
+        # support check
+        target_owner = pid_to_owner.get(dest_pid, -1)
+        if target_owner != player:
+            offensive[idx] = 1.0  # not mine → offensive (capture)
+            continue
+
+        enemy_threatens = False
+        for k in range(eta + 1):
+            j = t_now + k
+            if j >= n_future or future_states[j] is None:
+                continue
+            dests_k = future_fleet_dests[j] if j < len(future_fleet_dests) else None
+            if not dests_k:
+                continue
+            for fid, dest in dests_k.items():
+                if dest != dest_pid:
+                    continue
+                # look up owner of fleet `fid` in state_k
+                state_k = future_states[j]
+                for fl in state_k["fleets"]:
+                    if fl["id"] == fid and fl["owner"] != player:
+                        enemy_threatens = True
+                        break
+                if enemy_threatens:
+                    break
+            if enemy_threatens:
+                break
+
+        if not enemy_threatens:
+            # support launch — leave offensive[idx] = 0
+            pass
+        else:
+            offensive[idx] = 1.0
+    return labels, offensive
+
+
 # ---------------------------------------------------------------------------
 # Owner-change history tracking
 # ---------------------------------------------------------------------------
@@ -536,6 +604,20 @@ def process_game(game_id_int, game_json):
     if not actions_present:
         return []
 
+    # Pre-compute fleet destinations per turn (for support-launch detection).
+    # fleet_dests[t][fleet_id] = dest_pid. Skipped when no fleets.
+    fleet_dests: list[dict | None] = [None] * len(steps)
+    for t, st in enumerate(parsed):
+        if st is None or not st["fleets"]:
+            fleet_dests[t] = {}
+            continue
+        dests = {}
+        for f in st["fleets"]:
+            pred = predict_fleet_collision(st, f)
+            if pred is not None:
+                dests[f["id"]] = pred[0]
+        fleet_dests[t] = dests
+
     for t in range(len(steps) - 1):
         state_t = parsed[t]
         state_tp1 = parsed[t + 1]
@@ -552,20 +634,25 @@ def process_game(game_id_int, game_json):
             n_real = feats.shape[0]
             if n_real == 0 or n_real > N_MAX:
                 continue
-            labels = labels_for_step(state_t, state_tp1, player, planet_ids)
+            labels, offensive = labels_and_offensive_for_step(
+                state_t, state_tp1, player, planet_ids,
+                future_states=parsed, t_now=t, future_fleet_dests=fleet_dests,
+            )
 
             # pad to N_MAX
             pad_feats = np.zeros((N_MAX, F_PLANET), dtype=F32)
             pad_feats[:n_real] = feats
             pad_labels = np.zeros(N_MAX, dtype=F32)
             pad_labels[:n_real] = labels
+            pad_offensive = np.zeros(N_MAX, dtype=F32)
+            pad_offensive[:n_real] = offensive
             pad_ids = np.zeros(N_MAX, dtype=np.int32)
             pad_ids[:n_real] = planet_ids
             mask = np.zeros(N_MAX, dtype=bool)
             mask[:n_real] = True
 
             meta = np.array([game_id_int, t, player, n_real], dtype=np.int32)
-            rows.append((pad_feats, globals_, mask, pad_labels, pad_ids, meta))
+            rows.append((pad_feats, globals_, mask, pad_labels, pad_offensive, pad_ids, meta))
     return rows
 
 
@@ -648,8 +735,9 @@ def build(zip_paths, out_path, max_games=None, workers=1, progress_every=200):
     globals_ = np.stack([r[1] for r in rows_buf])
     mask = np.stack([r[2] for r in rows_buf])
     labels = np.stack([r[3] for r in rows_buf])
-    planet_ids = np.stack([r[4] for r in rows_buf])
-    meta = np.stack([r[5] for r in rows_buf])
+    offensive_labels = np.stack([r[4] for r in rows_buf])
+    planet_ids = np.stack([r[5] for r in rows_buf])
+    meta = np.stack([r[6] for r in rows_buf])
 
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -659,14 +747,17 @@ def build(zip_paths, out_path, max_games=None, workers=1, progress_every=200):
         globals=globals_,
         mask=mask,
         labels=labels,
+        offensive_labels=offensive_labels,
         planet_ids=planet_ids,
         meta=meta,
         feat_names=np.array(PLANET_FEAT_NAMES, dtype=object),
         global_names=np.array(GLOBAL_FEAT_NAMES, dtype=object),
     )
     pos_rate = labels[mask].mean() if mask.any() else 0.0
-    print(f"wrote {out_path}  rows={len(rows_buf)} "
-          f"positives={pos_rate * 100:.2f}% of masked planet-slots")
+    off_rate = offensive_labels[mask].mean() if mask.any() else 0.0
+    print(f"wrote {out_path}  rows={len(rows_buf)}  "
+          f"all-pos={pos_rate*100:.2f}%  offensive-pos={off_rate*100:.2f}%  "
+          f"(support fraction: {(1 - off_rate/max(pos_rate,1e-9))*100:.1f}%)")
     return 0
 
 
