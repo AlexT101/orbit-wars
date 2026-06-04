@@ -20,10 +20,6 @@ What it does:
      original: summary_v2 (N,46) f32, labels (N,) f32, meta (N,4) i32
      meta cols = (game_id, step, player, 1-player)
 
-Then CELL 2 trains a symmetric-linear + h64 MLP on the rebuilt set (canonical
-seed=42, 12% game-level val split, SmoothL1) and prints sign accuracy so you can
-compare to the known baseline: linear ~84.4% / MLP ~84.8%.
-
 SPEED NOTE: the pure-Python collision predictor is ~100x slower than the Rust
 binary. Set MAX_GAMES to bound a single Kaggle session (default 4000 ≈ the
 original 2728-game scale). Set MAX_GAMES = None to process everything (will take
@@ -475,64 +471,3 @@ def build():
 if __name__ == "__main__":
     build()
 
-
-# %% [cell 2] — TRAIN + EVAL (run after cell 1) ------------------------------
-def train_and_eval(npz_path="/kaggle/working/replays_2p_rebuilt.npz"):
-    import torch, torch.nn as nn
-    d = np.load(npz_path)
-    X = torch.tensor(d["summary_v2"], dtype=torch.float32)
-    y = torch.tensor(np.sign(d["labels"]).astype(np.float32))   # ±1
-    games = d["meta"][:, 0]
-
-    # canonical seed=42, 12% game-level holdout (split by game, not by row)
-    rng = np.random.default_rng(42)
-    uniq = np.unique(games)
-    rng.shuffle(uniq)
-    n_val = int(round(0.12 * len(uniq)))
-    val_games = set(uniq[:n_val].tolist())
-    val_mask = np.array([g in val_games for g in games])
-    tr = torch.tensor(~val_mask); va = torch.tensor(val_mask)
-    Xtr, ytr, Xva, yva = X[tr], y[tr], X[va], y[va]
-    print(f"train {Xtr.shape[0]:,} rows / {len(uniq)-n_val} games | "
-          f"val {Xva.shape[0]:,} rows / {n_val} games")
-
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    Xtr, ytr, Xva, yva = Xtr.to(dev), ytr.to(dev), Xva.to(dev), yva.to(dev)
-    huber = nn.SmoothL1Loss()
-
-    def fit(model, epochs, lr):
-        model = model.to(dev)
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
-        for ep in range(epochs):
-            opt.zero_grad()
-            loss = huber(model(Xtr).squeeze(-1), ytr)
-            loss.backward(); opt.step()
-        with torch.no_grad():
-            pv = model(Xva).squeeze(-1)
-            sign = ((pv > 0) == (yva > 0)).float().mean().item()
-        return sign
-
-    # --- symmetric linear: model on difference features (mine - theirs) ---
-    # mirror pairs: (i, i+10) for i in 0..10 ; (20+i, 29+i) for i in 0..9
-    pairs = [(i, i + 10) for i in range(10)] + [(20 + i, 29 + i) for i in range(9)]
-    mine = torch.tensor([a for a, _ in pairs]); theirs = torch.tensor([b for _, b in pairs])
-    Dtr = (Xtr[:, mine] - Xtr[:, theirs]); Dva = (Xva[:, mine] - Xva[:, theirs])
-    lin = nn.Sequential(nn.Linear(len(pairs), 1), nn.Tanh())
-    # reuse fit() by swapping data
-    opt = torch.optim.Adam(lin.to(dev).parameters(), lr=0.01)
-    for ep in range(8000):
-        opt.zero_grad(); loss = huber(lin(Dtr).squeeze(-1), ytr); loss.backward(); opt.step()
-    with torch.no_grad():
-        sym_sign = ((lin(Dva).squeeze(-1) > 0) == (yva > 0)).float().mean().item()
-
-    # --- h64 MLP (deployed arch) on raw 46-d ---
-    mlp = nn.Sequential(nn.Linear(46, 64), nn.ReLU(), nn.Linear(64, 1), nn.Tanh())
-    mlp_sign = fit(mlp, epochs=4000, lr=0.003)
-
-    print("\n=== rebuilt-dataset val sign accuracy ===")
-    print(f"  symmetric linear : {sym_sign*100:.2f}%   (baseline ~84.4%)")
-    print(f"  h64 MLP          : {mlp_sign*100:.2f}%   (baseline ~84.8%)")
-    print("  -> if these match the baselines, the 84% wall is the FEATURES, not the data.")
-
-
-# To run training on Kaggle after cell 1:  train_and_eval()

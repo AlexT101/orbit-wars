@@ -33,18 +33,28 @@ pub static ITERATIONS: AtomicU64 = AtomicU64::new(0);
 
 pub fn reset() {
     for c in [
-        &FOCUSED_CANDIDATES_NS, &FOCUSED_CANDIDATES_CALLS,
-        &PLAN_FOR_TARGET_NS, &PLAN_FOR_TARGET_CALLS,
+        &FOCUSED_CANDIDATES_NS,
+        &FOCUSED_CANDIDATES_CALLS,
+        &PLAN_FOR_TARGET_NS,
+        &PLAN_FOR_TARGET_CALLS,
         &APPLY_LAUNCHES_NS,
-        &TICK_NS, &TICK_CALLS,
-        &VALUE_NET_NS, &VALUE_NET_CALLS,
-        &EXTRAPOLATE_NS, &EXTRAPOLATE_CALLS,
+        &TICK_NS,
+        &TICK_CALLS,
+        &VALUE_NET_NS,
+        &VALUE_NET_CALLS,
+        &EXTRAPOLATE_NS,
+        &EXTRAPOLATE_CALLS,
         &TURN_TOTAL_NS,
-        &ENSURE_CANDIDATES_NS, &ENSURE_CANDIDATES_CALLS,
-        &APOLLO_CANDIDATES_NS, &APOLLO_CANDIDATES_CALLS,
-        &SELECTION_NS, &SELECTION_CALLS,
-        &TREE_OPS_NS, &TREE_OPS_CALLS,
-        &BACKPROP_NS, &BACKPROP_CALLS,
+        &ENSURE_CANDIDATES_NS,
+        &ENSURE_CANDIDATES_CALLS,
+        &APOLLO_CANDIDATES_NS,
+        &APOLLO_CANDIDATES_CALLS,
+        &SELECTION_NS,
+        &SELECTION_CALLS,
+        &TREE_OPS_NS,
+        &TREE_OPS_CALLS,
+        &BACKPROP_NS,
+        &BACKPROP_CALLS,
         &ITERATIONS,
     ] {
         c.store(0, Ordering::Relaxed);
@@ -66,9 +76,18 @@ pub fn dump(step: i64, player: i32) {
     let ms = |ns: u64| ns as f64 / 1_000_000.0;
     let total = load(&TURN_TOTAL_NS);
     let total_ms = ms(total);
-    let pct = |ns: u64| if total > 0 { 100.0 * ns as f64 / total as f64 } else { 0.0 };
+    let pct = |ns: u64| {
+        if total > 0 {
+            100.0 * ns as f64 / total as f64
+        } else {
+            0.0
+        }
+    };
 
-    let fc = (load(&FOCUSED_CANDIDATES_NS), load(&FOCUSED_CANDIDATES_CALLS));
+    let fc = (
+        load(&FOCUSED_CANDIDATES_NS),
+        load(&FOCUSED_CANDIDATES_CALLS),
+    );
     let pft = (load(&PLAN_FOR_TARGET_NS), load(&PLAN_FOR_TARGET_CALLS));
     let al = load(&APPLY_LAUNCHES_NS);
     let tick = (load(&TICK_NS), load(&TICK_CALLS));
@@ -98,18 +117,43 @@ pub fn dump(step: i64, player: i32) {
          extrapolate={:.1}ms({:.1}%, n={})  \
          backprop={:.1}ms({:.1}%, n={})  \
          other={:.1}ms({:.1}%)",
-        player, step, iters, total_ms,
-        ms(ec.0), pct(ec.0), ec.1,
-        ms(ac.0), pct(ac.0), ac.1,
-        ms(fc.0), pct(fc.0), fc.1,
-        ms(pft.0), pct(pft.0), pft.1,
-        ms(sel.0), pct(sel.0), sel.1,
-        ms(tr.0), pct(tr.0), tr.1,
-        ms(al), pct(al),
-        ms(tick.0), pct(tick.0), tick.1,
-        ms(vn.0), pct(vn.0), vn.1,
-        ms(ex.0), pct(ex.0), ex.1,
-        ms(bp.0), pct(bp.0), bp.1,
-        ms(other), pct(other),
+        player,
+        step,
+        iters,
+        total_ms,
+        ms(ec.0),
+        pct(ec.0),
+        ec.1,
+        ms(ac.0),
+        pct(ac.0),
+        ac.1,
+        ms(fc.0),
+        pct(fc.0),
+        fc.1,
+        ms(pft.0),
+        pct(pft.0),
+        pft.1,
+        ms(sel.0),
+        pct(sel.0),
+        sel.1,
+        ms(tr.0),
+        pct(tr.0),
+        tr.1,
+        ms(al),
+        pct(al),
+        ms(tick.0),
+        pct(tick.0),
+        tick.1,
+        ms(vn.0),
+        pct(vn.0),
+        vn.1,
+        ms(ex.0),
+        pct(ex.0),
+        ex.1,
+        ms(bp.0),
+        pct(bp.0),
+        bp.1,
+        ms(other),
+        pct(other),
     );
 }

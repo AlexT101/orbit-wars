@@ -12,14 +12,14 @@
 //!   - apollo `FleetOrder = (from_id, angle, ships)` -> aphrodite
 //!     `Action = (from_id, angle, ships, owner)` with `owner = player`.
 
+use crate::apollo::cache::EntityCache;
 use crate::apollo::constants::Config;
 use crate::apollo::engine::{
     CometGroup as ACometGroup, EngineState, Fleet as AFleet, MoveAction, Planet as APlanet,
     Simulator,
 };
-use crate::apollo::cache::EntityCache;
-use crate::apollo::strategy;
 use crate::apollo::helpers::{count_alive_players, count_players, ArrivalLedger};
+use crate::apollo::strategy;
 use crate::apollo::world::WorldState;
 use crate::sim::Action;
 use crate::{GameState, Planet, CENTER_X, CENTER_Y};
@@ -133,7 +133,12 @@ fn build_engine(state: &GameState) -> EngineState {
     let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
     let (comets, comet_planet_ids) = to_apollo_comets(state);
     let num_players = count_players(&planets, &fleets);
-    let next_fleet_id = fleets.iter().map(|f| f.id).max().map(|m| m + 1).unwrap_or(0);
+    let next_fleet_id = fleets
+        .iter()
+        .map(|f| f.id)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
     EngineState::from_observation_parts(
         state.step,
         state.angular_velocity,
@@ -310,7 +315,7 @@ fn recover_target(model: &strategy::HellburnerModel, from_id: i64, angle: f64, s
 
 /// Final no-loss reroute pass over the move set the planner has already chosen,
 /// mirroring apollo's `redirect_moves` call at the tail of `Bot::get_action`.
-/// This runs *after* MCTS/duct/beam have fully committed to a plan — it never
+/// This runs after DUCT has fully committed to a plan — it never
 /// influences the search, it only rewrites the moves we are about to emit. For
 /// each launch `A → B`, if routing through an intermediate ally `C` reaches `B`
 /// no later (`A → C → B`), the fleet is retargeted to `C`.
@@ -365,6 +370,3 @@ pub fn redirect_actions(state: &GameState, player: i32, actions: Vec<Action>) ->
     out.extend(passthrough);
     out
 }
-
-// (focused single-target candidate generator moved to src/focused_plan.rs)
-

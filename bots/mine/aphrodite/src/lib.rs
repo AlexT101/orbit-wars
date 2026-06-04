@@ -1,14 +1,11 @@
-//! Shared library code for aphrodite bot + sim validator.
+//! Shared library code for the aphrodite bot and extraction tools.
 
 pub mod apollo;
 pub mod apollo_bridge;
-pub mod beam;
 pub mod duct;
-pub mod focused_plan;
-pub mod mcts;
+pub mod eval;
 pub mod ow2_plan;
 pub mod pathing;
-pub mod policy;
 pub mod profiling;
 pub mod sim;
 pub mod value_net;

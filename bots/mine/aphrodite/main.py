@@ -16,9 +16,6 @@ XGB value net, retrained 2026-05-30:
      that the (very slow) depth-8 apollo replan rollout doesn't pay for
      itself; skipping it buys many more MCTS iterations per turn.
 
-Strips any caller-set OW_* tuning env so this wrapper is a stable deploy
-regardless of parent process experiments.
-
 To override the model, set APHRODITE_VALUE_NET_PATH to another file.
 
 This single file serves BOTH layouts — `_locate()` auto-detects which:
@@ -165,19 +162,6 @@ def _ensure():
     _build_if_needed(binary, build_cwd)
     _ensure_executable(binary)
     env = dict(os.environ)
-    # Strip OW_* tuning overrides so this wrapper is a stable baseline
-    # regardless of parent env used by experiments.
-    for k in (
-        "OW_PLANNER", "OW_PUCT_C", "OW_K_ROOT", "OW_K_NON_ROOT",
-        "OW_ROLLOUT", "OW_ROLLOUT_DEPTH", "OW_ROLLOUT_REACTIVE",
-        "OW_ROLLOUT_NOISE", "OW_DUCT_ENUMERATE", "OW_NO_COOP", "OW_NO_REUSE",
-        "OW_FOCUSED_CANDIDATES", "OW_SELECTION", "OW_EXP3_ETA",
-        "OW_EXP3_GAMMA", "OW_DEBUG", "OW_PROFILE",
-    ):
-        env.pop(k, None)
-    # **No rollouts** — leaf-eval only.
-    env["OW_ROLLOUT"] = "none"
-    env["OW_ROLLOUT_DEPTH"] = "0"
     env.setdefault("APHRODITE_BUDGET_MS", "500")
     # Pair the fixed model with the fixed extrapolation. WITHOUT this env,
     # the bot's extrapolate_fleets uses the buggy combat that the model was

@@ -1446,7 +1446,7 @@ pub fn redirect_moves(world: &WorldState, mut moves: Vec<MoveAction>) -> Vec<Mov
     moves
 }
 
-/// Public entry point for the focused-plan generator (`src/focused_plan.rs`).
+/// Public entry point for single-target planning helpers.
 /// Evaluates a single target via the same offset-sweep + frontline-subset
 /// search used by `run_strategy`, but skips the greedy multi-target loop.
 /// Returns `(orders, max_arrival)` for the cheapest capture across the

@@ -139,10 +139,7 @@ impl AngleSet {
                     }
                 }
             }
-            self.ivs = out
-                .into_iter()
-                .filter(|(a, b)| b - a > 1e-9)
-                .collect();
+            self.ivs = out.into_iter().filter(|(a, b)| b - a > 1e-9).collect();
         }
     }
 
@@ -226,8 +223,8 @@ fn arc_half_angle(d_target: f64, r_target: f64, d_fleet: f64) -> Option<f64> {
     if r_target >= d_target + d_fleet {
         return Some(PI);
     }
-    let cos_half =
-        (d_fleet * d_fleet + d_target * d_target - r_target * r_target) / (2.0 * d_fleet * d_target);
+    let cos_half = (d_fleet * d_fleet + d_target * d_target - r_target * r_target)
+        / (2.0 * d_fleet * d_target);
     let h = cos_half.clamp(-1.0, 1.0).acos();
     // Even a degenerate (tangent) arc is a valid hit. Pad with a tiny
     // epsilon so AngleSet treats it as a real interval.

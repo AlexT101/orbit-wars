@@ -105,7 +105,8 @@ pub fn rollout_score(
         let ledger: Option<ArrivalLedger> = if t == 0 {
             None
         } else {
-            let horizon = Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+            let horizon =
+                Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
             Some(ArrivalLedger::build(&sim, horizon, cache))
         };
 

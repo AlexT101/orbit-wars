@@ -6,10 +6,9 @@
 //! `split_conditions` until reaching a leaf (`left_children[i] == -1`); the
 //! leaf's `base_weights[i]` is its logit contribution. Sum across all trees
 //! plus the base-score logit, sigmoid to a probability, then map to a value
-//! in `[-1, 1]` (matching the MLP's tanh-output convention).
+//! in `[-1, 1]`.
 //!
-//! Loaded via `APHRODITE_VALUE_NET_PATH` (auto-detected by leading `{` vs
-//! AOWV magic byte). See `value_net.rs::weights()`.
+//! Loaded via `APHRODITE_VALUE_NET_PATH`. See `value_net.rs::weights()`.
 
 use serde::Deserialize;
 
@@ -57,7 +56,7 @@ struct TreeJson {
 struct CompiledTree {
     feat_idx: Vec<u32>,
     threshold: Vec<f32>,
-    left_or_value: Vec<u32>,   // u32 child idx for internal, leaf logit bits for leaf
+    left_or_value: Vec<u32>, // u32 child idx for internal, leaf logit bits for leaf
     right: Vec<u32>,
 }
 
@@ -100,8 +99,7 @@ impl XgbModel {
         s
     }
 
-    /// Output mapped to `[-1, 1]` to match the MLP tanh convention used by
-    /// the rest of the bot. `2*sigmoid(z) - 1 = tanh(z/2)`.
+    /// Output mapped to `[-1, 1]`. `2*sigmoid(z) - 1 = tanh(z/2)`.
     pub fn predict_value(&self, x: &[f32]) -> f32 {
         let z = self.predict_logit(x);
         // tanh(z/2) is numerically nicer than 2/(1+e^-z) - 1 for large |z|.
@@ -124,7 +122,10 @@ pub fn load(bytes: &[u8]) -> Option<XgbModel> {
     };
     let obj = &dump.learner.objective.name;
     if obj != "binary:logistic" {
-        eprintln!("[aphrodite] xgb unsupported objective: {} (only binary:logistic)", obj);
+        eprintln!(
+            "[aphrodite] xgb unsupported objective: {} (only binary:logistic)",
+            obj
+        );
         return None;
     }
     // base_score in XGB JSON is stored as a JSON string like "[5E-1]" or "0.5".
@@ -143,12 +144,7 @@ pub fn load(bytes: &[u8]) -> Option<XgbModel> {
     } else {
         0.0
     };
-    let num_feature: usize = dump
-        .learner
-        .learner_model_param
-        .num_feature
-        .parse()
-        .ok()?;
+    let num_feature: usize = dump.learner.learner_model_param.num_feature.parse().ok()?;
 
     let mut trees = Vec::with_capacity(dump.learner.gradient_booster.model.trees.len());
     for t in &dump.learner.gradient_booster.model.trees {
@@ -182,7 +178,16 @@ pub fn load(bytes: &[u8]) -> Option<XgbModel> {
                 right[i] = t.right_children[i].max(0) as u32;
             }
         }
-        trees.push(CompiledTree { feat_idx, threshold, left_or_value, right });
+        trees.push(CompiledTree {
+            feat_idx,
+            threshold,
+            left_or_value,
+            right,
+        });
     }
-    Some(XgbModel { trees, base_score_logit, num_feature })
+    Some(XgbModel {
+        trees,
+        base_score_logit,
+        num_feature,
+    })
 }

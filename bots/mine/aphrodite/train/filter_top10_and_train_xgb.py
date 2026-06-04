@@ -3,8 +3,8 @@ and train XGBoost with the same params the deployed `xgb_top10_d6.json`
 used (binary:logistic, max_depth=6, lr=0.08, n_est=600, early stop=40).
 Saves the booster as `weights/<out_stem>.json`.
 
-This is the topn_experiments.py filter + train_gbm.py training step,
-collapsed into one script for the "rebuild + retrain" workflow.
+This collapses filtering and XGBoost training into one script for the
+"rebuild + retrain" workflow.
 
 Usage:
     python filter_top10_and_train_xgb.py \\

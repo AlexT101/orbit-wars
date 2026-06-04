@@ -52,16 +52,37 @@ pub fn plan_profile_report() {
     let sim_calls = PLAN_SIMULATE_AT_CALLS.load(Ordering::Relaxed);
     let outer = PLAN_OUTER_ITERS.load(Ordering::Relaxed);
     let pft = PLAN_FOR_TIME_CALLS.load(Ordering::Relaxed);
-    eprintln!("[plan-profile] total={:.2}ms across {} calls (avg {:.3}ms/call)",
-              total_ms, calls, total_ms / calls.max(1) as f64);
-    eprintln!("[plan-profile]   dir_to_hit total: {:.2}ms ({} hits + {} misses)",
-              dir_ms, hits, misses);
-    eprintln!("[plan-profile]     hit avg {:.0}ns, miss avg {:.0}ns",
-              if hits > 0 { (dir_ms * 1e6 - misses as f64 * 1000.0) / hits as f64 } else { 0.0 },
-              if misses > 0 { dir_ms * 1e6 / misses as f64 } else { 0.0 });
-    eprintln!("[plan-profile]   simulate_at: {:.2}ms across {} calls",
-              sim_ms, sim_calls);
-    eprintln!("[plan-profile]   outer iters: {}, plan_for_time calls: {}", outer, pft);
+    eprintln!(
+        "[plan-profile] total={:.2}ms across {} calls (avg {:.3}ms/call)",
+        total_ms,
+        calls,
+        total_ms / calls.max(1) as f64
+    );
+    eprintln!(
+        "[plan-profile]   dir_to_hit total: {:.2}ms ({} hits + {} misses)",
+        dir_ms, hits, misses
+    );
+    eprintln!(
+        "[plan-profile]     hit avg {:.0}ns, miss avg {:.0}ns",
+        if hits > 0 {
+            (dir_ms * 1e6 - misses as f64 * 1000.0) / hits as f64
+        } else {
+            0.0
+        },
+        if misses > 0 {
+            dir_ms * 1e6 / misses as f64
+        } else {
+            0.0
+        }
+    );
+    eprintln!(
+        "[plan-profile]   simulate_at: {:.2}ms across {} calls",
+        sim_ms, sim_calls
+    );
+    eprintln!(
+        "[plan-profile]   outer iters: {}, plan_for_time calls: {}",
+        outer, pft
+    );
 }
 
 // Thread-local cache for dir_to_hit results, valid for the duration of a
@@ -89,7 +110,10 @@ const FAST_SHIPS_MAX: usize = 64;
 // at 1), time>0 means Some(time). u8 ver wraps every 256 calls — on wrap we
 // zero the array (~20µs, ~4 times/turn → negligible).
 #[derive(Clone, Copy, Default)]
-struct TimeSlot { ver: u8, time: u8 }
+struct TimeSlot {
+    ver: u8,
+    time: u8,
+}
 const FAST_ARR_LEN: usize = DIR_N_PLANETS * DIR_N_PLANETS * FAST_SHIPS_MAX;
 
 #[inline]
@@ -108,7 +132,8 @@ fn fast_idx(src_id: i64, tgt_id: i64, ships: i64) -> Option<usize> {
 
 #[inline]
 fn dir_pair_idx(src_id: i64, tgt_id: i64) -> Option<usize> {
-    if src_id < 0 || tgt_id < 0
+    if src_id < 0
+        || tgt_id < 0
         || (src_id as usize) >= DIR_N_PLANETS
         || (tgt_id as usize) >= DIR_N_PLANETS
     {
@@ -170,7 +195,11 @@ fn cached_time_to_hit(
     turns_in_future: i64,
 ) -> Option<i64> {
     let prof = plan_profile_enabled();
-    let t0 = if prof { Some(std::time::Instant::now()) } else { None };
+    let t0 = if prof {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     debug_assert_eq!(turns_in_future, 0);
     let r = if let Some(idx) = fast_idx(src.id, tgt.id, ships) {
         FAST_TIME.with(|tc| {
@@ -178,10 +207,18 @@ fn cached_time_to_hit(
             let cur_v = tcell.1;
             let slot = tcell.2[idx];
             if slot.ver == cur_v {
-                if prof { PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed); }
-                return if slot.time == 0 { None } else { Some(slot.time as i64) };
+                if prof {
+                    PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                }
+                return if slot.time == 0 {
+                    None
+                } else {
+                    Some(slot.time as i64)
+                };
             }
-            if prof { PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed); }
+            if prof {
+                PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
             let v = pathing::dir_to_hit(src, tgt, ships, state, turns_in_future);
             let t_byte = match v.as_ref() {
                 Some(p) => {
@@ -191,7 +228,10 @@ fn cached_time_to_hit(
                 }
                 None => 0,
             };
-            tcell.2[idx] = TimeSlot { ver: cur_v, time: t_byte };
+            tcell.2[idx] = TimeSlot {
+                ver: cur_v,
+                time: t_byte,
+            };
             v.map(|r| r.time)
         })
     } else {
@@ -211,8 +251,15 @@ fn cached_dir_to_hit(
     turns_in_future: i64,
 ) -> Option<PathResult> {
     let prof = plan_profile_enabled();
-    let t0 = if prof { Some(std::time::Instant::now()) } else { None };
-    debug_assert_eq!(turns_in_future, 0, "cached_dir_to_hit called with non-zero turns_in_future; cache key doesn't include it");
+    let t0 = if prof {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    debug_assert_eq!(
+        turns_in_future, 0,
+        "cached_dir_to_hit called with non-zero turns_in_future; cache key doesn't include it"
+    );
     let r = if let Some(idx) = fast_idx(src.id, tgt.id, ships) {
         // Tier 1 fast path: split arrays (TIME hot, ANGLE cold).
         FAST_TIME.with(|tc| {
@@ -220,25 +267,39 @@ fn cached_dir_to_hit(
             let cur_v = tcell.1;
             let slot = tcell.2[idx];
             if slot.ver == cur_v {
-                if prof { PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed); }
+                if prof {
+                    PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                }
                 return if slot.time == 0 {
                     None
                 } else {
                     let angle = FAST_ANGLE.with(|a| a.borrow()[idx]);
-                    Some(PathResult { angle, time: slot.time as i64 })
+                    Some(PathResult {
+                        angle,
+                        time: slot.time as i64,
+                    })
                 };
             }
-            if prof { PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed); }
+            if prof {
+                PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
             let v = pathing::dir_to_hit(src, tgt, ships, state, turns_in_future);
             let t_byte = match v.as_ref() {
                 Some(p) => {
-                    debug_assert!(p.time >= 1 && p.time <= 255, "time {} out of u8 range", p.time);
+                    debug_assert!(
+                        p.time >= 1 && p.time <= 255,
+                        "time {} out of u8 range",
+                        p.time
+                    );
                     FAST_ANGLE.with(|a| a.borrow_mut()[idx] = p.angle);
                     p.time as u8
                 }
                 None => 0,
             };
-            tcell.2[idx] = TimeSlot { ver: cur_v, time: t_byte };
+            tcell.2[idx] = TimeSlot {
+                ver: cur_v,
+                time: t_byte,
+            };
             v
         })
     } else if let Some(idx) = dir_pair_idx(src.id, tgt.id) {
@@ -247,10 +308,14 @@ fn cached_dir_to_hit(
             let mut arr = c.borrow_mut();
             let inner = &mut arr[idx];
             if let Some(v) = inner.get(&ships) {
-                if prof { PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed); }
+                if prof {
+                    PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                }
                 return *v;
             }
-            if prof { PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed); }
+            if prof {
+                PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
             let v = pathing::dir_to_hit(src, tgt, ships, state, turns_in_future);
             let was_empty = inner.is_empty();
             inner.insert(ships, v);
@@ -267,10 +332,14 @@ fn cached_dir_to_hit(
         DIR_CACHE.with(|c| {
             let mut cache = c.borrow_mut();
             if let Some(v) = cache.get(&key) {
-                if prof { PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed); }
+                if prof {
+                    PLAN_DIR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                }
                 return *v;
             }
-            if prof { PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed); }
+            if prof {
+                PLAN_DIR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
             let v = pathing::dir_to_hit(src, tgt, ships, state, turns_in_future);
             cache.insert(key, v);
             v
@@ -350,7 +419,10 @@ fn clear_dir_cache_if_step_changed(step: i64) {
     }
 }
 
-pub fn cached_predict_fleet_collision(fleet: &crate::Fleet, state: &GameState) -> Option<(i64, i64)> {
+pub fn cached_predict_fleet_collision(
+    fleet: &crate::Fleet,
+    state: &GameState,
+) -> Option<(i64, i64)> {
     pathing::predict_fleet_collision(fleet, state)
 }
 
@@ -539,7 +611,11 @@ fn plan_for_time(
     }
     let empty = Vec::new();
     let arr = arrivals.get(&target.id).unwrap_or(&empty);
-    let _t_sim = if plan_profile_enabled() { Some(std::time::Instant::now()) } else { None };
+    let _t_sim = if plan_profile_enabled() {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     let (owner_t, ships_t) = simulate_at(target, t, arr, state);
     if let Some(t0) = _t_sim {
         PLAN_SIMULATE_AT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -661,7 +737,12 @@ fn plan_for_time(
             Some(r) => (r.angle, send),
             None => (f.angle_at_min, f.min_s),
         };
-        dispatches.push(PlanEntry { from_id: f.from_id, from_idx: f.from_idx, ships: ships_to_send, angle });
+        dispatches.push(PlanEntry {
+            from_id: f.from_id,
+            from_idx: f.from_idx,
+            ships: ships_to_send,
+            angle,
+        });
     }
     Some((dispatches, total))
 }
@@ -690,8 +771,7 @@ pub fn plan(state: &GameState, player: i32, no_coop: bool) -> Vec<Action> {
 /// iteration — after that the single target is in `used_target` and the
 /// outer loop exits).
 ///
-/// This is the proper "ow policy for one target" used by the focused
-/// candidate generator (`src/focused_plan.rs`).
+/// This is the proper "ow policy for one target" helper.
 pub fn plan_for_target(
     state: &GameState,
     player: i32,
@@ -728,7 +808,10 @@ impl<'a> PlanContext<'a> {
         let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
         for fleet in &state.fleets {
             if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {
-                arrivals.entry(pid).or_default().push((dt, fleet.owner, fleet.ships));
+                arrivals
+                    .entry(pid)
+                    .or_default()
+                    .push((dt, fleet.owner, fleet.ships));
             }
         }
         for v in arrivals.values_mut() {
@@ -737,32 +820,53 @@ impl<'a> PlanContext<'a> {
 
         let mut safe: HashMap<i64, i64> = HashMap::new();
         for p in &state.planets {
-            if p.owner != me { continue; }
+            if p.owner != me {
+                continue;
+            }
             let empty = Vec::new();
             let arr = arrivals.get(&p.id).unwrap_or(&empty);
             let mut lo = 0;
             let mut hi = p.ships;
             while lo < hi {
                 let mid = (lo + hi + 1) / 2;
-                if simulates_safe(p, mid, arr, me, state) { lo = mid; } else { hi = mid - 1; }
+                if simulates_safe(p, mid, arr, me, state) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
             }
             safe.insert(p.id, lo);
         }
 
-        let my_planets: Vec<Planet> = state.planets.iter().filter(|p| p.owner == me).cloned().collect();
-        let enemy_planets: Vec<Planet> = state.planets.iter()
-            .filter(|p| p.owner != me && p.owner != -1).cloned().collect();
+        let my_planets: Vec<Planet> = state
+            .planets
+            .iter()
+            .filter(|p| p.owner == me)
+            .cloned()
+            .collect();
+        let enemy_planets: Vec<Planet> = state
+            .planets
+            .iter()
+            .filter(|p| p.owner != me && p.owner != -1)
+            .cloned()
+            .collect();
 
         let mut enemy_safe: HashMap<i64, i64> = HashMap::new();
         for p in &state.planets {
-            if p.owner == me || p.owner == -1 { continue; }
+            if p.owner == me || p.owner == -1 {
+                continue;
+            }
             let empty = Vec::new();
             let arr = arrivals.get(&p.id).unwrap_or(&empty);
             let mut lo = 0;
             let mut hi = p.ships;
             while lo < hi {
                 let mid = (lo + hi + 1) / 2;
-                if simulates_safe(p, mid, arr, p.owner, state) { lo = mid; } else { hi = mid - 1; }
+                if simulates_safe(p, mid, arr, p.owner, state) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
             }
             enemy_safe.insert(p.id, lo);
         }
@@ -770,37 +874,65 @@ impl<'a> PlanContext<'a> {
         let mut race_ok: HashMap<i64, bool> = HashMap::new();
         let mut scratch: Vec<(i64, usize)> = Vec::with_capacity(16);
         for target in &state.planets {
-            if target.owner == me { continue; }
+            if target.owner == me {
+                continue;
+            }
             scratch.clear();
             for (i, mp) in my_planets.iter().enumerate() {
-                if mp.ships <= 0 { continue; }
+                if mp.ships <= 0 {
+                    continue;
+                }
                 scratch.push((time_lower_bound(mp, target, mp.ships, state.max_speed), i));
             }
             scratch.sort_unstable_by_key(|&(lb, _)| lb);
             let mut my_t = i64::MAX;
             for &(lb, i) in &scratch {
-                if lb >= my_t { break; }
-                if let Some(tt) = cached_time_to_hit(&my_planets[i], target, my_planets[i].ships, state, 0) {
-                    if tt < my_t { my_t = tt; }
+                if lb >= my_t {
+                    break;
+                }
+                if let Some(tt) =
+                    cached_time_to_hit(&my_planets[i], target, my_planets[i].ships, state, 0)
+                {
+                    if tt < my_t {
+                        my_t = tt;
+                    }
                 }
             }
             scratch.clear();
             for (i, ep) in enemy_planets.iter().enumerate() {
-                if ep.ships <= 0 || ep.id == target.id { continue; }
+                if ep.ships <= 0 || ep.id == target.id {
+                    continue;
+                }
                 scratch.push((time_lower_bound(ep, target, ep.ships, state.max_speed), i));
             }
             scratch.sort_unstable_by_key(|&(lb, _)| lb);
             let mut their_t = i64::MAX;
             for &(lb, i) in &scratch {
-                if lb >= their_t { break; }
-                if let Some(tt) = cached_time_to_hit(&enemy_planets[i], target, enemy_planets[i].ships, state, 0) {
-                    if tt < their_t { their_t = tt; }
+                if lb >= their_t {
+                    break;
+                }
+                if let Some(tt) =
+                    cached_time_to_hit(&enemy_planets[i], target, enemy_planets[i].ships, state, 0)
+                {
+                    if tt < their_t {
+                        their_t = tt;
+                    }
                 }
             }
             race_ok.insert(target.id, my_t <= their_t);
         }
 
-        PlanContext { state, me, no_coop, arrivals, safe, enemy_safe, my_planets, enemy_planets, race_ok }
+        PlanContext {
+            state,
+            me,
+            no_coop,
+            arrivals,
+            safe,
+            enemy_safe,
+            my_planets,
+            enemy_planets,
+            race_ok,
+        }
     }
 }
 
@@ -813,21 +945,36 @@ pub fn plan_target_with_ctx(ctx: &PlanContext, target_id: i64) -> Vec<Action> {
     let state = ctx.state;
     let no_coop = ctx.no_coop;
     let mut arrivals = ctx.arrivals.clone();
-    let mut available: Vec<i64> = ctx.my_planets.iter().map(|p| ctx.safe.get(&p.id).copied().unwrap_or(0)).collect();
+    let mut available: Vec<i64> = ctx
+        .my_planets
+        .iter()
+        .map(|p| ctx.safe.get(&p.id).copied().unwrap_or(0))
+        .collect();
     let mut used_target: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut moves: Vec<(i64, f64, i64, i64)> = Vec::new();
     let mut guard = 0usize;
     loop {
         guard += 1;
-        if guard > 200 { break; }
+        if guard > 200 {
+            break;
+        }
         let mut best: Option<(f64, i64, i64, Vec<PlanEntry>)> = None;
         // Only one target body runs (filtered by only_target).
-        let target = match state.planets.iter().find(|p| p.id == target_id) { Some(t) => t, None => break };
-        if no_coop && used_target.contains(&target.id) { break; }
+        let target = match state.planets.iter().find(|p| p.id == target_id) {
+            Some(t) => t,
+            None => break,
+        };
+        if no_coop && used_target.contains(&target.id) {
+            break;
+        }
         let empty = Vec::new();
         let arr = arrivals.get(&target.id).unwrap_or(&empty);
-        if stays_mine_throughout(target, arr, me, state) { break; }
-        if target.owner != me && !*ctx.race_ok.get(&target.id).unwrap_or(&false) { break; }
+        if stays_mine_throughout(target, arr, me, state) {
+            break;
+        }
+        if target.owner != me && !*ctx.race_ok.get(&target.id).unwrap_or(&false) {
+            break;
+        }
         let hi = pathing::MAX_TIME.min(60);
         let mut found: Option<(i64, Vec<PlanEntry>, i64)> = None;
         let mut t = 1i64;
@@ -845,7 +992,9 @@ pub fn plan_target_with_ctx(ctx: &PlanContext, target_id: i64) -> Vec<Action> {
                 let remaining = state.comet_remaining(target);
                 let productions_after = (remaining - t_best).max(0);
                 let ships_lost = (total_best - 1).max(0);
-                if ships_lost >= productions_after * target.production { break; }
+                if ships_lost >= productions_after * target.production {
+                    break;
+                }
             }
             let prod = target.production.max(1) as f64;
             let score = prod / (total_best.max(1) as f64);
@@ -853,10 +1002,14 @@ pub fn plan_target_with_ctx(ctx: &PlanContext, target_id: i64) -> Vec<Action> {
             best = Some((s, target.id, t_best, plan_best));
         }
         if let Some((_, target_id, t_best, dispatches)) = best {
-            if dispatches.is_empty() { break; }
+            if dispatches.is_empty() {
+                break;
+            }
             used_target.insert(target_id);
             let entry = arrivals.entry(target_id).or_default();
-            for d in &dispatches { entry.push((t_best, me, d.ships)); }
+            for d in &dispatches {
+                entry.push((t_best, me, d.ships));
+            }
             entry.sort_by_key(|x| x.0);
             let mut to_emit: Vec<PlanEntry> = dispatches.clone();
             if no_coop && to_emit.len() > 1 {
@@ -867,12 +1020,19 @@ pub fn plan_target_with_ctx(ctx: &PlanContext, target_id: i64) -> Vec<Action> {
                 moves.push((d.from_id, d.angle, d.ships, target_id));
                 if d.from_idx < available.len() {
                     available[d.from_idx] -= d.ships;
-                    if available[d.from_idx] < 0 { available[d.from_idx] = 0; }
+                    if available[d.from_idx] < 0 {
+                        available[d.from_idx] = 0;
+                    }
                 }
             }
-        } else { break; }
+        } else {
+            break;
+        }
     }
-    moves.into_iter().map(|(f, a, s, _t)| (f, a, s, me)).collect()
+    moves
+        .into_iter()
+        .map(|(f, a, s, _t)| (f, a, s, me))
+        .collect()
 }
 
 /// Build a single-action "approach" plan for an unaffordable target.
@@ -884,18 +1044,24 @@ pub fn plan_target_with_ctx(ctx: &PlanContext, target_id: i64) -> Vec<Action> {
 pub fn approach_plan_for_target(ctx: &PlanContext, target_id: i64) -> Option<Vec<Action>> {
     let state = ctx.state;
     let target = state.planets.iter().find(|p| p.id == target_id)?;
-    if target.owner == ctx.me { return None; }
+    if target.owner == ctx.me {
+        return None;
+    }
     let me = ctx.me;
 
     let mut best: Option<(i64, i64, f64, i64)> = None; // (time, source_id, angle, send)
     for src in &ctx.my_planets {
         let safe = ctx.safe.get(&src.id).copied().unwrap_or(0);
-        if safe <= 0 { continue; }
+        if safe <= 0 {
+            continue;
+        }
         // Send the smaller of (safe-drain, target garrison) — sending more
         // than target.ships at one source isn't useful since one source
         // can't single-handedly capture a target it can't afford anyway.
         let send = safe.min(target.ships.max(1));
-        if send <= 0 { continue; }
+        if send <= 0 {
+            continue;
+        }
         if let Some(r) = cached_dir_to_hit(src, target, send, state, 0) {
             if best.as_ref().map(|b| r.time < b.0).unwrap_or(true) {
                 best = Some((r.time, src.id, r.angle, send));
@@ -929,7 +1095,10 @@ fn plan_inner(
     let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
     for fleet in &state.fleets {
         if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {
-            arrivals.entry(pid).or_default().push((dt, fleet.owner, fleet.ships));
+            arrivals
+                .entry(pid)
+                .or_default()
+                .push((dt, fleet.owner, fleet.ships));
         }
     }
     for v in arrivals.values_mut() {
@@ -960,7 +1129,12 @@ fn plan_inner(
         safe.insert(p.id, lo);
     }
 
-    let my_planets: Vec<Planet> = state.planets.iter().filter(|p| p.owner == me).cloned().collect();
+    let my_planets: Vec<Planet> = state
+        .planets
+        .iter()
+        .filter(|p| p.owner == me)
+        .cloned()
+        .collect();
     let enemy_planets: Vec<Planet> = state
         .planets
         .iter()
@@ -1006,29 +1180,45 @@ fn plan_inner(
         // my_t with early-exit.
         scratch.clear();
         for (i, mp) in my_planets.iter().enumerate() {
-            if mp.ships <= 0 { continue; }
+            if mp.ships <= 0 {
+                continue;
+            }
             scratch.push((time_lower_bound(mp, target, mp.ships, state.max_speed), i));
         }
         scratch.sort_unstable_by_key(|&(lb, _)| lb);
         let mut my_t = i64::MAX;
         for &(lb, i) in &scratch {
-            if lb >= my_t { break; }
-            if let Some(tt) = cached_time_to_hit(&my_planets[i], target, my_planets[i].ships, state, 0) {
-                if tt < my_t { my_t = tt; }
+            if lb >= my_t {
+                break;
+            }
+            if let Some(tt) =
+                cached_time_to_hit(&my_planets[i], target, my_planets[i].ships, state, 0)
+            {
+                if tt < my_t {
+                    my_t = tt;
+                }
             }
         }
         // their_t with early-exit.
         scratch.clear();
         for (i, ep) in enemy_planets.iter().enumerate() {
-            if ep.ships <= 0 || ep.id == target.id { continue; }
+            if ep.ships <= 0 || ep.id == target.id {
+                continue;
+            }
             scratch.push((time_lower_bound(ep, target, ep.ships, state.max_speed), i));
         }
         scratch.sort_unstable_by_key(|&(lb, _)| lb);
         let mut their_t = i64::MAX;
         for &(lb, i) in &scratch {
-            if lb >= their_t { break; }
-            if let Some(tt) = cached_time_to_hit(&enemy_planets[i], target, enemy_planets[i].ships, state, 0) {
-                if tt < their_t { their_t = tt; }
+            if lb >= their_t {
+                break;
+            }
+            if let Some(tt) =
+                cached_time_to_hit(&enemy_planets[i], target, enemy_planets[i].ships, state, 0)
+            {
+                if tt < their_t {
+                    their_t = tt;
+                }
             }
         }
         race_ok.insert(target.id, my_t <= their_t);
@@ -1170,7 +1360,10 @@ fn plan_inner(
         }
     }
 
-    let result: Vec<Action> = moves.into_iter().map(|(f, a, s, _t)| (f, a, s, me)).collect();
+    let result: Vec<Action> = moves
+        .into_iter()
+        .map(|(f, a, s, _t)| (f, a, s, me))
+        .collect();
     if let Some(t0) = _prof_start {
         PLAN_TOTAL_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }

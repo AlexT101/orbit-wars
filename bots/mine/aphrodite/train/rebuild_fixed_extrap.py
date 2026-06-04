@@ -25,7 +25,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import kaggle_rebuild_v2 as kr  # noqa: E402
 
-# 46-d summary_v2 feature names — same layout used in quick_linear_top10.py.
+# 46-d summary_v2 feature names.
 PLAYER_CUR = ["ships_on_planets", "ships_flying", "n_static", "n_orbit", "n_comet",
               "prod_static", "prod_orbit", "prod_comet",
               "n_neutrals_closer", "n_enemies_closer"]

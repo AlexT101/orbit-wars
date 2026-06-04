@@ -199,7 +199,12 @@ pub fn player_score(state: &GameState, player: i32) -> i64 {
         .filter(|p| p.owner == player)
         .map(|p| p.ships)
         .sum();
-    let f: i64 = state.fleets.iter().filter(|f| f.owner == player).map(|f| f.ships).sum();
+    let f: i64 = state
+        .fleets
+        .iter()
+        .filter(|f| f.owner == player)
+        .map(|f| f.ships)
+        .sum();
     p + f
 }
 

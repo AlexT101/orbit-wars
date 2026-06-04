@@ -1,10 +1,9 @@
 """Run N games of aphrodite (current) vs a baseline bot, with optional env
-overrides for the MCTS variant under test. Reports win/draw/loss + per-game
-seed so failures are reproducible.
+overrides for the bot under test. Reports win/draw/loss + per-game seed so
+failures are reproducible.
 
 Usage:
-  python mcts_match.py --me aphrodite --baseline aphrodite_base --n 10 \\
-      --env OW_K_ROOT=3 OW_ROLLOUT_DEPTH=12 OW_PUCT_C=0.5
+  python mcts_match.py --me aphrodite --baseline aphrodite_base --n 10
 """
 
 from __future__ import annotations

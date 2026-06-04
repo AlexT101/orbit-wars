@@ -1,9 +1,7 @@
 """Derive scalar summary features from the raw 2728-d feature vector.
 
-These are spatially-blind hand-coded features intended as a regression
-floor: if a linear model on these beats the MLP on raw features, the
-MLP isn't learning anything spatially-useful (it's just doing nonlinear
-regression on similar aggregates the hand-coded ones).
+These are spatially-blind hand-coded features retained for parity checks and
+historical comparison against SummaryV2 extraction.
 """
 
 from __future__ import annotations

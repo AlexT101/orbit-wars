@@ -46,7 +46,6 @@ RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM + 4 * SUMMARY_V2_DIM
 def spawn_bot(dump_path: Path) -> subprocess.Popen:
     env = dict(os.environ)
     env.pop("APHRODITE_VALUE_NET_PATH", None)
-    env["OW_VALUE_NET"] = "0"
     env["APHRODITE_BUDGET_MS"] = "1"  # near-zero search; we only want features
     env["APHRODITE_DUMP_FEATURES_PATH"] = str(dump_path.resolve())
     return subprocess.Popen(

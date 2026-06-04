@@ -4,8 +4,8 @@
 //! array per line on stdout. The Python wrapper spawns the binary once and
 //! pipes observations each turn.
 
-use aphrodite::value_net::{self, INPUT_DIM, PER_BLOCK, DIST_BLOCK};
-use aphrodite::{beam, duct, mcts, parse_state, profiling};
+use aphrodite::value_net::{self, DIST_BLOCK, INPUT_DIM, PER_BLOCK};
+use aphrodite::{duct, parse_state, profiling};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
@@ -23,7 +23,10 @@ fn main() -> io::Result<()> {
         .ok()
         .and_then(|p| File::create(p).ok());
     if dump.is_some() {
-        eprintln!("[aphrodite] dumping features (input_dim={}) to APHRODITE_DUMP_FEATURES_PATH", INPUT_DIM);
+        eprintln!(
+            "[aphrodite] dumping features (input_dim={}) to APHRODITE_DUMP_FEATURES_PATH",
+            INPUT_DIM
+        );
     }
     let mut err = io::stderr();
     let mut buf = String::new();
@@ -61,9 +64,14 @@ fn main() -> io::Result<()> {
             let bytes_dist = DIST_BLOCK * 4;
             let bytes_v2 = v2.len() * 4;
             unsafe {
-                let cur_bytes = std::slice::from_raw_parts(feats.current.as_ptr() as *const u8, bytes_per_block);
-                let ext_bytes = std::slice::from_raw_parts(feats.extrap.as_ptr() as *const u8, bytes_per_block);
-                let dst_bytes = std::slice::from_raw_parts(feats.dist.as_ptr() as *const u8, bytes_dist);
+                let cur_bytes = std::slice::from_raw_parts(
+                    feats.current.as_ptr() as *const u8,
+                    bytes_per_block,
+                );
+                let ext_bytes =
+                    std::slice::from_raw_parts(feats.extrap.as_ptr() as *const u8, bytes_per_block);
+                let dst_bytes =
+                    std::slice::from_raw_parts(feats.dist.as_ptr() as *const u8, bytes_dist);
                 let v2_bytes = std::slice::from_raw_parts(v2.as_ptr() as *const u8, bytes_v2);
                 let _ = f.write_all(cur_bytes);
                 let _ = f.write_all(ext_bytes);
@@ -72,18 +80,14 @@ fn main() -> io::Result<()> {
             }
         }
         let prof_enabled = std::env::var("OW_PROFILE").is_ok();
-        if prof_enabled { profiling::reset(); }
-        aphrodite::focused_plan::reset_cache();
+        if prof_enabled {
+            profiling::reset();
+        }
         let __turn_t0 = std::time::Instant::now();
-        let actions = match std::env::var("OW_PLANNER").ok().as_deref() {
-            Some("mcts") => mcts::best_move(&state, state.player, budget_ms),
-            Some("beam") => beam::best_move(&state, state.player, budget_ms),
-            _ => duct::best_move(&state, state.player, budget_ms),
-        };
+        let actions = duct::best_move(&state, state.player, budget_ms);
         // Final no-loss reroute pass on the chosen plan — runs after the planner
-        // has fully committed, independent of MCTS/duct/beam (apollo's
-        // `redirect_moves` tail, ported via the bridge since `Action` tuples
-        // drop the target the pass needs).
+        // has fully committed (apollo's `redirect_moves` tail, ported via the
+        // bridge since `Action` tuples drop the target the pass needs).
         let actions = aphrodite::apollo_bridge::redirect_actions(&state, state.player, actions);
         if prof_enabled {
             profiling::TURN_TOTAL_NS.fetch_add(
@@ -100,14 +104,31 @@ fn main() -> io::Result<()> {
         if debug {
             let me = state.player;
             let my_count = state.planets.iter().filter(|p| p.owner == me).count();
-            let my_ships: i64 = state.planets.iter().filter(|p| p.owner == me).map(|p| p.ships).sum();
+            let my_ships: i64 = state
+                .planets
+                .iter()
+                .filter(|p| p.owner == me)
+                .map(|p| p.ships)
+                .sum();
             let neutral = state.planets.iter().filter(|p| p.owner == -1).count();
-            let enemy = state.planets.iter().filter(|p| p.owner != me && p.owner != -1).count();
+            let enemy = state
+                .planets
+                .iter()
+                .filter(|p| p.owner != me && p.owner != -1)
+                .count();
             writeln!(
                 err,
                 "[aphrodite p{}] step={} planets={}(m)/{}(n)/{}(e) ships={} fleets={} moves={}",
-                me, state.step, my_count, neutral, enemy, my_ships, state.fleets.len(), mv.len()
-            ).ok();
+                me,
+                state.step,
+                my_count,
+                neutral,
+                enemy,
+                my_ships,
+                state.fleets.len(),
+                mv.len()
+            )
+            .ok();
         }
         let arr: Vec<Value> = mv
             .into_iter()

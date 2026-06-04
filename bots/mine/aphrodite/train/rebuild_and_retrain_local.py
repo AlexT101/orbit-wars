@@ -91,7 +91,7 @@ def train_ridge(X, y, val_mask, label):
 
 
 def train_xgb(X, y, val_mask, label, out_json):
-    # Match xgb_tune.py / train_gbm.py shape: binary:logistic on (y > 0)
+    # Match the fixed-XGB training shape: binary:logistic on (y > 0)
     yb = (y > 0).astype(np.float32)
     dtr = xgb.DMatrix(X[~val_mask], label=yb[~val_mask])
     dva = xgb.DMatrix(X[val_mask], label=yb[val_mask])

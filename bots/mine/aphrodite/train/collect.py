@@ -93,18 +93,15 @@ class AphroditeDaemon:
     Python process.
     """
 
-    def __init__(self, dump_path: Path | None, budget_ms: int, weights_path: Path | None, value_net_off: bool):
+    def __init__(self, dump_path: Path | None, budget_ms: int, weights_path: Path | None):
         env = dict(os.environ)
         env.pop("APHRODITE_DUMP_FEATURES_PATH", None)
         env.pop("APHRODITE_VALUE_NET_PATH", None)
-        env.pop("OW_VALUE_NET", None)
         if dump_path is not None:
             env["APHRODITE_DUMP_FEATURES_PATH"] = str(Path(dump_path).resolve())
         env["APHRODITE_BUDGET_MS"] = str(budget_ms)
         if weights_path is not None:
             env["APHRODITE_VALUE_NET_PATH"] = str(Path(weights_path).resolve())
-        if value_net_off:
-            env["OW_VALUE_NET"] = "0"
         self.proc = subprocess.Popen(
             [str(BIN_PATH)],
             stdin=subprocess.PIPE,
@@ -235,7 +232,6 @@ def run_match(bot0: str, bot1: str, seed: int, scratch: Path, budget_ms: int, we
                 dump_path=dumps[i],
                 budget_ms=budget_ms,
                 weights_path=weights_path,
-                value_net_off=(weights_path is None),
             )
             agent_funcs[i] = daemon
             closers.append(daemon.close)
