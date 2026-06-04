@@ -59,9 +59,9 @@ const CONFIG_2P: Config = Config {
 };
 
 const CONFIG_4P: Config = Config {
-    horizon: 20,
-    max_distance: 32.0,
-    max_subset_sources: 12,
+    horizon: 30,
+    max_distance: 38.0,
+    max_subset_sources: 16,
 };
 
 impl Config {

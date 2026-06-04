@@ -98,10 +98,17 @@ impl GameState {
         if planet.is_comet {
             let (g, i) = self.comet_group_for(planet.id)?;
             let idx = g.path_index + dt;
-            if idx < 0 || idx as usize >= g.paths[i].len() {
+            if idx < 0 {
                 return None;
             }
-            return Some(g.paths[i][idx as usize]);
+            let path = &g.paths[i];
+            if idx as usize == path.len() && !path.is_empty() {
+                return Some(path[path.len() - 1]);
+            }
+            if idx as usize > path.len() || path.is_empty() {
+                return None;
+            }
+            return Some(path[idx as usize]);
         }
         if planet.is_orbiting {
             let abs_step = (self.step + dt - 1).max(0);
@@ -115,7 +122,6 @@ impl GameState {
         }
     }
 }
-
 
 // ---- Parsing ----
 pub fn as_f64(v: &Value) -> f64 {

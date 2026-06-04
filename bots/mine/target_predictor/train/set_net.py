@@ -38,13 +38,17 @@ except ImportError as exc:  # pragma: no cover
 
 
 def load_npz(path: Path):
+    # Avoid .astype() copies for arrays already in the target dtype; large
+    # planet_feats (~9 GB at 786K rows × 50 × 58 × 4B) needlessly doubles RAM.
     z = np.load(path, allow_pickle=True)
+    def _as(arr, dtype):
+        return arr if arr.dtype == dtype else arr.astype(dtype)
     return dict(
-        planet_feats=z["planet_feats"].astype(np.float32),
-        globals=z["globals"].astype(np.float32),
-        mask=z["mask"].astype(np.bool_),
-        labels=z["labels"].astype(np.float32),
-        meta=z["meta"].astype(np.int64),
+        planet_feats=_as(z["planet_feats"], np.float32),
+        globals=_as(z["globals"], np.float32),
+        mask=_as(z["mask"], np.bool_),
+        labels=_as(z["labels"], np.float32),
+        meta=_as(z["meta"], np.int64),
         feat_names=list(z["feat_names"]) if "feat_names" in z.files else None,
         global_names=list(z["global_names"]) if "global_names" in z.files else None,
     )
@@ -62,11 +66,12 @@ def game_level_split(meta: np.ndarray, seed: int = 42, val_frac: float = 0.12):
 
 
 def fit_norm(planet_feats, globals_, train_mask, real_mask):
-    train_planets = planet_feats[train_mask]
-    train_real = real_mask[train_mask]
-    flat = train_planets[train_real]
+    # Avoid the 8 GB train_planets intermediate by combining masks directly.
+    combined = train_mask[:, None] & real_mask    # (N, N_max) bool
+    flat = planet_feats[combined]                  # (R_train_real, F)  ~110 MB
     p_mean = flat.mean(axis=0)
     p_std = flat.std(axis=0) + 1e-6
+    del flat
     g_mean = globals_[train_mask].mean(axis=0)
     g_std = globals_[train_mask].std(axis=0) + 1e-6
     return p_mean.astype(np.float32), p_std.astype(np.float32), \
@@ -74,9 +79,17 @@ def fit_norm(planet_feats, globals_, train_mask, real_mask):
 
 
 def apply_norm(planet_feats, globals_, p_mean, p_std, g_mean, g_std):
-    pf = (planet_feats - p_mean) / p_std
-    gl = (globals_ - g_mean) / g_std
-    return pf.astype(np.float32), gl.astype(np.float32)
+    # MUTATES inputs in place. Callers must drop their references to the
+    # originals if they don't want them normalized. Avoids 9 GB temporaries.
+    p_mean32 = p_mean.astype(np.float32, copy=False)
+    p_std32 = p_std.astype(np.float32, copy=False)
+    g_mean32 = g_mean.astype(np.float32, copy=False)
+    g_std32 = g_std.astype(np.float32, copy=False)
+    planet_feats -= p_mean32
+    planet_feats /= p_std32
+    globals_ -= g_mean32
+    globals_ /= g_std32
+    return planet_feats, globals_
 
 
 def opening_weight(step: np.ndarray, schedule: str) -> np.ndarray:
@@ -168,7 +181,9 @@ class PlanetTransformer(nn.Module):
             d_model=d_model, nhead=n_heads, dim_feedforward=ff, dropout=dropout,
             batch_first=True, activation="gelu",
         )
-        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
+        # enable_nested_tensor=False because the nested-tensor fast path uses
+        # _nested_tensor_from_mask_left_aligned which is not implemented on MPS.
+        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers, enable_nested_tensor=False)
         self.head = nn.Linear(d_model, 1)
 
     def forward(self, planet_feats, globals_, mask):
@@ -471,7 +486,10 @@ def main():
                     help="drop rows where max(my,enemy)/min(my,enemy) ship-counts exceeds this "
                          "(detects one-sided games). 2.0 is a reasonable starting point.")
     ap.add_argument("--use-offensive-labels", action="store_true",
-                    help="if the NPZ has `offensive_labels`, train against those instead of `labels`")
+                    help="(legacy) shortcut for --label-key offensive_labels")
+    ap.add_argument("--label-key", default="labels",
+                    help="which key in the NPZ to use as the per-planet binary label "
+                         "(e.g. labels, offensive_labels, support_target_labels, support_source_labels)")
     ap.add_argument("--opening-weight", choices=["off", "smooth", "linear", "step"], default="smooth")
     ap.add_argument("--select-by", default="recall8",
                     help="metric name to select the best checkpoint by (default recall8)")
@@ -496,14 +514,13 @@ def main():
         keep = (hi / lo) <= args.max_ship_ratio
         pf = pf[keep]; gl = gl[keep]; mk = mk[keep]; lb = lb[keep]; meta = meta[keep]
         print(f"  ship-ratio filter ≤{args.max_ship_ratio}: kept {keep.sum()}/{len(keep)} rows")
-    if args.use_offensive_labels:
+    label_key = "offensive_labels" if args.use_offensive_labels else args.label_key
+    if label_key != "labels":
         z = np.load(args.data, allow_pickle=True)
-        if "offensive_labels" not in z.files:
-            raise SystemExit("--use-offensive-labels requires `offensive_labels` in the NPZ; "
-                             "rebuild with the support-filter logic in build_dataset.py.")
-        olb = z["offensive_labels"].astype(np.float32)
-        # Re-apply same filtering masks. The cleanest way is to redo the row-keep logic with
-        # the source meta. For simplicity, re-load and re-filter from scratch.
+        if label_key not in z.files:
+            raise SystemExit(f"--label-key {label_key!r} not found in NPZ. "
+                             f"available keys: {list(z.files)}")
+        olb = z[label_key].astype(np.float32)
         full = load_npz(args.data)
         sel = np.ones(len(full["meta"]), dtype=bool)
         if args.max_step is not None:
@@ -513,7 +530,7 @@ def main():
             hi = np.maximum(my_s, en_s); lo = np.maximum(np.minimum(my_s, en_s), 1.0)
             sel &= (hi / lo) <= args.max_ship_ratio
         lb = olb[sel].astype(np.float32)
-        print(f"  using offensive_labels (support launches zeroed)  "
+        print(f"  label key: {label_key}  "
               f"positives: {int((lb * mk).sum())} ({(lb * mk).sum() / mk.sum() * 100:.2f}% of slots)")
     print(f"  shapes planet={pf.shape} globals={gl.shape}")
 
@@ -601,6 +618,8 @@ def main():
                 "selected_by": args.select_by,
                 "opening_weight_schedule": args.opening_weight,
                 "max_step": args.max_step,
+                "label_key": label_key,
+                "max_ship_ratio": args.max_ship_ratio,
             }, args.out)
             print(f"    saved (best {args.select_by}={sel:.4f}) -> {args.out}")
     return 0

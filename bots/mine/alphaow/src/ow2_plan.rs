@@ -155,12 +155,6 @@ thread_local! {
     // beyond DIR_N_PLANETS).
     static DIR_CACHE: RefCell<rustc_hash::FxHashMap<u64, Option<PathResult>>> =
         RefCell::new(rustc_hash::FxHashMap::default());
-    // Cache of in-flight fleet collision predictions, valid across plan()
-    // calls at the same state.step. Cleared whenever state.step changes.
-    // Key: fleet.id. Stamped with the step they were computed at so we can
-    // detect when the cache is stale and refresh.
-    static FLEET_CACHE: RefCell<(i64, rustc_hash::FxHashMap<i64, Option<(i64, i64)>>)> =
-        RefCell::new((-1, rustc_hash::FxHashMap::default()));
 }
 
 /// Time-only fast path for callers that only need arrival time (binary
@@ -357,19 +351,7 @@ fn clear_dir_cache_if_step_changed(step: i64) {
 }
 
 pub fn cached_predict_fleet_collision(fleet: &crate::Fleet, state: &GameState) -> Option<(i64, i64)> {
-    FLEET_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        if cache.0 != state.step {
-            cache.0 = state.step;
-            cache.1.clear();
-        }
-        if let Some(v) = cache.1.get(&fleet.id) {
-            return *v;
-        }
-        let v = pathing::predict_fleet_collision(fleet, state);
-        cache.1.insert(fleet.id, v);
-        v
-    })
+    pathing::predict_fleet_collision(fleet, state)
 }
 
 fn resolve_combat(
