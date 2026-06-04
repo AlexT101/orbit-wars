@@ -66,12 +66,36 @@ def test_t1_frame_matches_empty_step():
     assert jnp.allclose(features.tokens[1], stepped_features.tokens[0])
 
 
-def test_policy_mask_only_exposes_canonical_noop_until_exact_projector_exists():
+def test_policy_mask_exposes_noop_and_exact_send_actions():
     state = reset(9, num_players=2)
     features = jit_encode(state)
     assert int(jnp.sum(features.mask[..., 0])) == PLANET_SLOTS
-    assert int(jnp.sum(features.mask[..., 1])) == 0
-    assert int(jnp.sum(features.reachable_mask)) == 0
+    assert int(jnp.sum(features.mask[..., 1])) > 0
+    assert int(jnp.sum(features.reachable_mask[..., 1])) >= int(jnp.sum(features.mask[..., 1]))
+
+
+def test_exact_masked_actions_replay_to_predicted_turn():
+    state = reset(9, num_players=2)
+    features = jit_encode(state)
+    valid = jnp.argwhere(features.mask[..., 1] == 1)
+    assert valid.shape[0] > 0
+    noop, noop_mask = actions_to_jax([[], []])
+
+    for si, sj in valid[:3].tolist():
+        src_id = int(features.planet_ids[si])
+        dst_id = int(features.planet_ids[sj])
+        angle = float(features.angles[si, sj, 1])
+        count = int(features.ship_counts[si, sj, 1])
+        pred_turn = int(round(float(features.turns[0, si, sj, 1]) * 20.0))
+        launch, launch_mask = actions_to_jax([[[src_id, angle, count]], []])
+
+        cur = jit_step(state, launch, launch_mask)
+        for _ in range(1, pred_turn):
+            cur = jit_step(cur, noop, noop_mask)
+        ids = cur.planets[:, 0].astype(jnp.int32)
+        dst_match = ids == dst_id
+        assert int(cur.fleet_count) == 0
+        assert bool(jnp.any(dst_match))
 
 
 def test_step_and_encode_matches_separate_calls():
@@ -94,7 +118,7 @@ def test_vmap_encode_batch():
 
 
 def test_fast_trajectory_matches_slow_engine_scan_with_fleets_and_comets():
-    cfg = FeatureConfig()
+    cfg = FeatureConfig(include_future_comets=True)
     fast = jax.jit(_fast_trajectory, static_argnames=("config",))
     slow = jax.jit(_slow_trajectory, static_argnames=("config",))
     noop, noop_mask = actions_to_jax([[], []])

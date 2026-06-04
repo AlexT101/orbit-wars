@@ -30,6 +30,7 @@
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -650,28 +651,38 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
 
         const ROW: usize = PLANET_SLOTS * ACTIONS_DIM;
         const FRAME_ROWS: usize = PLANET_SLOTS * ROW;
-        for si in 0..PLANET_SLOTS {
-            let row_start = f * FRAME_ROWS + si * ROW;
-            let t_row = &mut turns[row_start..row_start + ROW];
-            let r_row = &mut reachable_mask[row_start..row_start + ROW];
-            if f == 0 {
-                let a_row = &mut angles[si * ROW..(si + 1) * ROW];
-                let m_row = &mut mask[si * ROW..(si + 1) * ROW];
-                let c_row = &mut ship_counts[si * ROW..(si + 1) * ROW];
-                compute_source_row(
-                    &traj,
-                    off,
-                    si,
-                    &slot_id,
-                    &by,
-                    player,
-                    t_row,
-                    r_row,
-                    Some((a_row, m_row, c_row)),
-                );
-            } else {
-                compute_source_row(&traj, off, si, &slot_id, &by, player, t_row, r_row, None);
-            }
+        let frame_start = f * FRAME_ROWS;
+        let t_frame = &mut turns[frame_start..frame_start + FRAME_ROWS];
+        let r_frame = &mut reachable_mask[frame_start..frame_start + FRAME_ROWS];
+        if f == 0 {
+            t_frame
+                .par_chunks_mut(ROW)
+                .zip(r_frame.par_chunks_mut(ROW))
+                .zip(angles.par_chunks_mut(ROW))
+                .zip(mask.par_chunks_mut(ROW))
+                .zip(ship_counts.par_chunks_mut(ROW))
+                .enumerate()
+                .for_each(|(si, ((((t_row, r_row), a_row), m_row), c_row))| {
+                    compute_source_row(
+                        &traj,
+                        off,
+                        si,
+                        &slot_id,
+                        &by,
+                        player,
+                        t_row,
+                        r_row,
+                        Some((a_row, m_row, c_row)),
+                    );
+                });
+        } else {
+            t_frame
+                .par_chunks_mut(ROW)
+                .zip(r_frame.par_chunks_mut(ROW))
+                .enumerate()
+                .for_each(|(si, (t_row, r_row))| {
+                    compute_source_row(&traj, off, si, &slot_id, &by, player, t_row, r_row, None);
+                });
         }
     }
 

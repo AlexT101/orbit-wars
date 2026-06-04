@@ -41,6 +41,9 @@ class FeatureConfig:
 
     resolve_cap: int = RESOLVE_CAP
     limits: Limits = Limits()
+    aim_horizon: int = 64
+    exact_actions: bool = True
+    include_future_comets: bool = False
 
 
 class Features(NamedTuple):
@@ -56,6 +59,15 @@ class Features(NamedTuple):
     ship_counts: jax.Array
     reachable_mask: jax.Array
     frame_planets: jax.Array
+
+
+class _GeometryCache(NamedTuple):
+    rows: jax.Array
+    active: jax.Array
+    starts: jax.Array
+    ends: jax.Array
+    checks: jax.Array
+    active_end: jax.Array
 
 
 def _log_norm(x: jax.Array, full: float) -> jax.Array:
@@ -187,10 +199,15 @@ def _future_comet_rows(state: State, offset: jax.Array) -> tuple[jax.Array, jax.
     return rows, initial, active_mask
 
 
-def _position_rows_at_offset(state: State, offset: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+def _position_rows_at_offset(
+    state: State,
+    offset: jax.Array,
+    include_future_comets: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     rows, active = _base_planet_positions(state, offset)
     initial = state.initial_planets
     future_rows, future_initial, future_active = _future_comet_rows(state, offset)
+    future_active = future_active & include_future_comets
     slots = state.planet_count + jnp.arange(4, dtype=jnp.int32)
     in_bounds = slots < rows.shape[0]
     rows = rows.at[slots].set(jnp.where(in_bounds[:, None], future_rows, rows[slots]))
@@ -201,9 +218,13 @@ def _position_rows_at_offset(state: State, offset: jax.Array) -> tuple[jax.Array
     return rows, initial, active
 
 
-def _step_end_rows_for_collision(state: State, step_start_offset: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
-    start, _, active = _position_rows_at_offset(state, step_start_offset)
-    end, _, _ = _position_rows_at_offset(state, step_start_offset + 1)
+def _step_end_rows_for_collision(
+    state: State,
+    step_start_offset: jax.Array,
+    include_future_comets: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    start, _, active = _position_rows_at_offset(state, step_start_offset, include_future_comets)
+    end, _, active_end = _position_rows_at_offset(state, step_start_offset + 1, include_future_comets)
     is_comet = _is_comet_id(state, start[:, 0])
 
     def comet_group(carry, gi):
@@ -224,7 +245,23 @@ def _step_end_rows_for_collision(state: State, step_start_offset: jax.Array) -> 
 
     end, _ = jax.lax.scan(comet_group, end, jnp.arange(5))
     check = active & ((~is_comet) | (start[:, 2] >= 0.0))
-    return start, end, check
+    return start, end, check, active_end
+
+
+def _geometry_cache(state: State, config: FeatureConfig) -> _GeometryCache:
+    total = config.resolve_cap + config.aim_horizon
+    rows, _, active = jax.vmap(
+        lambda off: _position_rows_at_offset(state, off, config.include_future_comets)
+    )(jnp.arange(total + 1, dtype=jnp.int32))
+    starts = rows[:-1]
+    ends = rows[1:]
+    active_start = active[:-1]
+    active_end = active[1:]
+    is_comet = jax.vmap(lambda ids: _is_comet_id(state, ids))(starts[:, :, 0])
+    expiring_comet = active_start & (~active_end) & is_comet
+    ends = ends.at[:, :, 2:4].set(jnp.where(expiring_comet[:, :, None], starts[:, :, 2:4], ends[:, :, 2:4]))
+    checks = active_start & ((~is_comet) | (starts[:, :, 2] >= 0.0))
+    return _GeometryCache(rows=rows, active=active, starts=starts, ends=ends, checks=checks, active_end=active_end)
 
 
 def _fleet_events(state: State, config: FeatureConfig) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -233,7 +270,9 @@ def _fleet_events(state: State, config: FeatureConfig) -> tuple[jax.Array, jax.A
 
     def compute_events(_: None):
         ks = jnp.arange(cap, dtype=jnp.int32)
-        starts, ends, checks = jax.vmap(lambda k: _step_end_rows_for_collision(state, k))(ks)
+        starts, ends, checks, _ = jax.vmap(
+            lambda k: _step_end_rows_for_collision(state, k, config.include_future_comets)
+        )(ks)
         turns = ks + 1
         f = state.fleets
         speed = _fleet_speed(f[:, 6], state.ship_speed)
@@ -298,7 +337,7 @@ def _owner_ship_timeline(
 
     def body(carry, turn):
         owner, ships = carry
-        rows, _, active = _position_rows_at_offset(state, turn + 1)
+        rows, _, active = _position_rows_at_offset(state, turn + 1, config.include_future_comets)
         spawned = active & (prod0 == 0.0) & (rows[:, 6] > 0.0) & (ships == 0.0) & _is_comet_id(state, rows[:, 0])
         owner = jnp.where(spawned, rows[:, 1], owner)
         ships = jnp.where(spawned, rows[:, 5], ships)
@@ -343,7 +382,7 @@ def _fast_trajectory(state: State, config: FeatureConfig) -> tuple[State, jax.Ar
     offsets = jnp.minimum(offsets, config.resolve_cap)
     owners, ships = _owner_ship_timeline(state, config, remove_turn, hit_idx)
 
-    rows, initials, actives = jax.vmap(lambda off: _position_rows_at_offset(state, off))(offsets)
+    rows, initials, actives = jax.vmap(lambda off: _position_rows_at_offset(state, off, config.include_future_comets))(offsets)
     frame_owners = owners[offsets]
     frame_ships = ships[offsets]
     rows = rows.at[:, :, 1].set(frame_owners)
@@ -502,6 +541,178 @@ def _direct_action_tensors(frames: State, slot_ids: jax.Array, presence: jax.Arr
     return turns, angles, policy_mask, ship_counts, reachable_mask
 
 
+def _project_pairs(
+    state: State,
+    cache: _GeometryCache,
+    frame_off: jax.Array,
+    src: jax.Array,
+    dst_ids: jax.Array,
+    speed: jax.Array,
+    theta: jax.Array,
+    config: FeatureConfig,
+) -> tuple[jax.Array, jax.Array]:
+    """Project all `(source, target)` candidate rays for one frame/tau."""
+    src_x = src[:, 2]
+    src_y = src[:, 3]
+    src_r = src[:, 4]
+    launch_x = src_x[:, None] + jnp.cos(theta) * (src_r[:, None] + 0.1)
+    launch_y = src_y[:, None] + jnp.sin(theta) * (src_r[:, None] + 0.1)
+    ux = jnp.cos(theta)
+    uy = jnp.sin(theta)
+
+    def body(carry, k):
+        alive, success, turn = carry
+        idx = frame_off + k
+        start = cache.starts[idx]
+        end = cache.ends[idx]
+        check = cache.checks[idx]
+        active_end = cache.active_end[idx]
+        dist0 = k.astype(jnp.float64) * speed[:, None]
+        old_fx = launch_x + ux * dist0
+        old_fy = launch_y + uy * dist0
+        new_fx = old_fx + ux * speed[:, None]
+        new_fy = old_fy + uy * speed[:, None]
+
+        hit = _swept_pair_hit(
+            old_fx[:, :, None],
+            old_fy[:, :, None],
+            new_fx[:, :, None],
+            new_fy[:, :, None],
+            start[None, None, :, 2],
+            start[None, None, :, 3],
+            end[None, None, :, 2],
+            end[None, None, :, 3],
+            start[None, None, :, 4],
+        )
+        hit = hit & check[None, None, :]
+        hit_any = jnp.any(hit, axis=2)
+        hit_idx = jnp.argmax(hit, axis=2).astype(jnp.int32)
+        hit_pid = start[hit_idx, 0].astype(jnp.int32)
+        hit_present_next = active_end[hit_idx]
+        hit_dst = hit_any & (hit_pid == dst_ids[None, :]) & hit_present_next
+
+        sun_dist = _point_to_segment_distance(CENTER, CENTER, old_fx, old_fy, new_fx, new_fy)
+        out = (new_fx < 0.0) | (new_fx > BOARD_SIZE) | (new_fy < 0.0) | (new_fy > BOARD_SIZE)
+        blocked = hit_any | out | (sun_dist < SUN_RADIUS)
+        success_now = alive & hit_dst
+        fail_now = alive & blocked & (~hit_dst)
+        turn = jnp.where(success_now, k + 1, turn)
+        success = success | success_now
+        alive = alive & (~success_now) & (~fail_now)
+        return (alive, success, turn), None
+
+    pair_shape = theta.shape
+    init = (
+        jnp.ones(pair_shape, dtype=jnp.bool_),
+        jnp.zeros(pair_shape, dtype=jnp.bool_),
+        jnp.zeros(pair_shape, dtype=jnp.int32),
+    )
+    (_, success, turn), _ = jax.lax.scan(body, init, jnp.arange(config.aim_horizon, dtype=jnp.int32))
+    return success, turn
+
+
+def _exact_frame_actions(
+    state: State,
+    cache: _GeometryCache,
+    frame: State,
+    frame_off: jax.Array,
+    slot_ids: jax.Array,
+    is_decision_frame: jax.Array,
+    config: FeatureConfig,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    src, src_present = _match_planets(frame, slot_ids)
+    dst, dst_present = _match_planets(frame, slot_ids)
+    dst_ids = slot_ids
+    si = jnp.arange(PLANET_SLOTS)[:, None]
+    sj = jnp.arange(PLANET_SLOTS)[None, :]
+    count = jnp.floor(src[:, 5])
+    speed = _fleet_speed(jnp.maximum(count, 1.0), frame.ship_speed)
+    valid_pair = (
+        src_present[:, None]
+        & dst_present[None, :]
+        & (si != sj)
+        & (count[:, None] >= 1.0)
+        & (speed[:, None] > 0.0)
+    )
+
+    def tau_body(carry, tau):
+        found, turns_send, angles_send = carry
+        idx = frame_off + tau
+        future_rows = cache.rows[idx]
+        future_active = cache.active[idx]
+        target_match = (future_rows[:, 0][None, :] == dst_ids[:, None].astype(jnp.float64)) & future_active[None, :]
+        target_present = jnp.any(target_match, axis=1)
+        target_idx = jnp.argmax(target_match, axis=1).astype(jnp.int32)
+        target = future_rows[target_idx]
+
+        dx = target[None, :, 2] - src[:, None, 2]
+        dy = target[None, :, 3] - src[:, None, 3]
+        dist = jnp.sqrt(dx * dx + dy * dy)
+        gate = (
+            valid_pair
+            & target_present[None, :]
+            & (~found)
+            & (speed[:, None] * tau.astype(jnp.float64) <= 150.0)
+            & (jnp.abs(speed[:, None] * tau.astype(jnp.float64) - dist) <= target[None, :, 4] + speed[:, None] + 1.0)
+        )
+        theta = jnp.arctan2(dy, dx).astype(jnp.float32).astype(jnp.float64)
+        success, hit_turn = _project_pairs(state, cache, frame_off, src, dst_ids, speed, theta, config)
+        accept = gate & success
+        found = found | accept
+        turns_send = jnp.where(accept, hit_turn, turns_send)
+        angles_send = jnp.where(accept, theta.astype(jnp.float32), angles_send)
+        return (found, turns_send, angles_send), None
+
+    init = (
+        jnp.zeros((PLANET_SLOTS, PLANET_SLOTS), dtype=jnp.bool_),
+        jnp.zeros((PLANET_SLOTS, PLANET_SLOTS), dtype=jnp.int32),
+        jnp.zeros((PLANET_SLOTS, PLANET_SLOTS), dtype=jnp.float32),
+    )
+    found, turns_send, angles_send = jax.lax.scan(
+        tau_body,
+        init,
+        jnp.arange(1, config.aim_horizon + 1, dtype=jnp.int32),
+    )[0]
+
+    turns = jnp.zeros((PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM), dtype=jnp.float32)
+    turns = turns.at[..., SEND_ALL_ACTION].set(_norm_turns(turns_send.astype(jnp.float64)).astype(jnp.float32))
+    angles = jnp.zeros((PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM), dtype=jnp.float32)
+    angles = angles.at[..., SEND_ALL_ACTION].set(angles_send)
+    reachable = jnp.zeros((PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM), dtype=jnp.uint8)
+    reachable = reachable.at[..., SEND_ALL_ACTION].set(found.astype(jnp.uint8))
+
+    owned = src[:, 1] == 0.0
+    mask = jnp.zeros((PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM), dtype=jnp.uint8)
+    mask = mask.at[:, 0, NOOP_ACTION].set(is_decision_frame.astype(jnp.uint8))
+    mask = mask.at[..., SEND_ALL_ACTION].set((is_decision_frame & found & owned[:, None]).astype(jnp.uint8))
+
+    ship_counts = jnp.zeros((PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM), dtype=jnp.int32)
+    ship_counts = ship_counts.at[..., SEND_ALL_ACTION].set(
+        jnp.where(is_decision_frame & valid_pair, count[:, None].astype(jnp.int32), 0)
+    )
+    return turns, angles, mask, ship_counts, reachable
+
+
+def _exact_action_tensors_with_config(
+    state: State,
+    frames: State,
+    offsets: jax.Array,
+    slot_ids: jax.Array,
+    config: FeatureConfig,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    cache = _geometry_cache(state, config)
+
+    def one_frame(frame, off, fidx):
+        return _exact_frame_actions(state, cache, frame, off, slot_ids, fidx == 0, config)
+
+    turns, frame_angles, frame_masks, frame_counts, reachable = jax.vmap(one_frame)(
+        frames,
+        offsets,
+        jnp.arange(NUM_FRAMES, dtype=jnp.int32),
+    )
+    return turns, frame_angles[0], frame_masks[0], frame_counts[0], reachable
+
+
 def encode(state: State, player: int = 0, config: FeatureConfig | None = None) -> Features:
     if player != 0:
         raise NotImplementedError("jax_model feature encoding currently supports player 0 only")
@@ -509,7 +720,16 @@ def encode(state: State, player: int = 0, config: FeatureConfig | None = None) -
     frames, offsets = _fast_trajectory(state, config)
     slot_ids = _slot_ids(state)
     tokens, presence, frame_planets = jax.vmap(_frame_tokens, in_axes=(0, None))(frames, slot_ids)
-    turns, angles, mask, ship_counts, reachable_mask = _direct_action_tensors(frames, slot_ids, presence)
+    if config.exact_actions:
+        turns, angles, mask, ship_counts, reachable_mask = _exact_action_tensors_with_config(
+            state,
+            frames,
+            offsets,
+            slot_ids,
+            config,
+        )
+    else:
+        turns, angles, mask, ship_counts, reachable_mask = _direct_action_tensors(frames, slot_ids, presence)
     return Features(
         planet_ids=slot_ids,
         num_planets=jnp.minimum(state.planet_count, PLANET_SLOTS),
