@@ -159,7 +159,7 @@ fn candidates_from_ledger(
     cache: &EntityCache,
 ) -> Vec<Vec<Action>> {
     let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
-    strategy::search_candidates(&world)
+    strategy::search_candidates_subsets(&world)
         .into_iter()
         .map(|orders| {
             orders
@@ -213,7 +213,7 @@ pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) ->
         cache,
     );
 
-    strategy::search_candidates(&world)
+    strategy::search_candidates_subsets(&world)
         .into_iter()
         .map(|orders| {
             orders

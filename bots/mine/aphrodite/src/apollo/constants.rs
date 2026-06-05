@@ -39,6 +39,10 @@ pub const A_S_LOOKAHEAD: i64 = 3; // Max turns past the natural latest arrival t
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 
+// `search_candidates_subsets`: number of top-ranked targets whose 2^k include/
+// exclude combinations seed the diversified candidate sweep.
+pub const SUBSET_TOP_TARGETS: usize = 3;
+
 // Fixed look-ahead used by the aimer when capping a shot's feasible arrival turn
 pub const AIM_HORIZON: i64 = 30;
 

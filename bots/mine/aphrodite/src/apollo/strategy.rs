@@ -24,6 +24,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::apollo::cache::{AimCacheVerdict, EntityCache, InvariantVerdict};
 use crate::apollo::constants::{
     A_S_LOOKAHEAD, MAX_COORD_DELAY, OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS,
+    SUBSET_TOP_TARGETS,
 };
 use crate::apollo::engine::{MoveAction, Planet};
 use crate::apollo::helpers::{
@@ -508,6 +509,7 @@ struct PlannedOrder {
 
 /// A winning commitment for a target. Built by `evaluate_frontline_strategy`
 /// from one (subset, arrival-schedule) combination.
+#[derive(Clone)]
 struct FrontlineWin {
     orders: Vec<PlannedOrder>,
     /// Timeline-delta score of this target commitment relative to baseline.
@@ -1178,59 +1180,53 @@ fn select_best_uncached(
     best.map(|(_, _, _, tid, orders)| (tid, orders))
 }
 
-/// One full pipeline run under a fixed target-selection strategy. Returns
-/// the emitted moves and the resulting PlanState (used by `rollout_score`).
-fn run_strategy(
+/// The greedy commit loop shared by [`run_strategy`] (all targets) and
+/// [`search_candidates_subsets`] (a fixed top-k target subset). Each iteration
+/// selects the best `candidate_ids` target under `strategy` against the evolving
+/// plan, commits its winning orders (emitting only launch-this-turn fleets as
+/// `MoveAction`s, the rest as reservations), and repeats until no candidate
+/// yields a positive-score capture. Returns the emitted moves (no
+/// reinforcements — callers append those) and the resulting `PlanState`.
+///
+/// `cache`/`dirty` are caller-seeded:
+///   * `run_strategy` passes an empty cache with every candidate dirty,
+///     reproducing the original from-scratch behaviour.
+///   * `search_candidates_subsets` pre-seeds the cache with evaluations already
+///     computed against the empty plan and leaves `dirty` empty, so the first
+///     pick reuses them verbatim instead of recomputing.
+///
+/// Only dirty targets that are in `candidate_ids` are re-evaluated; selection
+/// only ever scans `candidate_ids`. `evaluate_target(T)` reads `plan` only
+/// through (a) `planned[T]` and (b) the `spent`/`planned` state of T's inbound
+/// sources, so committing target `C` from sources `S` dirties exactly
+/// `{C} ∪ outbound(C) ∪ ⋃_{s∈S} outbound(s)` — every target fed by a touched
+/// source, plus targets for which `C` is itself a source.
+fn greedy_commit(
     world: &WorldState,
     model: &HellburnerModel,
     strategy: SelectionStrategy,
+    candidate_ids: &[i64],
+    cache: &mut HashMap<i64, Option<(f64, FrontlineWin)>>,
+    dirty: &mut HashSet<i64>,
+    scratch: &mut FrontlineScratch,
 ) -> (Vec<MoveAction>, PlanState) {
     let mut state = PlanState::default();
     let mut moves: Vec<MoveAction> = Vec::new();
-
-    // Fixed-order candidate targets (non-comet, with inbound edges). The scan
-    // order matches the original per-iteration sweep so selection tie-breaking
-    // stays deterministic and identical to the uncached path.
-    let candidate_ids: Vec<i64> = world
-        .planets
-        .iter()
-        .filter(|p| model.non_comet_ids.contains(&p.id))
-        .filter(|p| {
-            model
-                .inbound_edges
-                .get(&p.id)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false)
-        })
-        .map(|p| p.id)
-        .collect();
-
-    // Per-target evaluation cache, persisted across greedy iterations. Each
-    // iteration recomputes only the targets whose inputs the previous commit
-    // could have changed (`dirty`); the rest reuse their cached eval.
-    //
-    // `evaluate_target(T)` reads `plan` only through (a) `planned[T]` (its own
-    // prefix baseline / already-won check) and (b) the `spent`/`planned` state
-    // of T's inbound sources for availability. Committing target `C` from
-    // sources `S` mutates `spent[s]` for `s ∈ S` and `planned[C]`, so the
-    // exactly-affected set is
-    // `{C} ∪ outbound(C) ∪ ⋃_{s∈S} outbound(s)` — every target fed by a touched
-    // source, plus targets for which `C` is itself a source. Over-invalidation
-    // would only cost time; this set is exact.
-    let mut cache: HashMap<i64, Option<(f64, FrontlineWin)>> =
-        HashMap::with_capacity_and_hasher(candidate_ids.len(), Default::default());
-    let mut dirty: HashSet<i64> = candidate_ids.iter().copied().collect();
-    let mut scratch = FrontlineScratch::default();
+    let candidate_set: HashSet<i64> = candidate_ids.iter().copied().collect();
 
     // Each iteration commits ≥1 ship from at least one source, so the loop is
     // bounded by the total source pool. A fixed safety cap protects against any
     // pathological selector that re-picks the same target with a vanishing
     // commitment.
     for _ in 0..256 {
-        // Recompute dirty targets against the current plan.
+        // Recompute dirty targets against the current plan (only those we may
+        // actually select — a subset run can dirty targets outside its scope).
         if !dirty.is_empty() {
-            for &tid in &dirty {
-                let eval = evaluate_target(world, model, &state, world.planet(tid), &mut scratch);
+            for &tid in dirty.iter() {
+                if !candidate_set.contains(&tid) {
+                    continue;
+                }
+                let eval = evaluate_target(world, model, &state, world.planet(tid), scratch);
                 cache.insert(tid, eval);
             }
             dirty.clear();
@@ -1239,7 +1235,7 @@ fn run_strategy(
         // Select the best target under `strategy`, scanning candidates in fixed
         // order so ties resolve exactly as the uncached path did.
         let mut best: Option<(f64, f64, usize, i64)> = None; // (primary, score, len, tid)
-        for &tid in &candidate_ids {
+        for &tid in candidate_ids {
             let Some(Some((score, win))) = cache.get(&tid) else {
                 continue;
             };
@@ -1261,13 +1257,13 @@ fn run_strategy(
         // Debug-only: prove the incremental cache selected exactly what a full
         // from-scratch recompute would, against the current plan.
         #[cfg(debug_assertions)]
-        let reference_pick = select_best_uncached(world, model, &state, strategy, &candidate_ids);
+        let reference_pick = select_best_uncached(world, model, &state, strategy, candidate_ids);
 
         let Some((_, _, _, target_id)) = best else {
             #[cfg(debug_assertions)]
             debug_assert!(
                 reference_pick.is_none(),
-                "run_strategy cache returned no target but uncached recompute found one"
+                "greedy_commit cache returned no target but uncached recompute found one"
             );
             break;
         };
@@ -1281,7 +1277,7 @@ fn run_strategy(
         debug_assert_eq!(
             reference_pick,
             Some((target_id, orders.clone())),
-            "run_strategy cache diverged from uncached recompute"
+            "greedy_commit cache diverged from uncached recompute"
         );
         if orders.is_empty() {
             break;
@@ -1315,6 +1311,54 @@ fn run_strategy(
             }
         }
     }
+
+    (moves, state)
+}
+
+/// Fixed-order candidate targets (non-comet, with inbound edges). The scan order
+/// matches the original per-iteration sweep so selection tie-breaking stays
+/// deterministic and identical to the uncached path.
+fn candidate_target_ids(world: &WorldState, model: &HellburnerModel) -> Vec<i64> {
+    world
+        .planets
+        .iter()
+        .filter(|p| model.non_comet_ids.contains(&p.id))
+        .filter(|p| {
+            model
+                .inbound_edges
+                .get(&p.id)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        })
+        .map(|p| p.id)
+        .collect()
+}
+
+/// One full pipeline run under a fixed target-selection strategy. Returns
+/// the emitted moves and the resulting PlanState (used by `rollout_score`).
+fn run_strategy(
+    world: &WorldState,
+    model: &HellburnerModel,
+    strategy: SelectionStrategy,
+) -> (Vec<MoveAction>, PlanState) {
+    let candidate_ids = candidate_target_ids(world, model);
+
+    // Empty cache + every candidate dirty ⇒ the first iteration evaluates them
+    // all from scratch against the empty plan, exactly as before.
+    let mut cache: HashMap<i64, Option<(f64, FrontlineWin)>> =
+        HashMap::with_capacity_and_hasher(candidate_ids.len(), Default::default());
+    let mut dirty: HashSet<i64> = candidate_ids.iter().copied().collect();
+    let mut scratch = FrontlineScratch::default();
+
+    let (mut moves, state) = greedy_commit(
+        world,
+        model,
+        strategy,
+        &candidate_ids,
+        &mut cache,
+        &mut dirty,
+        &mut scratch,
+    );
 
     moves.extend(send_reinforcements(world, model, &state));
     (moves, state)
@@ -1517,5 +1561,106 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
             out.push(moves);
         }
     }
+    out
+}
+
+/// Diversity-oriented candidate generator. The three-strategy `search_candidates`
+/// usually converges (the strategies pick the same plan once trial-timeline
+/// ownership binds), yielding ~1 unique candidate. This instead fixes a single
+/// strategy (`ScorePerShip`) and varies *which* targets the greedy loop may
+/// commit: it evaluates every target once against the empty plan, takes the top
+/// [`SUBSET_TOP_TARGETS`] by selection key, and runs the greedy loop restricted
+/// to each of the `2^k` include/exclude subsets of those targets (the empty
+/// subset yields a reinforcement-only candidate).
+///
+/// Efficiency is the whole point: the `2^k` subsets all share the one-time seed
+/// evaluation (`evaluate_target` over every target vs. the empty plan), and each
+/// subset run only re-evaluates the ≤k-1 of its own targets a commit dirties —
+/// not `2^k` independent planner passes. The model is built once.
+///
+/// The unrestricted `ScorePerShip` greedy (today's `plan()` output, which can
+/// capture more than `k` targets) is emitted as the first candidate so the
+/// subset cap never costs us the aggressive baseline. Reinforcements are appended
+/// to every candidate and duplicates are deduped.
+pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
+    if world.enemy_planets.is_empty() {
+        return vec![Vec::new()];
+    }
+    let model = HellburnerModel::build(world);
+    let strategy = SelectionStrategy::ScorePerShip;
+    let mut scratch = FrontlineScratch::default();
+    let candidate_ids = candidate_target_ids(world, &model);
+
+    let mut out: Vec<Vec<MoveAction>> = Vec::new();
+
+    // Baseline first: the unrestricted greedy (== `plan()`), capturing every
+    // winnable target. Mirrors the old `search_candidates` first-entry contract.
+    let (full_moves, _) = run_strategy(world, &model, strategy);
+    out.push(full_moves);
+
+    // Seed: evaluate every candidate target once against the empty plan. Every
+    // subset run reuses these for its first (empty-plan) pick.
+    let empty_plan = PlanState::default();
+    let mut seed: HashMap<i64, Option<(f64, FrontlineWin)>> =
+        HashMap::with_capacity_and_hasher(candidate_ids.len(), Default::default());
+    for &tid in &candidate_ids {
+        let eval = evaluate_target(world, &model, &empty_plan, world.planet(tid), &mut scratch);
+        seed.insert(tid, eval);
+    }
+
+    // Rank winnable targets by the `ScorePerShip` key. Scan `candidate_ids` in
+    // fixed order then stable-sort descending, so ties keep the deterministic
+    // candidate order.
+    let mut ranked: Vec<(f64, i64)> = Vec::new();
+    for &tid in &candidate_ids {
+        if let Some(Some((score, win))) = seed.get(&tid) {
+            let production = world.planet(tid).production;
+            let ships_total: i64 = win.orders.iter().map(|o| o.ships).sum();
+            ranked.push((strategy.key(*score, production, ships_total), tid));
+        }
+    }
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let top: Vec<i64> = ranked
+        .iter()
+        .take(SUBSET_TOP_TARGETS)
+        .map(|(_, tid)| *tid)
+        .collect();
+    let k = top.len();
+
+    // Every subset of the top-k targets, including the empty set. Buffers are
+    // reused across masks; the per-subset cache is reseeded from `seed` with
+    // `dirty` empty so each run's first pick reuses the shared evaluations.
+    let mut subset_ids: Vec<i64> = Vec::with_capacity(k);
+    let mut cache: HashMap<i64, Option<(f64, FrontlineWin)>> =
+        HashMap::with_capacity_and_hasher(k, Default::default());
+    let mut dirty: HashSet<i64> = HashSet::default();
+    for mask in 0u32..(1u32 << k) {
+        subset_ids.clear();
+        for i in 0..k {
+            if mask & (1u32 << i) != 0 {
+                subset_ids.push(top[i]);
+            }
+        }
+        cache.clear();
+        for &tid in &subset_ids {
+            cache.insert(tid, seed.get(&tid).cloned().flatten());
+        }
+        dirty.clear();
+
+        let (mut moves, state) = greedy_commit(
+            world,
+            &model,
+            strategy,
+            &subset_ids,
+            &mut cache,
+            &mut dirty,
+            &mut scratch,
+        );
+        moves.extend(send_reinforcements(world, &model, &state));
+        if !out.iter().any(|prev| prev == &moves) {
+            out.push(moves);
+        }
+    }
+
     out
 }
