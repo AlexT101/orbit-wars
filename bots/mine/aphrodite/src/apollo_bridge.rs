@@ -224,6 +224,36 @@ pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) ->
         .collect()
 }
 
+/// Apollo's single greedy `ScorePerShip` plan for `player` (apollo's
+/// `STRATEGIES[0]`, via [`strategy::plan`]), converted to aphrodite launches.
+/// This is the cheap "assumed reply" used for the non-branched minor players in
+/// 4p DUCT expansion: every player commits privately from the same observed node
+/// state, so a minor player's launches are a pure function of `state` and can be
+/// computed once per node. Reuses the shared owner-agnostic `cache`; caller must
+/// `cache.set_current_turn(state.step)` first.
+pub fn apollo_greedy(state: &GameState, player: i32, cache: &EntityCache) -> Vec<Action> {
+    let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
+    let initial_planets: Vec<APlanet> =
+        state.planets.iter().map(to_apollo_planet_initial).collect();
+    let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
+    let (comets, comet_planet_ids) = to_apollo_comets(state);
+    let world = WorldState::build(
+        player as i64,
+        state.step,
+        planets,
+        fleets,
+        initial_planets,
+        comets,
+        comet_planet_ids,
+        state.angular_velocity,
+        cache,
+    );
+    strategy::plan(&world)
+        .into_iter()
+        .map(|m| (m.from_id, m.angle, m.ships, player))
+        .collect()
+}
+
 /// Recover the destination planet a launched fleet was aimed at by matching its
 /// launch `angle` against `plan_shot(from, c, ships)` for every non-comet planet
 /// `c`. aphrodite's `Action` tuple carries only `(from_id, angle, ships, owner)` —

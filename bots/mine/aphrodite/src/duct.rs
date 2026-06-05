@@ -120,6 +120,13 @@ struct Node {
     opp_candidates: Vec<Vec<Action>>,
     opp_priors: Vec<f64>,
     opp_stats: Vec<ActionStats>,
+    /// Assumed launches for the non-branched minor players (4p only): each
+    /// alive player other than `me`/`opp` contributes their single apollo
+    /// `ScorePerShip` greedy plan. A pure function of `state` (every player
+    /// commits privately from the same observed node), so it is computed once
+    /// per node in `ensure_candidates` and replayed at every expansion. Empty
+    /// in 2p — that path is then identical to before.
+    other_launches: Vec<Action>,
     /// (my_idx, opp_idx) -> joint child subtree
     children: HashMap<(usize, usize), Box<Node>>,
     candidates_initialized: bool,
@@ -207,6 +214,25 @@ fn actions_equal(a: &[Action], b: &[Action]) -> bool {
     ax == bx
 }
 
+/// Alive players (planet/fleet owners) other than `me` and `opp`, sorted for
+/// determinism. In a 2p game this is empty. These are the minor players whose
+/// replies DUCT does not branch over but instead fixes to a single greedy plan.
+fn other_players(state: &GameState, me: i32, opp: i32) -> Vec<i32> {
+    let mut seen: u32 = 0;
+    let mut note = |p: i32| {
+        if p >= 0 && p < 32 && p != me && p != opp {
+            seen |= 1 << p;
+        }
+    };
+    for p in &state.planets {
+        note(p.owner);
+    }
+    for f in &state.fleets {
+        note(f.owner);
+    }
+    (0..32).filter(|i| seen & (1 << i) != 0).collect()
+}
+
 pub(crate) fn dominant_enemy(state: &GameState, me: i32) -> Option<i32> {
     let mut best: Option<(i32, i64)> = None;
     let mut visit_player = |p: i32| {
@@ -288,6 +314,20 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     };
     let opp = dominant_enemy(&node.state, me).unwrap_or(1 - me);
     let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k);
+    // Fix each minor player's reply to their single apollo greedy plan, computed
+    // once here from the node state (empty in 2p). Replayed at every expansion.
+    node.other_launches = {
+        let others = other_players(&node.state, me, opp);
+        let mut launches: Vec<Action> = Vec::new();
+        if !others.is_empty() {
+            with_cache_at(node.state.step, |cache| {
+                for p in others {
+                    launches.extend(crate::apollo_bridge::apollo_greedy(&node.state, p, cache));
+                }
+            });
+        }
+        launches
+    };
     let my_n = my_alts.len();
     let opp_n = opp_alts.len();
     node.my_priors = (0..my_n).map(|i| rank_prior(i, my_n)).collect();
@@ -376,6 +416,8 @@ fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
         let __al_t0 = std::time::Instant::now();
         apply_launches(&mut s, &node.my_candidates[my_idx]);
         apply_launches(&mut s, &node.opp_candidates[opp_idx]);
+        // Minor players' fixed greedy replies (empty in 2p).
+        apply_launches(&mut s, &node.other_launches);
         crate::profiling::add(&crate::profiling::APPLY_LAUNCHES_NS, __al_t0);
         let __tick_t0 = std::time::Instant::now();
         tick(&mut s);
@@ -392,6 +434,7 @@ fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
             opp_candidates: Vec::new(),
             opp_priors: Vec::new(),
             opp_stats: Vec::new(),
+            other_launches: Vec::new(),
             children: HashMap::new(),
             candidates_initialized: false,
         };
@@ -474,6 +517,7 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
             opp_candidates: Vec::new(),
             opp_priors: Vec::new(),
             opp_stats: Vec::new(),
+            other_launches: Vec::new(),
             children: HashMap::new(),
             candidates_initialized: false,
         },
