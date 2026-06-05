@@ -106,13 +106,27 @@ class AphroditeDaemon:
     """
 
     def __init__(self, dump_path: Path | None, budget_ms: int, weights_path: Path | None,
-                 weights_2p_path: Path | None = None):
+                 weights_2p_path: Path | None = None,
+                 leaves_path: Path | None = None,
+                 tree_stats_path: Path | None = None,
+                 leaves_cap: int | None = None):
         env = dict(os.environ)
         env.pop("APHRODITE_DUMP_FEATURES_PATH", None)
         env.pop("APHRODITE_VALUE_NET_PATH", None)
         env.pop("APHRODITE_VALUE_NET_PATH_2P", None)
+        env.pop("APHRODITE_DUMP_LEAVES_PATH", None)
+        env.pop("APHRODITE_DUMP_TREE_STATS_PATH", None)
+        env.pop("APHRODITE_DUMP_LEAVES_MAX_PER_SEARCH", None)
         if dump_path is not None:
             env["APHRODITE_DUMP_FEATURES_PATH"] = str(Path(dump_path).resolve())
+        # Search-instrumentation dumps (probe.py): per-leaf summary-v2 features
+        # and per-turn DUCT tree stats.
+        if leaves_path is not None:
+            env["APHRODITE_DUMP_LEAVES_PATH"] = str(Path(leaves_path).resolve())
+        if tree_stats_path is not None:
+            env["APHRODITE_DUMP_TREE_STATS_PATH"] = str(Path(tree_stats_path).resolve())
+        if leaves_cap is not None:
+            env["APHRODITE_DUMP_LEAVES_MAX_PER_SEARCH"] = str(int(leaves_cap))
         env["APHRODITE_BUDGET_MS"] = str(budget_ms)
         if weights_path is not None:
             env["APHRODITE_VALUE_NET_PATH"] = str(Path(weights_path).resolve())
