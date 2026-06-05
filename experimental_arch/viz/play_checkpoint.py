@@ -13,7 +13,7 @@ import torch
 from torch.distributions import Categorical
 
 HERO = "/home/ec2-user/orbit-wars-osteo/experimental_arch/imitation_learning/checkpoints/isaiah_bc_transformer/latest.pt"
-OPPONENT = "self"  # "self", .zip, .py, or bot name
+OPPONENT = "hellburner"  # "self", .zip, .py, or bot name
 
 HERO_DETERMINISTIC = False
 OPPONENT_DETERMINISTIC = False
