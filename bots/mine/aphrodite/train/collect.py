@@ -10,7 +10,7 @@ Output: a single NPZ with arrays
   features:   float32 [N, INPUT_DIM=2728]
   labels:     float32 [N]                  (final reward for that player)
   meta:       int32   [N, 4]               (game_idx, step, player, num_players)
-  summary_v2: float32 [N, 46]
+  summary_v2: float32 [N, 41]
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ MAX_OBJECTS = 44
 PER_BLOCK = MAX_OBJECTS * PER_OBJECT  # 396
 DIST_BLOCK = MAX_OBJECTS * MAX_OBJECTS  # 1936
 INPUT_DIM = 2 * PER_BLOCK + DIST_BLOCK  # 2728
-SUMMARY_V2_DIM = 46
-# New record layout: step(i64) + player(i32) + features(2728 f32) + summary_v2(46 f32)
+SUMMARY_V2_DIM = 65
+# New record layout: step(i64) + player(i32) + features(2728 f32) + summary_v2(65 f32)
 RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM + 4 * SUMMARY_V2_DIM
 # Old layout (pre-v2): step(i64) + player(i32) + features only
 LEGACY_RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM
@@ -199,7 +199,7 @@ def teardown_other(module):
 
 
 def read_dump(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (features [n, INPUT_DIM], steps [n], summary_v2 [n, 46]).
+    """Return (features [n, INPUT_DIM], steps [n], summary_v2 [n, 41]).
     Auto-detects new vs legacy record size."""
     empty = (
         np.zeros((0, INPUT_DIM), dtype=np.float32),

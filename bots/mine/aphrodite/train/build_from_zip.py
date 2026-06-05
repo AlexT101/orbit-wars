@@ -7,7 +7,7 @@ games are read one at a time via zipfile.read() and never unpacked to disk.
 
 Single parse pass:
   * keep games matching --players (2 by default, or 4 for FFA),
-  * extract all player observations -> 46-d summary_v2 features,
+  * extract all player observations -> 41-d summary_v2 features,
   * collect each game's agent names + rewards so the "strong player"
     gate (both players above the median win rate) can be computed in
     memory afterward and stored as a per-sample is_strong flag.
@@ -38,8 +38,8 @@ REPO = HERE.parents[3]
 APHRODITE_DIR = REPO / "bots" / "mine" / "aphrodite"
 BIN = APHRODITE_DIR / "target" / "release" / "extract_v2"
 
-SUMMARY_V2_DIM = 46
-RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM  # 196
+SUMMARY_V2_DIM = 65
+RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM  # 272
 
 MIN_GAMES = 3   # min games a player needs before their win rate counts
 SEED = 0

@@ -124,8 +124,7 @@ pub fn refresh_cache_comets(cache: &mut EntityCache, state: &GameState) {
 /// This plus the `Simulator` and `ArrivalLedger` derived from it are identical
 /// for every player, so building them once and deriving each player's
 /// `WorldState` via [`WorldState::from_simulator_with_ledger`] avoids repeating
-/// the expensive `HORIZON`-turn ledger walk per player — mirroring apollo's
-/// ledger sharing in `rollout::rollout_score` / `pick_plan_by_rollout`.
+/// the expensive `HORIZON`-turn ledger walk per player.
 fn build_engine(state: &GameState) -> EngineState {
     let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
     let initial_planets: Vec<APlanet> =
@@ -153,20 +152,6 @@ fn build_engine(state: &GameState) -> EngineState {
 }
 
 #[inline]
-fn plan_from_ledger(
-    sim: &Simulator,
-    ledger: &ArrivalLedger,
-    player: i32,
-    cache: &EntityCache,
-) -> Vec<Action> {
-    let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
-    strategy::plan(&world)
-        .into_iter()
-        .map(|m| (m.from_id, m.angle, m.ships, player))
-        .collect()
-}
-
-#[inline]
 fn candidates_from_ledger(
     sim: &Simulator,
     ledger: &ArrivalLedger,
@@ -183,28 +168,6 @@ fn candidates_from_ledger(
                 .collect::<Vec<Action>>()
         })
         .collect()
-}
-
-/// Greedy hellburner plans for `me` and (optionally) `opp` from a single shared
-/// `Simulator` + `ArrivalLedger`. Use this instead of two [`apollo_plan`] calls
-/// when planning both players at the same state (e.g. a rollout reactive tick) —
-/// it pays the `HORIZON`-turn ledger walk once. Caller must
-/// `cache.set_current_turn(state.step)` first.
-pub fn apollo_plan_pair(
-    state: &GameState,
-    me: i32,
-    opp: Option<i32>,
-    cache: &EntityCache,
-) -> (Vec<Action>, Vec<Action>) {
-    let engine = build_engine(state);
-    let sim = Simulator::new(&engine);
-    let horizon = Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
-    let ledger = ArrivalLedger::build(&sim, horizon, cache);
-    let my = plan_from_ledger(&sim, &ledger, me, cache);
-    let op = opp
-        .map(|o| plan_from_ledger(&sim, &ledger, o, cache))
-        .unwrap_or_default();
-    (my, op)
 }
 
 /// Hellburner child candidates for `me` and `opp` from a single shared
@@ -226,39 +189,12 @@ pub fn apollo_candidates_pair(
     )
 }
 
-/// apollo's greedy hellburner plan for `player` as an aphrodite launch list,
-/// reusing a prebuilt `cache`. Caller must `cache.set_current_turn(state.step)`
-/// (and refresh comets if needed) beforehand.
-pub fn apollo_plan(state: &GameState, player: i32, cache: &EntityCache) -> Vec<Action> {
-    let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
-    let initial_planets: Vec<APlanet> =
-        state.planets.iter().map(to_apollo_planet_initial).collect();
-    let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
-    let (comets, comet_planet_ids) = to_apollo_comets(state);
-    let world = WorldState::build(
-        player as i64,
-        state.step,
-        planets,
-        fleets,
-        initial_planets,
-        comets,
-        comet_planet_ids,
-        state.angular_velocity,
-        cache,
-    );
-    strategy::plan(&world)
-        .into_iter()
-        .map(|m| (m.from_id, m.angle, m.ships, player))
-        .collect()
-}
-
 /// Generate apollo's hellburner child candidates for `player`, each converted to
 /// an aphrodite launch list. Returns one `Vec<Action>` per candidate strategy.
 ///
 /// Reuses a prebuilt, shared `cache` (the obstacle/aim geometry is owner-agnostic
 /// and game-static, so one cache serves every node of every turn). Caller must
-/// `cache.set_current_turn(state.step)` (and refresh comets if needed) first,
-/// exactly like [`apollo_plan`].
+/// `cache.set_current_turn(state.step)` (and refresh comets if needed) first.
 pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) -> Vec<Vec<Action>> {
     let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
     let initial_planets: Vec<APlanet> =

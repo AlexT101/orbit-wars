@@ -321,18 +321,10 @@ fn prof_enabled() -> bool {
 thread_local! {
     static PROF_EVAL_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
     static PROF_EVAL_N: std::cell::Cell<u64> = std::cell::Cell::new(0);
-    static PROF_ROLL_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
-    static PROF_ROLL_N: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 fn prof_reset() {
     PROF_EVAL_NS.with(|c| c.set(0));
     PROF_EVAL_N.with(|c| c.set(0));
-    PROF_ROLL_NS.with(|c| c.set(0));
-    PROF_ROLL_N.with(|c| c.set(0));
-}
-
-fn rollout(state: &GameState, me: i32) -> f64 {
-    evaluate(state, me)
 }
 
 pub(crate) fn evaluate(state: &GameState, me: i32) -> f64 {
@@ -349,13 +341,17 @@ pub(crate) fn evaluate(state: &GameState, me: i32) -> f64 {
 
 fn evaluate_inner(state: &GameState, me: i32) -> f64 {
     let __vn_t0 = std::time::Instant::now();
-    let __pred = crate::value_net::predict(state, me);
+    // Reuse the persistent per-search EntityCache (geometry/aim) for value-net
+    // feature extraction instead of building one per leaf. `with_cache_at` sets
+    // the cache's current turn to this leaf's step before scoring.
+    let __pred = with_cache_at(state.step, |cache| {
+        crate::value_net::predict_with_cache(state, me, cache)
+    });
     crate::profiling::add(&crate::profiling::VALUE_NET_NS, __vn_t0);
     crate::profiling::inc(&crate::profiling::VALUE_NET_CALLS);
-    if let Some(v) = __pred {
-        return v.clamp(-1.0, 1.0);
-    }
-    crate::eval::evaluate_external(state, me)
+    // The value net is always loaded in production; if weights are somehow
+    // absent, fall back to a neutral score rather than a heuristic.
+    __pred.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(0.0)
 }
 
 fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
@@ -385,7 +381,7 @@ fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
         tick(&mut s);
         crate::profiling::add(&crate::profiling::TICK_NS, __tick_t0);
         crate::profiling::inc(&crate::profiling::TICK_CALLS);
-        let rollout_value = rollout(&s, me);
+        let rollout_value = evaluate(&s, me);
         let __tree_t1 = std::time::Instant::now();
         let child = Node {
             state: s,
@@ -548,11 +544,7 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
     if prof_enabled() {
         let eval_ns = PROF_EVAL_NS.with(|c| c.get());
         let eval_n = PROF_EVAL_N.with(|c| c.get());
-        let roll_ns = PROF_ROLL_NS.with(|c| c.get());
-        let roll_n = PROF_ROLL_N.with(|c| c.get());
         let eval_ms = eval_ns as f64 / 1e6;
-        let roll_ms = roll_ns as f64 / 1e6;
-        let acct_ms = eval_ms + roll_ms;
         let budget = budget_ms as f64;
         let pct = |x: f64| {
             if budget > 0.0 {
@@ -569,11 +561,9 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
             }
         };
         eprintln!(
-            "[prof] step={} iters={} budget={}ms | rollout_sim={:.1}ms ({:.0}%, n={}, {:.1}µs/call) | leaf_eval={:.1}ms ({:.0}%, n={}, {:.2}µs/call) | accounted={:.1}ms ({:.0}%); rest=tree+candidates",
+            "[prof] step={} iters={} budget={}ms | leaf_eval={:.1}ms ({:.0}%, n={}, {:.2}µs/call); rest=tree+candidates",
             state.step, iters, budget_ms,
-            roll_ms, pct(roll_ms), roll_n, per(roll_ns, roll_n),
             eval_ms, pct(eval_ms), eval_n, per(eval_ns, eval_n),
-            acct_ms, pct(acct_ms),
         );
     }
 

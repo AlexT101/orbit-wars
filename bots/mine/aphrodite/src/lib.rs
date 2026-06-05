@@ -3,7 +3,6 @@
 pub mod apollo;
 pub mod apollo_bridge;
 pub mod duct;
-pub mod eval;
 pub mod ow2_plan;
 pub mod pathing;
 pub mod profiling;

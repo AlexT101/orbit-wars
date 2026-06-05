@@ -21,7 +21,7 @@ use std::cell::RefCell;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::apollo::cache::{AimCacheVerdict, InvariantVerdict};
+use crate::apollo::cache::{AimCacheVerdict, EntityCache, InvariantVerdict};
 use crate::apollo::constants::{
     A_S_LOOKAHEAD, MAX_COORD_DELAY, OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS,
 };
@@ -30,7 +30,7 @@ use crate::apollo::helpers::{
     aim_ignoring_comets, aim_with_prediction, available_at_timeline, dist,
     simulate_checkpoint_into, simulate_planet_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
-use crate::apollo::world::WorldState;
+use crate::apollo::world::{ShotL1, WorldState};
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -138,90 +138,89 @@ impl<'a> HellburnerModel<'a> {
         ships: i64,
         launch_turn_offset: i64,
     ) -> Option<AimResult> {
-        let ships = ships.max(1);
-        let cache = self.state.cache;
-        // L1 is keyed by the *absolute* launch turn so the step-scoped shared
-        // cache stays correct as the rollout walks `current_turn` forward (a
-        // relative-offset key would collide across turns). Falls back to the
-        // model's own per-model cache when no shared L1 is threaded in.
-        let abs_launch = cache.current_turn + launch_turn_offset;
-        let key = (src_id, target_id, ships, abs_launch);
+        // L1 falls back to the model's own per-model cache when no shared L1 is
+        // threaded into the world.
         let l1 = self.state.shot_l1.unwrap_or(&self.shot_cache);
+        resolve_shot(
+            self.state.cache,
+            src_id,
+            target_id,
+            ships,
+            launch_turn_offset,
+            Some(l1),
+        )
+    }
+}
+
+/// Caching tiers:
+///   * L1 — optional `l1` map keyed by `(src, target, ships, abs_launch)`; pass
+///     `None` to skip it and rely on the cache's own L2/L3.
+///   * L2 — `EntityCache::aim_cache`, indexed by absolute launch turn.
+///   * L3 — cross-turn invariant fast path for disc-qualified
+///     static→static / orbiting→orbiting shots (only re-checks comets per turn).
+pub fn resolve_shot(
+    cache: &EntityCache,
+    src_id: i64,
+    target_id: i64,
+    ships: i64,
+    launch_turn_offset: i64,
+    l1: Option<&ShotL1>,
+) -> Option<AimResult> {
+    let ships = ships.max(1);
+    // L1 is keyed by the *absolute* launch turn so the step-scoped shared cache
+    // stays correct as the rollout walks `current_turn` forward (a
+    // relative-offset key would collide across turns).
+    let abs_launch = cache.current_turn + launch_turn_offset;
+    let key = (src_id, target_id, ships, abs_launch);
+    if let Some(l1) = l1 {
         if let Some(&cached) = l1.borrow().get(&key) {
             return cached;
         }
-        let lookup = cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset);
-        let result = match lookup {
-            AimCacheVerdict::Hit(r) => r,
-            AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
-                // L3 — cross-turn invariant fast path for disc-qualified
-                // static→static / orbiting→orbiting shots. Skips lead_target_from and
-                // the per-entity planet sweep, only re-checking comets per turn.
-                match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
-                    InvariantVerdict::Use(r) => Some(r),
-                    InvariantVerdict::SingleSolve => {
-                        let r = aim_with_prediction(
-                            cache,
-                            src_id,
-                            target_id,
-                            ships,
-                            launch_turn_offset,
-                        );
-                        cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
-                        r
-                    }
-                    InvariantVerdict::DualSolve => {
-                        // Populate the invariant base with one comet-free solve,
-                        // then gate it against just the comets. Comet-clear ⇒ the
-                        // base is exactly this turn's shot (no second solve);
-                        // comet-blocked / disqualified ⇒ fall back to a normal
-                        // full solve.
-                        let base = aim_ignoring_comets(
-                            cache,
-                            src_id,
-                            target_id,
-                            ships,
-                            launch_turn_offset,
-                        );
-                        cache.invariant_aim_store(
-                            src_id,
-                            target_id,
-                            ships,
-                            launch_turn_offset,
-                            base,
-                        );
-                        match cache.invariant_aim_lookup(
-                            src_id,
-                            target_id,
-                            ships,
-                            launch_turn_offset,
-                        ) {
-                            InvariantVerdict::Use(r) => Some(r),
-                            _ => {
-                                let r = aim_with_prediction(
-                                    cache,
-                                    src_id,
-                                    target_id,
-                                    ships,
-                                    launch_turn_offset,
-                                );
-                                cache.aim_cache_store(
-                                    src_id,
-                                    target_id,
-                                    ships,
-                                    launch_turn_offset,
-                                    r,
-                                );
-                                r
-                            }
+    }
+    let lookup = cache.aim_cache_lookup(src_id, target_id, ships, launch_turn_offset);
+    let result = match lookup {
+        AimCacheVerdict::Hit(r) => r,
+        AimCacheVerdict::Miss | AimCacheVerdict::Stale => {
+            // L3 — cross-turn invariant fast path for disc-qualified
+            // static→static / orbiting→orbiting shots. Skips lead_target_from and
+            // the per-entity planet sweep, only re-checking comets per turn.
+            match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
+                InvariantVerdict::Use(r) => Some(r),
+                InvariantVerdict::SingleSolve => {
+                    let r = aim_with_prediction(cache, src_id, target_id, ships, launch_turn_offset);
+                    cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
+                    r
+                }
+                InvariantVerdict::DualSolve => {
+                    // Populate the invariant base with one comet-free solve, then
+                    // gate it against just the comets. Comet-clear ⇒ the base is
+                    // exactly this turn's shot (no second solve); comet-blocked /
+                    // disqualified ⇒ fall back to a normal full solve.
+                    let base =
+                        aim_ignoring_comets(cache, src_id, target_id, ships, launch_turn_offset);
+                    cache.invariant_aim_store(src_id, target_id, ships, launch_turn_offset, base);
+                    match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
+                        InvariantVerdict::Use(r) => Some(r),
+                        _ => {
+                            let r = aim_with_prediction(
+                                cache,
+                                src_id,
+                                target_id,
+                                ships,
+                                launch_turn_offset,
+                            );
+                            cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
+                            r
                         }
                     }
                 }
             }
-        };
+        }
+    };
+    if let Some(l1) = l1 {
         l1.borrow_mut().insert(key, result);
-        result
     }
+    result
 }
 
 fn build_reinforcement_targets(

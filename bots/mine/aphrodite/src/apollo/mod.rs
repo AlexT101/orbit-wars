@@ -7,6 +7,5 @@ pub mod cache;
 pub mod constants;
 pub mod engine;
 pub mod helpers;
-pub mod rollout;
 pub mod strategy;
 pub mod world;

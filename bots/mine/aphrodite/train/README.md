@@ -251,8 +251,8 @@ Eval & data:
 
 Checks / utilities:
 
-- `validate_extract.py` — independent pure-Python re-implementation of the
-  extractor, cross-checked against the Rust output (guards against drift).
+- `feature_importance.py` — print XGBoost gain/weight/cover per feature, with
+  the slots mapped to human-readable names in `extract()` order.
 - `xgb_tune.py` — XGBoost hyperparameter sweep (offline metric only).
 - `view_replay.py` — render a Kaggle episode JSON to a standalone HTML player.
 

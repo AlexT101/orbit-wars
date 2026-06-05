@@ -2,8 +2,8 @@
 //!
 //! Reads one JSON observation per line on stdin, writes one binary
 //! record per line on stdout:
-//!     step:i64, player:i32, summary_v2:[f32; 46]
-//! → 8 + 4 + 184 = 196 bytes per record.
+//!     step:i64, player:i32, summary_v2:[f32; 65]
+//! → 8 + 4 + 260 = 272 bytes per record.
 //!
 //! No MCTS, no daemons, no JSON output — just feature extraction.
 //! Designed for batch-processing kaggle replay JSONs into NPZ.

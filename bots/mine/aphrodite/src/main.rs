@@ -18,7 +18,7 @@ fn main() -> io::Result<()> {
     let budget_ms: u64 = std::env::var("APHRODITE_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(500);
+        .unwrap_or(1000);
     let mut dump: Option<File> = std::env::var("APHRODITE_DUMP_FEATURES_PATH")
         .ok()
         .and_then(|p| File::create(p).ok());

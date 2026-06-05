@@ -180,7 +180,7 @@ def filter_top_n(d, top_set, out_path: Path):
     ms = meta[sub]
     n_kept = int(np.unique(ms[:, 0]).size)
     print(f"  top-N filter kept {n_kept} games / {len(Xs):,} rows / "
-          f"{len(Xs) * 196 / 1e6:.1f} MB raw")
+          f"{len(Xs) * 176 / 1e6:.1f} MB raw")
     np.savez_compressed(
         out_path,
         summary_v2=Xs.astype(np.float32),
