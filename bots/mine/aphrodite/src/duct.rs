@@ -17,6 +17,9 @@ use crate::sim::{alive_players, apply_launches, tick, Action};
 use crate::{ow2_plan, GameState};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 const EXPLORATION: f64 = 0.3;
@@ -102,6 +105,108 @@ fn with_cache_at<R>(turn: i64, f: impl FnOnce(&crate::apollo::cache::EntityCache
         cache.set_current_turn(turn);
         f(cache)
     })
+}
+
+// ── search instrumentation (optional, env-gated) ──────────────────────────
+// Two independent dumps, both off unless their env var names a file:
+//   APHRODITE_DUMP_LEAVES_PATH      — one binary record per value-net leaf eval:
+//                                     search_step:i32, leaf_step:i32,
+//                                     summary_v2:[f32; DIM]. Lets a probe measure
+//                                     each feature's *within-search* variance (its
+//                                     ability to rank sibling leaves) vs global
+//                                     variance.
+//   APHRODITE_DUMP_TREE_STATS_PATH  — one CSV row per real turn with the DUCT
+//                                     tree shape (nodes/leaves/depth/iters).
+// `APHRODITE_DUMP_LEAVES_MAX_PER_SEARCH` caps leaves dumped per search (0 = all).
+thread_local! {
+    static LEAF_DUMP: RefCell<Option<BufWriter<File>>> =
+        RefCell::new(open_env_file("APHRODITE_DUMP_LEAVES_PATH").map(BufWriter::new));
+    static TREE_STATS: RefCell<Option<File>> = RefCell::new(open_tree_stats());
+    /// Root step of the in-progress search, tagged onto each leaf record so the
+    /// probe can group leaves by the search they belong to.
+    static SEARCH_STEP: std::cell::Cell<i64> = std::cell::Cell::new(0);
+    static LEAVES_THIS_SEARCH: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+fn open_env_file(var: &str) -> Option<File> {
+    let p = std::env::var(var).ok()?;
+    match File::create(&p) {
+        Ok(f) => {
+            eprintln!("[aphrodite] {} -> {}", var, p);
+            Some(f)
+        }
+        Err(e) => {
+            eprintln!("[aphrodite] could not create {} at {}: {}", var, p, e);
+            None
+        }
+    }
+}
+
+fn open_tree_stats() -> Option<File> {
+    let mut f = open_env_file("APHRODITE_DUMP_TREE_STATS_PATH")?;
+    let _ = writeln!(f, "step,iters,root_visits,my_K,opp_K,nodes,leaves,max_depth");
+    Some(f)
+}
+
+fn leaf_dump_cap() -> u64 {
+    static V: OnceLock<u64> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("APHRODITE_DUMP_LEAVES_MAX_PER_SEARCH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Append one leaf's summary-v2 feature row to the leaf dump, if enabled. Called
+/// at every value-net leaf evaluation. Cheap no-op (one thread-local borrow) when
+/// the dump is off.
+fn maybe_dump_leaf(state: &GameState, me: i32) {
+    LEAF_DUMP.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let w = match slot.as_mut() {
+            Some(w) => w,
+            None => return,
+        };
+        let cap = leaf_dump_cap();
+        if cap != 0 {
+            let n = LEAVES_THIS_SEARCH.with(|c| c.get());
+            if n >= cap {
+                return;
+            }
+            LEAVES_THIS_SEARCH.with(|c| c.set(n + 1));
+        }
+        let search_step = SEARCH_STEP.with(|c| c.get()) as i32;
+        let leaf_step = state.step as i32;
+        let v2 = with_cache_at(state.step, |cache| {
+            crate::value_net::summary_features_v2::extract_with_cache(state, me, cache)
+        });
+        let _ = w.write_all(&search_step.to_le_bytes());
+        let _ = w.write_all(&leaf_step.to_le_bytes());
+        let bytes =
+            unsafe { std::slice::from_raw_parts(v2.as_ptr() as *const u8, v2.len() * 4) };
+        let _ = w.write_all(bytes);
+    });
+}
+
+fn count_nodes(n: &Node) -> usize {
+    1 + n.children.values().map(|c| count_nodes(c)).sum::<usize>()
+}
+
+fn count_leaves(n: &Node) -> usize {
+    if n.children.is_empty() {
+        1
+    } else {
+        n.children.values().map(|c| count_leaves(c)).sum()
+    }
+}
+
+fn max_depth(n: &Node) -> usize {
+    if n.children.is_empty() {
+        1
+    } else {
+        1 + n.children.values().map(|c| max_depth(c)).max().unwrap_or(0)
+    }
 }
 
 #[derive(Clone)]
@@ -380,6 +485,7 @@ pub(crate) fn evaluate(state: &GameState, me: i32) -> f64 {
 }
 
 fn evaluate_inner(state: &GameState, me: i32) -> f64 {
+    maybe_dump_leaf(state, me);
     let __vn_t0 = std::time::Instant::now();
     // Reuse the persistent per-search EntityCache (geometry/aim) for value-net
     // feature extraction instead of building one per leaf. `with_cache_at` sets
@@ -527,6 +633,10 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
     if prof_enabled() {
         prof_reset();
     }
+    // Tag leaves dumped during this search with the root step, and reset the
+    // per-search leaf cap counter.
+    SEARCH_STEP.with(|c| c.set(state.step));
+    LEAVES_THIS_SEARCH.with(|c| c.set(0));
     let deadline = Instant::now() + std::time::Duration::from_millis(budget_ms);
     let mut iters = 0u32;
     while Instant::now() < deadline {
@@ -538,18 +648,33 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
     }
     crate::profiling::ITERATIONS.fetch_add(iters as u64, std::sync::atomic::Ordering::Relaxed);
 
+    // Flush the leaf dump for this search and append a tree-shape row (both
+    // no-ops unless their env var named a file).
+    LEAF_DUMP.with(|cell| {
+        if let Some(w) = cell.borrow_mut().as_mut() {
+            let _ = w.flush();
+        }
+    });
+    TREE_STATS.with(|cell| {
+        if let Some(f) = cell.borrow_mut().as_mut() {
+            let _ = writeln!(
+                f,
+                "{},{},{},{},{},{},{},{}",
+                state.step,
+                iters,
+                root.visits,
+                root.my_candidates.len(),
+                root.opp_candidates.len(),
+                count_nodes(&root),
+                count_leaves(&root),
+                max_depth(&root),
+            );
+            let _ = f.flush();
+        }
+    });
+
     if std::env::var("OW_DEBUG").is_ok() {
         // Walk the tree to measure unique node count + max depth.
-        fn count_nodes(n: &Node) -> usize {
-            1 + n.children.values().map(|c| count_nodes(c)).sum::<usize>()
-        }
-        fn max_depth(n: &Node) -> usize {
-            if n.children.is_empty() {
-                1
-            } else {
-                1 + n.children.values().map(|c| max_depth(c)).max().unwrap_or(0)
-            }
-        }
         let nodes = count_nodes(&root);
         let depth = max_depth(&root);
 
