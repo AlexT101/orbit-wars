@@ -33,12 +33,29 @@ def main() -> None:
     p.add_argument("--learning-rate", type=float, default=0.08)
     p.add_argument("--rounds", type=int, default=600)
     p.add_argument("--early-stopping", type=int, default=40)
+    p.add_argument(
+        "--zero-cols",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated SummaryV2 column indices to neutralize (set to a "
+            "constant 0) before training. A constant column has zero split gain, "
+            "so XGBoost ignores it — equivalent to dropping the feature while "
+            "keeping the model 65-d so the Rust runtime loads it unchanged. "
+            "E.g. '41,61,62,63,64' drops step + the 4p-standing block."
+        ),
+    )
     args = p.parse_args()
 
     d = np.load(args.data, allow_pickle=False)
     X = d["summary_v2"].astype(np.float32)
     y = d["labels"].astype(np.float32)
     meta = d["meta"].astype(np.int32)
+    if args.zero_cols:
+        cols = [int(c) for c in args.zero_cols.split(",") if c.strip() != ""]
+        X = X.copy()
+        X[:, cols] = 0.0
+        print(f"zeroed columns {cols} (treated as dropped; model stays {X.shape[1]}-d)")
     yb = (y > 0).astype(np.float32)
     val_mask = game_level_split_mask(meta, args.val_frac, args.seed)
 
