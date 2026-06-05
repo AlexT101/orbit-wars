@@ -27,11 +27,13 @@ REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
 
+from constants import PAIR_TURN_SHAPE, TAKEOVER_SHAPE, TOKEN_SHAPE  # noqa: E402
 from features import ACTION_DIM  # noqa: E402
 from model import build_policy  # noqa: E402
 
 
-DATASET_PATH = IL_DIR / "data" / "isaiah_tufa_labs_2p_wins_bc_manifest.json"
+DATASET_FORMAT_VERSION = 4
+DATASET_PATH = IL_DIR / "data" / "isaiah_tufa_labs_2p_wins_bc_v4_manifest.json"
 OUT_DIR = IL_DIR / "checkpoints" / "isaiah_bc_transformer"
 LATEST_CHECKPOINT = OUT_DIR / "latest.pt"
 BEST_CHECKPOINT = OUT_DIR / "best.pt"
@@ -40,7 +42,7 @@ DATASET_STATS_JSON = OUT_DIR / "dataset_stats.json"
 
 SEED = 123
 DEVICE = "cuda"
-MODEL = "entity_transformer"
+MODEL = "entity_transformer_temporal"
 HIDDEN = 128
 TRANSFORMER_LAYERS = 3
 TRANSFORMER_HEADS = 4
@@ -53,7 +55,7 @@ AMP_DTYPE = "bfloat16"
 LOG_EVERY_STEPS = 200
 CHECKPOINT_EVERY_STEPS = 1000
 CHECKPOINT_EVERY_EPOCHS = 1
-LEARNING_RATE = 1.0e-4
+LEARNING_RATE = 3.0e-4
 WEIGHT_DECAY = 1.0e-4
 MAX_GRAD_NORM = 1.0
 VAL_FRACTION = 0.10
@@ -61,6 +63,10 @@ USE_WANDB = True
 WANDB_PROJECT = "orbit-wars"
 WANDB_RUN_NAME = "isaiah-bc-transformer"
 ISAIAH_NAME = "Isaiah @ Tufa Labs"
+
+if "IL_EPOCHS" in os.environ:
+    EPOCHS = int(os.environ["IL_EPOCHS"])
+RESUME_CHECKPOINT = os.environ.get("IL_RESUME_CHECKPOINT")
 
 
 def rebase_legacy_path(path: str | Path, *, manifest_dir: Path) -> Path:
@@ -108,6 +114,7 @@ class ILConfig:
     use_wandb: bool
     wandb_project: str
     wandb_run_name: str
+    resume_checkpoint: str | None
 
 
 class ChunkedILDataset(Dataset):
@@ -144,11 +151,20 @@ class ChunkedILDataset(Dataset):
         chunk_index = bisect_right(self.offsets, idx) - 1
         local_idx = idx - self.offsets[chunk_index]
         tensors = self._load_chunk(chunk_index)
+        for key in ("tokens", "presence", "pair_turns", "pair_reachable_mask", "takeover_features"):
+            if key not in tensors:
+                raise KeyError(
+                    f"dataset chunk {self.paths[chunk_index]} is missing {key!r}; "
+                    f"rebuild the v{DATASET_FORMAT_VERSION} dataset with python {IL_DIR / 'build_dataset.py'}"
+                )
         return {
-            "planets": tensors["planets"][local_idx].float(),
-            "planet_mask": tensors["planet_mask"][local_idx].float(),
+            "planets": tensors["tokens"][local_idx].float(),
+            "planet_mask": tensors["presence"][local_idx].float(),
             "globals_": tensors["globals_"][local_idx].float(),
             "action_mask": tensors["action_mask"][local_idx].bool(),
+            "pair_turns": tensors["pair_turns"][local_idx].float() / 20.0,
+            "pair_reachable_mask": tensors["pair_reachable_mask"][local_idx].float(),
+            "takeover_features": tensors["takeover_features"][local_idx].float(),
             "label": tensors["labels"][local_idx].long(),
             "value": tensors["values"][local_idx].float(),
             "weight": tensors["weights"][local_idx].float(),
@@ -300,6 +316,7 @@ def make_config() -> ILConfig:
         use_wandb=USE_WANDB,
         wandb_project=WANDB_PROJECT,
         wandb_run_name=WANDB_RUN_NAME,
+        resume_checkpoint=RESUME_CHECKPOINT,
     )
 
 
@@ -310,7 +327,7 @@ def load_prebuilt_dataset(path: Path, expected_player_name: str) -> tuple[Chunke
             f"Run: python {IL_DIR / 'build_dataset.py'}"
         )
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("format_version") != 2:
+    if payload.get("format_version") != DATASET_FORMAT_VERSION:
         raise ValueError(f"unsupported IL manifest format_version={payload.get('format_version')!r}")
     player_name = payload.get("player_name")
     if player_name != expected_player_name:
@@ -319,6 +336,30 @@ def load_prebuilt_dataset(path: Path, expected_player_name: str) -> tuple[Chunke
     if not chunks:
         raise ValueError(f"IL manifest has no chunks: {path}")
     return ChunkedILDataset(chunks, manifest_dir=path.parent), dict(payload.get("stats") or {})
+
+
+def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
+    payload = torch.load(dataset.paths[0], map_location="cpu", weights_only=False)
+    tensors = payload.get("tensors", {})
+    expected = {
+        "tokens": TOKEN_SHAPE,
+        "presence": TOKEN_SHAPE[:2],
+        "globals_": (16,),
+        "action_mask": (ACTION_DIM,),
+        "pair_turns": PAIR_TURN_SHAPE,
+        "pair_reachable_mask": PAIR_TURN_SHAPE,
+        "takeover_features": TAKEOVER_SHAPE,
+    }
+    missing = [key for key in expected if key not in tensors]
+    if missing:
+        raise ValueError(
+            f"dataset chunk {dataset.paths[0]} is missing {missing}; "
+            f"rebuild with python {IL_DIR / 'build_dataset.py'}"
+        )
+    for key, shape in expected.items():
+        got = tuple(tensors[key].shape[1:])
+        if got != tuple(shape):
+            raise ValueError(f"dataset tensor {key!r} has shape tail {got}, expected {shape}")
 
 
 def split_chunks_by_game(dataset: ChunkedILDataset, val_fraction: float, seed: int) -> tuple[list[int], list[int]]:
@@ -380,6 +421,18 @@ def batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dic
     return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
 
+def model_forward(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    return model(
+        batch["planets"],
+        batch["planet_mask"],
+        batch["globals_"],
+        batch["action_mask"],
+        pair_turns=batch.get("pair_turns"),
+        pair_reachable_mask=batch.get("pair_reachable_mask"),
+        takeover_features=batch.get("takeover_features"),
+    )
+
+
 def can_use_dataloader_workers() -> bool:
     try:
         listener = Listener(authkey=b"torch-dataloader-probe", backlog=128)
@@ -436,7 +489,7 @@ def evaluate(
     for raw_batch in loader:
         batch = batch_to_device(raw_batch, device)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            logits, _value = model(batch["planets"], batch["planet_mask"], batch["globals_"], batch["action_mask"])
+            logits, _value = model_forward(model, batch)
         loss_rows = F.cross_entropy(logits, batch["label"], reduction="none")
         pred = torch.argmax(logits, dim=-1)
         total_loss += float(loss_rows.sum().item())
@@ -468,9 +521,11 @@ def main() -> int:
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    METRICS_JSONL.write_text("", encoding="utf-8")
+    if not cfg.resume_checkpoint:
+        METRICS_JSONL.write_text("", encoding="utf-8")
 
     dataset, stats_payload = load_prebuilt_dataset(Path(cfg.dataset_path), cfg.player_name)
+    validate_dataset_schema(dataset)
     DATASET_STATS_JSON.write_text(json.dumps(stats_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     dataset_stats = stats_payload.get("dataset", {})
 
@@ -541,8 +596,27 @@ def main() -> int:
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     best_val = float("inf")
     global_step = 0
+    start_epoch = 1
 
-    for epoch in range(1, cfg.epochs + 1):
+    if cfg.resume_checkpoint:
+        resume_path = Path(cfg.resume_checkpoint).expanduser()
+        if not resume_path.is_absolute():
+            resume_path = IL_DIR / resume_path
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        global_step = int(ckpt.get("global_step", 0))
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        metrics = ckpt.get("metrics") or {}
+        best_val = float(metrics.get("val_loss", best_val))
+        print(f"resumed from {resume_path} at epoch={start_epoch - 1} global_step={global_step}")
+
+    if start_epoch > cfg.epochs:
+        print(f"nothing to do: resume starts at epoch {start_epoch}, but IL_EPOCHS/EPOCHS is {cfg.epochs}")
+        return 0
+
+    for epoch in range(start_epoch, cfg.epochs + 1):
         model.train()
         train_losses: list[float] = []
         train_accs: list[float] = []
@@ -564,7 +638,7 @@ def main() -> int:
             global_step += 1
             batch = batch_to_device(raw_batch, device)
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
-                logits, _value = model(batch["planets"], batch["planet_mask"], batch["globals_"], batch["action_mask"])
+                logits, _value = model_forward(model, batch)
                 loss = ce_loss(logits, batch["label"])
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()

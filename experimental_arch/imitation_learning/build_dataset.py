@@ -29,10 +29,10 @@ if str(TROJAN_TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TROJAN_TRAIN_DIR))
 
 from build_from_zip import SUMMARY_V2_DIM, normalize_obs  # noqa: E402
-from constants import ACTIONS_DIM, PLANET_SLOTS, SEND_ALL_ACTION  # noqa: E402
+from constants import ACTIONS_DIM, PAIR_TURN_SHAPE, PLANET_SLOTS, SEND_ALL_ACTION  # noqa: E402
 from engineered_features import append_engineered_features, append_tempo_features  # noqa: E402
 from extras_v4_build import EXTRA_DIM  # noqa: E402
-from features import ACTION_DIM, EncodedObs, discrete_action_index, encode_obs  # noqa: E402
+from features import ACTION_DIM, EncodedObs, discrete_action_index, encoded_from_feat  # noqa: E402
 from orbit_wars_model import encode_obs as rust_encode_obs  # noqa: E402
 
 
@@ -43,10 +43,11 @@ ISAIAH_NAME = "Isaiah @ Tufa Labs"
 XGB_MODEL_PATH = TROJAN_TRAIN_DIR / "weights" / "xgb_46p12e88t11_latest.json"
 EXTRACT_V4_BIN = REPO_ROOT / "bots" / "mine" / "trojan_horse" / "target" / "release" / "extract_v4"
 OUT_DIR = IL_DIR / "data"
-DATASET_STATS_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_stats.json"
-DATASET_DIR = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_chunks"
-DATASET_DB = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc.sqlite"
-DATASET_MANIFEST_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_manifest.json"
+DATASET_FORMAT_VERSION = 4
+DATASET_STATS_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4_stats.json"
+DATASET_DIR = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4_chunks"
+DATASET_DB = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4.sqlite"
+DATASET_MANIFEST_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4_manifest.json"
 
 MAX_REPLAYS = None
 MAX_SAMPLES = None
@@ -236,12 +237,17 @@ def obs_with_step(obs: dict[str, Any], turn_index: int) -> dict[str, Any]:
     return out
 
 
-def encode_replay_move(obs: dict[str, Any], move: list[Any], player: int, max_angle_error: float) -> tuple[int | None, str]:
+def encode_replay_move(
+    obs: dict[str, Any],
+    move: list[Any],
+    player: int,
+    max_angle_error: float,
+    feat: dict[str, Any],
+) -> tuple[int | None, str]:
     if len(move) < 3:
         return None, "short_move"
     source_id = int(move[0])
     move_angle = float(move[1])
-    feat = rust_encode_obs(obs, player)
     planet_ids = [int(x) for x in feat["planet_ids"]]
     try:
         source_slot = planet_ids.index(source_id)
@@ -300,7 +306,8 @@ def build_replay_samples(
         if len(action) > 1:
             multi_launch_steps += 1
         if not action:
-            encoded = encode_obs(obs, player=ref.player)
+            feat = rust_encode_obs(obs, ref.player)
+            encoded = encoded_from_feat(feat)
             samples.append(
                 ReplaySample(
                     encoded=encoded,
@@ -313,16 +320,17 @@ def build_replay_samples(
             )
             label_counts[0] += 1
         else:
+            feat = rust_encode_obs(obs, ref.player)
+            encoded = encoded_from_feat(feat)
             for move in action:
                 frac = ship_fraction(obs, move)
                 if require_full_send and (frac is None or abs(frac - 1.0) > full_send_tolerance):
                     skipped_bad_ship_fraction += 1
                     continue
-                label, _reason = encode_replay_move(obs, move, ref.player, max_angle_error)
+                label, _reason = encode_replay_move(obs, move, ref.player, max_angle_error, feat)
                 if label is None:
                     skipped_invalid += 1
                     continue
-                encoded = encode_obs(obs, player=ref.player)
                 if label < 0 or label >= len(encoded.action_mask) or not bool(encoded.action_mask[label]):
                     skipped_invalid += 1
                     continue
@@ -364,8 +372,15 @@ def stack_encoded(items: list[EncodedObs]) -> dict[str, np.ndarray]:
     return {
         "planets": np.stack([x.planets for x in items]).astype(np.float32),
         "planet_mask": np.stack([x.planet_mask for x in items]).astype(np.float32),
+        "tokens": np.stack([x.tokens for x in items]).astype(np.float32),
+        "presence": np.stack([x.presence for x in items]).astype(np.float32),
         "globals_": np.stack([x.globals for x in items]).astype(np.float32),
         "action_mask": np.stack([x.action_mask for x in items]).astype(np.bool_),
+        "pair_turns": np.stack([x.pair_turns for x in items]).reshape((-1, *PAIR_TURN_SHAPE)).astype(np.float32),
+        "pair_reachable_mask": np.stack([x.pair_reachable_mask for x in items])
+        .reshape((-1, *PAIR_TURN_SHAPE))
+        .astype(np.float32),
+        "takeover_features": np.stack([x.takeover_features for x in items]).astype(np.float32),
     }
 
 
@@ -510,10 +525,13 @@ def write_samples_chunk(
     labels = np.asarray([sample.label for sample in samples], dtype=np.int64)
     encoded = stack_encoded([sample.encoded for sample in samples])
     tensors = {
-        "planets": torch.as_tensor(encoded["planets"], dtype=torch.float32),
-        "planet_mask": torch.as_tensor(encoded["planet_mask"], dtype=torch.float32),
+        "tokens": torch.as_tensor(encoded["tokens"], dtype=torch.float16),
+        "presence": torch.as_tensor(encoded["presence"], dtype=torch.bool),
         "globals_": torch.as_tensor(encoded["globals_"], dtype=torch.float32),
         "action_mask": torch.as_tensor(encoded["action_mask"], dtype=torch.bool),
+        "pair_turns": torch.as_tensor(np.rint(encoded["pair_turns"] * 20.0).clip(0, 255), dtype=torch.uint8),
+        "pair_reachable_mask": torch.as_tensor(encoded["pair_reachable_mask"].astype(np.bool_), dtype=torch.bool),
+        "takeover_features": torch.as_tensor(encoded["takeover_features"].astype(np.bool_), dtype=torch.bool),
         "labels": torch.as_tensor(labels, dtype=torch.long),
         "values": torch.as_tensor(values, dtype=torch.float32),
         "weights": torch.as_tensor(weights, dtype=torch.float32),
@@ -525,7 +543,7 @@ def write_samples_chunk(
     tmp_path = DATASET_DIR / f".{chunk_name}.tmp"
     final_path = DATASET_DIR / chunk_name
     payload = {
-        "format_version": 2,
+        "format_version": DATASET_FORMAT_VERSION,
         "player_name": cfg.player_name,
         "game_id": ref.path.stem,
         "replay_path": str(ref.path),
@@ -665,7 +683,7 @@ def aggregate_stats(conn: sqlite3.Connection, cfg: DatasetBuildConfig) -> tuple[
         label_counts=dict(label_counts.most_common(20)),
     )
     stats_payload = {
-        "format_version": 2,
+        "format_version": DATASET_FORMAT_VERSION,
         "config": asdict(cfg),
         "dataset": asdict(stats),
         "value_mean": float(values.mean()) if values.size else 0.0,
@@ -684,7 +702,7 @@ def aggregate_stats(conn: sqlite3.Connection, cfg: DatasetBuildConfig) -> tuple[
 def write_manifest(conn: sqlite3.Connection, cfg: DatasetBuildConfig) -> dict[str, Any]:
     stats_payload, chunks = aggregate_stats(conn, cfg)
     manifest = {
-        "format_version": 2,
+        "format_version": DATASET_FORMAT_VERSION,
         "player_name": cfg.player_name,
         "config": asdict(cfg),
         "stats": stats_payload,

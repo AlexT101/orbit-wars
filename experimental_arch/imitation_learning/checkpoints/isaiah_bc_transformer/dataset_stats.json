@@ -2,17 +2,17 @@
   "chunks": 801,
   "config": {
     "action_dim": 1937,
-    "extract_v4_bin": "../../bots/mine/trojan_horse/target/release/extract_v4",
+    "extract_v4_bin": "/home/ec2-user/orbit-wars-osteo/bots/mine/trojan_horse/target/release/extract_v4",
     "full_send_tolerance": 0.08,
     "max_angle_error": 0.08,
     "max_replays": null,
     "max_samples": null,
     "player_name": "Isaiah @ Tufa Labs",
     "replay_dirs": [
-      "../replays"
+      "/home/ec2-user/orbit-wars-osteo/experimental_arch/replays"
     ],
     "require_full_send": true,
-    "xgb_model_path": "../../bots/mine/trojan_horse/train/weights/xgb_46p12e88t11_latest.json"
+    "xgb_model_path": "/home/ec2-user/orbit-wars-osteo/bots/mine/trojan_horse/train/weights/xgb_46p12e88t11_latest.json"
   },
   "dataset": {
     "action_lengths": {
@@ -57,7 +57,7 @@
     "skipped_bad_ship_fraction": 22376,
     "skipped_invalid": 5890
   },
-  "format_version": 2,
+  "format_version": 4,
   "launch_fraction": 0.8403500120620415,
   "noop_fraction": 0.15964998793795854,
   "sample_weight_mean": 0.20787006616592407,
