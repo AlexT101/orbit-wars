@@ -2,9 +2,10 @@
 XGB value net:
 
   1. **Default model**: a per-format XGBoost gbtree chosen by player count —
-     weights/xgb_2p.json (2p) or weights/xgb_4p.json (4p), falling back to the
-     legacy weights/xgb_2p_old_top10.json. All use the corrected
-     extrapolate_fleets combat, matching the training feature extraction.
+     weights/xgb_4p.json (4p) or weights/xgb_2p.json (2p). The 2p net is the
+     universal fallback: 4p falls back to it when no 4p net is present, and it
+     is also the 2-players-left net. All use the corrected extrapolate_fleets
+     combat, matching the training feature extraction.
 
   2. **XGBoost-in-Rust** value net (src/xgb.rs) — pure-Rust gbtree
      inference, bit-exact parity with Python xgboost. Loaded automatically
@@ -20,11 +21,10 @@ This single file serves BOTH layouts — `_locate()` auto-detects which:
 
   * **dev**: this wrapper sits in `aphrodite/` and uses this directory's own
     build tree (binary at `target/release/aphrodite`, weights at
-    `train/weights/xgb_2p_old_top10.json`). Builds the binary on demand if
-    missing.
+    `train/weights/xgb_2p.json`). Builds the binary on demand if missing.
 
-  * **Kaggle submission**: `main.py`, `aphrodite`, and
-    `xgb_2p_old_top10.json` are bundled flat in one dir.
+  * **Kaggle submission**: `main.py`, `aphrodite`, and the value-net json(s)
+    are bundled flat in one dir.
     `build_submission.py` copies THIS file into the archive verbatim — do
     not fork a second copy.
 """
@@ -40,9 +40,8 @@ import threading
 _PROC = None
 _LOCK = threading.Lock()
 _BIN_NAME = "aphrodite"
-_WEIGHTS_NAME = "xgb_2p_old_top10.json"
-_WEIGHTS_2P_NAME = "xgb_2p.json"
-_WEIGHTS_4P_NAME = "xgb_4p.json"
+_WEIGHTS_2P_NAME = "xgb_2p_shapdrop.json"
+_WEIGHTS_4P_NAME = "xgb_4p_shapdrop.json"
 
 
 def _pump_stderr(pipe):
@@ -94,7 +93,7 @@ def _locate():
     env_bin = os.environ.get("APHRODITE_BIN")
     if env_bin and os.path.isfile(env_bin):
         d = os.path.dirname(env_bin)
-        w = os.path.join(d, _WEIGHTS_NAME)
+        w = os.path.join(d, _WEIGHTS_2P_NAME)
         return env_bin, (w if os.path.isfile(w) else None), d, None
 
     wd = _wrapper_dir()
@@ -105,7 +104,7 @@ def _locate():
         if d:
             b = _bin_in(d)
             if b:
-                w = os.path.join(d, _WEIGHTS_NAME)
+                w = os.path.join(d, _WEIGHTS_2P_NAME)
                 return b, (w if os.path.isfile(w) else None), d, None
 
     # Dev layout: this wrapper lives at the aphrodite crate root and uses its
@@ -117,15 +116,16 @@ def _locate():
     binary = _bin_in(release) or os.path.join(
         release, _BIN_NAME + (".exe" if sys.platform == "win32" else "")
     )
-    weights = os.path.join(crate_dir, "train", "weights", _WEIGHTS_NAME)
+    weights = os.path.join(crate_dir, "train", "weights", _WEIGHTS_2P_NAME)
     return binary, (weights if os.path.isfile(weights) else None), crate_dir, crate_dir
 
 
 def _weight_candidates(run_cwd, build_cwd, n_players):
+    # 4p prefers the 4p net but falls back to the 2p net; 2p uses the 2p net.
     names = (
-        (_WEIGHTS_4P_NAME, _WEIGHTS_NAME)
+        (_WEIGHTS_4P_NAME, _WEIGHTS_2P_NAME)
         if n_players >= 4
-        else (_WEIGHTS_2P_NAME, _WEIGHTS_NAME)
+        else (_WEIGHTS_2P_NAME,)
     )
     dirs = []
     for d in (run_cwd, build_cwd):
@@ -204,7 +204,7 @@ def _ensure(payload=None):
     _build_if_needed(binary, build_cwd)
     _ensure_executable(binary)
     env = dict(os.environ)
-    env.setdefault("APHRODITE_BUDGET_MS", "500")
+    env.setdefault("APHRODITE_BUDGET_MS", "700")
     # Default to format-specific XGB weights unless the caller set their own.
     if "APHRODITE_VALUE_NET_PATH" not in env:
         n_players = _infer_num_players(payload or {})
