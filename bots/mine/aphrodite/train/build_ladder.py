@@ -149,7 +149,7 @@ def main() -> None:
 
         if filtering:
             print(f"[gate] {z.stem}: {args.gate} top-{n_day}")
-            run([py, HERE / "filter_top10_and_train_xgb.py",
+            run([py, HERE / "train_xgb.py",
                  "--input", raw, "--top10-out", out, "--filter-only",
                  "--gate", args.gate, "--top-n", n_day, "--min-games", args.min_games])
             raw.unlink(missing_ok=True)
@@ -160,7 +160,7 @@ def main() -> None:
     combined = workdir / "combined.npz"
     run([py, HERE / "combine_npz.py", "--out", combined, *per_day])
 
-    train = [py, HERE / "filter_top10_and_train_xgb.py",
+    train = [py, HERE / "train_xgb.py",
              "--data", combined, "--no-filter", "--model-out", args.model_out,
              "--rounds", args.rounds, "--early-stopping", args.early_stopping]
     if args.recency_halflife > 0:
