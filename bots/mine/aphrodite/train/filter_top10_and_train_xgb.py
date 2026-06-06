@@ -255,6 +255,117 @@ def quality_weights(win_rate, floor: float, enabled: bool):
     return w.astype(np.float32)
 
 
+# ── decisiveness down-weighting ─────────────────────────────────────────────
+# summary_v2 (65-dim) column indices. Layout: me_cur[0:9] opp_cur[9:18]
+# me_ext[18:26] opp_ext[26:34] neutral[34:41] relational[41:65] (see value_net.rs).
+_COL_ME_PROD_STATIC = 5      # me: current static-planet production
+_COL_ME_PROD_ORBIT = 6       # me: current orbiting-planet production
+_COL_OPP_PROD_STATIC = 14    # dominant enemy: current static-planet production
+_COL_OPP_PROD_ORBIT = 15     # dominant enemy: current orbiting-planet production
+_COL_NEUT_PROD_STATIC = 38   # neutral: static-planet production
+_COL_NEUT_PROD_ORBIT = 39    # neutral: orbiting-planet production
+_COL_SHIP_SHARE = 48         # ship_share: my ships / (my + enemy) ships
+_COL_PRODUCTION_SHARE = 49   # production_share: my prod / (my + enemy) prod
+# Tuning knobs for the decisiveness weight (down-weights decided positions):
+_DEC_ADV_SHIP_W = 0.5        # blend weight of ship_share in the advantage
+_DEC_ADV_PROD_W = 0.5        # blend weight of production_share in the advantage
+_DEC_LEAD_TAU = 0.70         # advantage at which a side counts as clearly "ahead"
+_DEC_LEAD_K = 15.0           # steepness of the "ahead" sigmoid (higher = sharper)
+_DEC_MATURE_TAU = 0.70       # claimed-production fraction at which it's "endgame"
+_DEC_MATURE_K = 12.0         # steepness of the "endgame" sigmoid (higher = sharper)
+_DEC_ALPHA = 1.0             # exponent shaping mid-range weight falloff (higher = steeper)
+_DEC_FLOOR = 0.2             # min weight kept for blowouts (preserves extreme calibration)
+# Hard-drop knobs for fully decided rows (--drop-decided); see decided_keep_mask:
+_DEC_DROP_LEAD = 0.80        # drop rows where a side's advantage exceeds this
+_DEC_DROP_MATURE = 0.75      # ...AND this much production is claimed (never drops early leads)
+
+
+def _has_summary_cols(X, who: str) -> bool:
+    """True if X is wide enough to index the summary_v2 columns used below."""
+    need = _COL_PRODUCTION_SHARE + 1
+    if X.shape[1] < need:
+        print(f"  [{who}] WARN feature matrix has {X.shape[1]} cols (<{need}); "
+              f"skipping (need full 65-dim summary_v2)")
+        return False
+    return True
+
+
+def _advantage_and_claimed(X):
+    """Per-row (d_rel, claimed) from summary_v2 columns, shared by the
+    decisiveness weight and the decided-drop.
+
+      d_rel   = max(adv, 1-adv)  — symmetric lead in [0.5, 1] (which side is
+                ahead doesn't matter; a blowout is a blowout from either seat).
+      claimed = player_prod / (player + neutral prod) — endgame proxy: how much
+                of the map is taken vs still neutral, so an early lead over a
+                mostly-neutral board reads as low-maturity, not decided.
+
+    NOTE: `claimed` uses only the dominant enemy's production (the opp_cur
+    block), so in 4p it under-counts other enemies and reads conservatively low
+    (maturity gate won't over-trigger). Exact in 2p.
+    """
+    Xf = X.astype(np.float64)
+    adv = _DEC_ADV_SHIP_W * Xf[:, _COL_SHIP_SHARE] + _DEC_ADV_PROD_W * Xf[:, _COL_PRODUCTION_SHARE]
+    d_rel = np.maximum(adv, 1.0 - adv)
+    me_prod = Xf[:, _COL_ME_PROD_STATIC] + Xf[:, _COL_ME_PROD_ORBIT]
+    en_prod = Xf[:, _COL_OPP_PROD_STATIC] + Xf[:, _COL_OPP_PROD_ORBIT]
+    neu_prod = Xf[:, _COL_NEUT_PROD_STATIC] + Xf[:, _COL_NEUT_PROD_ORBIT]
+    claimed = (me_prod + en_prod) / np.maximum(me_prod + en_prod + neu_prod, 1e-6)
+    return d_rel, claimed
+
+
+def decisiveness_weights(X, enabled: bool):
+    """Per-row sample weight that down-weights DECIDED positions so the model
+    spends its capacity on contested midgame states (where DUCT actually has to
+    discriminate between candidate moves). A position is decided only when BOTH
+    a side is far ahead AND most of the map is claimed:
+
+        decisiveness = sigmoid(k1*(d_rel - tau1)) * sigmoid(k2*(claimed - tau2))
+        weight       = floor + (1 - floor) * (1 - decisiveness)^alpha
+
+    Computed from summary_v2 columns (no re-extraction). Returns None when
+    disabled or the matrix is too narrow.
+    """
+    if not enabled:
+        return None
+    if not _has_summary_cols(X, "decisiveness"):
+        return None
+    d_rel, claimed = _advantage_and_claimed(X)
+    lead_term = 1.0 / (1.0 + np.exp(-_DEC_LEAD_K * (d_rel - _DEC_LEAD_TAU)))
+    mature_term = 1.0 / (1.0 + np.exp(-_DEC_MATURE_K * (claimed - _DEC_MATURE_TAU)))
+    decisiveness = lead_term * mature_term
+    w = _DEC_FLOOR + (1.0 - _DEC_FLOOR) * (1.0 - decisiveness) ** _DEC_ALPHA
+    print(f"  [decisiveness] floor={_DEC_FLOOR} alpha={_DEC_ALPHA} "
+          f"lead(tau={_DEC_LEAD_TAU},k={_DEC_LEAD_K}) mature(tau={_DEC_MATURE_TAU},k={_DEC_MATURE_K})  "
+          f"weight range [{w.min():.3f}, {w.max():.3f}] mean={w.mean():.3f}  "
+          f"rows<0.5w: {100 * (w < 0.5).mean():.1f}%")
+    return w.astype(np.float32)
+
+
+def decided_keep_mask(X, enabled: bool):
+    """Boolean KEEP-mask (True = keep) that hard-drops fully decided rows: a
+    side's advantage exceeds `_DEC_DROP_LEAD` AND the board is mature
+    (`claimed > _DEC_DROP_MATURE`). The maturity condition guarantees an early
+    lead over a mostly-neutral board is never dropped. Returns None (keep all)
+    when disabled or the matrix is too narrow.
+
+    Safe for the MCTS eval as long as the 0.7-0.9 band is retained (it is, via
+    the decisiveness floor): XGBoost trees saturate to the most-winning leaf for
+    >0.9 leaf states seen in search, so ordering stays monotonic (winning >
+    contested) without needing fine resolution in the dropped tail.
+    """
+    if not enabled:
+        return None
+    if not _has_summary_cols(X, "drop-decided"):
+        return None
+    d_rel, claimed = _advantage_and_claimed(X)
+    drop = (d_rel > _DEC_DROP_LEAD) & (claimed > _DEC_DROP_MATURE)
+    keep = ~drop
+    print(f"  [drop-decided] lead>{_DEC_DROP_LEAD} & claimed>{_DEC_DROP_MATURE}: "
+          f"dropping {int(drop.sum()):,}/{len(drop):,} rows ({100 * drop.mean():.1f}%)")
+    return keep
+
+
 def combine_sample_weights(*weights):
     """Element-wise product of optional per-row weight arrays (None == all-ones).
     Returns None if every input is None."""
@@ -327,6 +438,14 @@ def main():
                         "Multiplies into the recency weight. Use with --no-filter.")
     p.add_argument("--quality-floor", type=float, default=0.25,
                    help="weakest kept player's quality weight (strongest = 1.0); only with --quality-weight")
+    p.add_argument("--decisiveness-weight", action="store_true",
+                   help="down-weight DECIDED positions (a side far ahead AND map mostly claimed) so "
+                        "training focuses on contested midgame states. Computed from summary_v2 "
+                        "columns; tune via the _DEC_* / _COL_* constants. Multiplies into the other weights.")
+    p.add_argument("--drop-decided", action="store_true",
+                   help="hard-drop rows where a side's advantage exceeds _DEC_DROP_LEAD AND the board "
+                        "is mature (claimed > _DEC_DROP_MATURE) — removes degenerate blowout/throwing "
+                        "play. Applied before weighting and the train/val split.")
     p.add_argument("--rounds", type=int, default=600, help="max XGBoost boosting rounds")
     p.add_argument("--learning-rate", type=float, default=0.08)
     p.add_argument("--max-depth", type=int, default=6)
@@ -375,9 +494,19 @@ def main():
         print("Done.")
         return
 
+    # Hard-drop fully decided rows before weighting and the split, so every
+    # downstream array (weights from win_rate/features, val_mask from meta)
+    # stays row-aligned.
+    keep = decided_keep_mask(Xs, args.drop_decided)
+    if keep is not None:
+        Xs, ys, ms = Xs[keep], ys[keep], ms[keep]
+        row_source = row_source[keep] if row_source is not None else None
+        row_win_rate = row_win_rate[keep] if row_win_rate is not None else None
+
     weight = combine_sample_weights(
         recency_weights(row_source, args.recency_halflife),
         quality_weights(row_win_rate, args.quality_floor, args.quality_weight),
+        decisiveness_weights(Xs, args.decisiveness_weight),
     )
 
     print(f"\n=== STEP 2: train XGB (binary:logistic d=6 lr=0.08 n_est=600) ===")
