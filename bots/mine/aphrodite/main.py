@@ -1,32 +1,5 @@
-"""aphrodite - the aphrodite Rust bot paired with a *fixed-extrapolation*
-XGB value net:
-
-  1. **Default model**: a per-format XGBoost gbtree chosen by player count —
-     weights/xgb_4p.json (4p) or weights/xgb_2p.json (2p). The 2p net is the
-     universal fallback: 4p falls back to it when no 4p net is present, and it
-     is also the 2-players-left net. All use the corrected extrapolate_fleets
-     combat, matching the training feature extraction.
-
-  2. **XGBoost-in-Rust** value net (src/xgb.rs) — pure-Rust gbtree
-     inference, bit-exact parity with Python xgboost. Loaded automatically
-     when APHRODITE_VALUE_NET_PATH points at a .json file.
-
-  3. **No rollouts** — leaf-eval only. The XGB value net is strong enough
-     that the (very slow) depth-8 apollo replan rollout doesn't pay for
-     itself; skipping it buys many more MCTS iterations per turn.
-
-To override the model, set APHRODITE_VALUE_NET_PATH to another file.
-
-This single file serves BOTH layouts — `_locate()` auto-detects which:
-
-  * **dev**: this wrapper sits in `aphrodite/` and uses this directory's own
-    build tree (binary at `target/release/aphrodite`, weights at
-    `train/weights/xgb_2p.json`). Builds the binary on demand if missing.
-
-  * **Kaggle submission**: `main.py`, `aphrodite`, and the value-net json(s)
-    are bundled flat in one dir.
-    `build_submission.py` copies THIS file into the archive verbatim — do
-    not fork a second copy.
+"""aphrodite - DUCT / MCTS based Rust bot with eval, using Apollo heuristics.
+This bot needs to be rebuilt on any Rust change.
 """
 
 import json
@@ -37,12 +10,21 @@ import subprocess
 import sys
 import threading
 
-_PROC = None
-_LOCK = threading.Lock()
-_BIN_NAME = "aphrodite"
+# Update these contants if training new weights
 _WEIGHTS_2P_NAME = "xgb_2p_shapdrop.json"
 _WEIGHTS_4P_NAME = "xgb_4p_shapdrop.json"
 
+# Local testing uses lower limits for speed
+_DEV_BUDGET_MS = "700"
+_SUBMISSION_BUDGET_MS = "1000"
+
+# Set to true if testing higher time limits (also lets bot use remaining overage time)
+_USE_PROD_LIMITS = False
+
+
+_PROC = None
+_LOCK = threading.Lock()
+_BIN_NAME = "aphrodite"
 
 def _pump_stderr(pipe):
     try:
@@ -193,6 +175,9 @@ def _norm(o):
         "initial_planets": list(g("initial_planets", []) or []),
         "comets": list(g("comets", []) or []),
         "comet_planet_ids": list(g("comet_planet_ids", []) or []),
+        # Seconds of shared overage budget left (engine-reported). The Rust
+        # planner only consults this when APHRODITE_USE_OVERAGE is enabled.
+        "remainingOverageTime": g("remainingOverageTime", 0.0),
     }
 
 
@@ -204,7 +189,14 @@ def _ensure(payload=None):
     _build_if_needed(binary, build_cwd)
     _ensure_executable(binary)
     env = dict(os.environ)
-    env.setdefault("APHRODITE_BUDGET_MS", "700")
+    # Production limits (submission budget + overage pool) when _USE_PROD_LIMITS
+    # is on, else the faster dev budget with no overage. See duct::best_move's
+    # overage extension for how APHRODITE_USE_OVERAGE is consumed.
+    env.setdefault(
+        "APHRODITE_BUDGET_MS",
+        _SUBMISSION_BUDGET_MS if _USE_PROD_LIMITS else _DEV_BUDGET_MS,
+    )
+    env.setdefault("APHRODITE_USE_OVERAGE", "1" if _USE_PROD_LIMITS else "0")
     # Default to format-specific XGB weights unless the caller set their own.
     if "APHRODITE_VALUE_NET_PATH" not in env:
         n_players = _infer_num_players(payload or {})

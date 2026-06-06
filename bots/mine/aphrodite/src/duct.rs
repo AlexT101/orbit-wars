@@ -27,6 +27,33 @@ const TERMINAL_STEP: i64 = 500;
 const K_ROOT_DEFAULT: usize = 5;
 const K_NON_ROOT_DEFAULT: usize = 4;
 
+// ── overage-time budgeting ────────────────────────────────────────────────
+// When enabled (a nonzero `overage_remaining_ms` is passed into `best_move`, DUCT may
+// keep searching past the per-turn base budget by dipping into the engine's
+// shared overage pool, but ONLY on turns where extra computation can plausibly
+// change the chosen move:
+//   * the position is still CONTESTED (no player dominates), and
+//   * the root decision is still CLOSE (top-two candidate values nearly tied).
+// Spend is bounded three ways: a per-turn hard cap, a safety reserve that must
+// remain in the pool, and small chunks so the decision gap is re-checked
+// between them (we stop early once one move clearly separates). All in ms.
+
+/// Hard cap on overage spent beyond the base budget on any single turn.
+const OVERAGE_PER_TURN_CAP_MS: u64 = 2000;
+/// Safety reserve to keep untouched in the engine's overage pool, computed as
+/// a base amount plus a per-turn multiplier
+const OVERAGE_SAFETY_BASE_MS: f64 = 2500.0;
+const OVERAGE_SAFETY_PER_TURN_MS: f64 = 15.0;
+/// Grant overage in chunks this size, re-checking the decision gap between each.
+const OVERAGE_CHUNK_MS: u64 = 250;
+/// The root decision counts as "close" (worth more search) while the gap
+/// between the best and second-best candidate average values is below this.
+/// Values are clamped predictions in [-1, 1].
+const OVERAGE_CLOSE_GAP: f64 = 0.05;
+/// The position counts as "decided" (not worth extra search) once any single
+/// player controls at least this share of total ship strength.
+const OVERAGE_DECIDED_SHARE: f64 = 0.70;
+
 thread_local! {
     /// Stash the root after each turn, so next turn's matching state can
     /// reuse the joint subtree corresponding to (my_chosen, opp_actual).
@@ -589,7 +616,55 @@ fn state_hash(state: &GameState) -> u64 {
     h
 }
 
-pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
+/// Largest single-player share of total ship strength (garrisons + in-flight),
+/// across all owned planets/fleets (neutrals excluded). 0.0 when nobody has
+/// ships. Used to gate overage spend: a blowout is not worth extra search, and
+/// this works for both 2p and 4p (it asks "does anyone dominate", not "is it
+/// 50/50"). Cheap O(planets+fleets) scan.
+fn max_player_ship_share(state: &GameState) -> f64 {
+    let mut by: HashMap<i32, i64> = HashMap::new();
+    let mut total = 0i64;
+    for pl in &state.planets {
+        if pl.owner >= 0 && pl.ships > 0 {
+            *by.entry(pl.owner).or_insert(0) += pl.ships;
+            total += pl.ships;
+        }
+    }
+    for f in &state.fleets {
+        if f.owner >= 0 && f.ships > 0 {
+            *by.entry(f.owner).or_insert(0) += f.ships;
+            total += f.ships;
+        }
+    }
+    if total <= 0 {
+        return 0.0;
+    }
+    by.values().copied().max().unwrap_or(0) as f64 / total as f64
+}
+
+/// Gap between the best and second-best candidate average values at the root,
+/// over candidates that have been visited. Returns +inf when fewer than two
+/// candidates have stats (treated as "not close" so we never extend on a
+/// degenerate root). Used to decide whether overage search could still flip the
+/// chosen move.
+fn root_top2_gap(root: &Node) -> f64 {
+    let mut avgs: Vec<f64> = root
+        .my_stats
+        .iter()
+        .filter(|st| st.visits > 0)
+        .map(|st| st.sum_value / st.visits as f64)
+        .collect();
+    if avgs.len() < 2 {
+        return f64::INFINITY;
+    }
+    avgs.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    avgs[0] - avgs[1]
+}
+
+/// `overage_remaining_ms` is the engine's `remainingOverageTime` (seconds,
+/// converted to ms by the caller) for THIS turn, or 0.0 when overage use is
+/// disabled (dev) — in which case the extension below is skipped entirely.
+pub fn best_move(state: &GameState, me: i32, budget_ms: u64, overage_remaining_ms: f64) -> Vec<Action> {
     // Build/refresh the persistent shared apollo cache before any candidate
     // generation or rollout reads it.
     refresh_cache(state);
@@ -646,6 +721,38 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
             break;
         }
     }
+
+    // ── overage extension ────────────────────────────────────────────────
+    // Past the base budget, optionally keep searching by dipping into the
+    // engine's overage pool — but only on a contested position with a still-
+    // close root decision, bounded by a per-turn cap and a pool safety reserve.
+    // Granted in chunks so the gap is re-checked (and search stops early once a
+    // move separates). `overage_remaining_ms == 0.0` (disabled) skips all of it.
+    let mut overage_used_ms: u64 = 0;
+    let remaining_turns = (TERMINAL_STEP - state.step).max(0) as f64;
+    let safety_buffer_ms = OVERAGE_SAFETY_BASE_MS + OVERAGE_SAFETY_PER_TURN_MS * remaining_turns;
+    if overage_remaining_ms > safety_buffer_ms {
+        let available = overage_remaining_ms - safety_buffer_ms;
+        let turn_cap = (available.floor() as u64).min(OVERAGE_PER_TURN_CAP_MS);
+        let contested = max_player_ship_share(&root.state) < OVERAGE_DECIDED_SHARE;
+        if turn_cap >= OVERAGE_CHUNK_MS && contested {
+            while overage_used_ms + OVERAGE_CHUNK_MS <= turn_cap
+                && root_top2_gap(&root) < OVERAGE_CLOSE_GAP
+            {
+                let ext_deadline =
+                    Instant::now() + std::time::Duration::from_millis(OVERAGE_CHUNK_MS);
+                while Instant::now() < ext_deadline {
+                    select_and_expand(&mut root, me, true);
+                    iters += 1;
+                    if iters > 1_000_000 {
+                        break;
+                    }
+                }
+                overage_used_ms += OVERAGE_CHUNK_MS;
+            }
+        }
+    }
+
     crate::profiling::ITERATIONS.fetch_add(iters as u64, std::sync::atomic::Ordering::Relaxed);
 
     // Flush the leaf dump for this search and append a tree-shape row (both
@@ -699,9 +806,10 @@ pub fn best_move(state: &GameState, me: i32, budget_ms: u64) -> Vec<Action> {
             ));
         }
         eprintln!(
-            "[duck] step={} iters={} root_visits={} my_K={} nodes={} max_depth={} | {}",
+            "[duck] step={} iters={} overage_ms={} root_visits={} my_K={} nodes={} max_depth={} | {}",
             state.step,
             iters,
+            overage_used_ms,
             root.visits,
             root.my_candidates.len(),
             nodes,

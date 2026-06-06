@@ -19,6 +19,12 @@ fn main() -> io::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
+    // Only dip into the engine's overage pool when explicitly enabled (set by
+    // build_submission.py for final submissions; off in dev so local matches
+    // stay fast and predictable). See `duct::best_move`'s overage extension.
+    let use_overage = std::env::var("APHRODITE_USE_OVERAGE")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false);
     let mut dump: Option<File> = std::env::var("APHRODITE_DUMP_FEATURES_PATH")
         .ok()
         .and_then(|p| File::create(p).ok());
@@ -84,7 +90,14 @@ fn main() -> io::Result<()> {
             profiling::reset();
         }
         let __turn_t0 = std::time::Instant::now();
-        let actions = duct::best_move(&state, state.player, budget_ms);
+        // `remainingOverageTime` is reported in SECONDS by the engine; convert
+        // to ms for the planner. 0.0 when overage use is disabled.
+        let overage_ms = if use_overage {
+            v["remainingOverageTime"].as_f64().unwrap_or(0.0) * 1000.0
+        } else {
+            0.0
+        };
+        let actions = duct::best_move(&state, state.player, budget_ms, overage_ms);
         // Final no-loss reroute pass on the chosen plan — runs after the planner
         // has fully committed (apollo's `redirect_moves` tail, ported via the
         // bridge since `Action` tuples drop the target the pass needs).
