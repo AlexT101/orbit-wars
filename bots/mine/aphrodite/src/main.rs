@@ -94,11 +94,24 @@ fn main() -> io::Result<()> {
         // is nearly exhausted, shrink the base search cap to leave margin for
         // wrapper/redirect overhead.
         let remaining_overage_s = v["remainingOverageTime"].as_f64().unwrap_or(0.0);
-        let effective_budget_ms = if remaining_overage_s <= 2.0 {
+        let turns_left = (500 - state.step).max(0) as f64;
+        let low_overage_threshold_s = 1.5 + 0.015 * turns_left;
+        let effective_budget_ms = if remaining_overage_s <= low_overage_threshold_s {
             budget_ms.min(900)
         } else {
             budget_ms
         };
+        if effective_budget_ms < budget_ms {
+            eprintln!(
+                "[aphrodite-panic] step={} player={} remaining_overage={:.3}s threshold={:.3}s budget={}ms->{}ms",
+                state.step,
+                state.player,
+                remaining_overage_s,
+                low_overage_threshold_s,
+                budget_ms,
+                effective_budget_ms
+            );
+        }
         // Convert to ms for the planner. 0.0 when overage use is disabled.
         let overage_ms = if use_overage {
             remaining_overage_s * 1000.0

@@ -738,11 +738,16 @@ pub fn best_move(
     let mut overage_used_ms: u64 = 0;
     let remaining_turns = (TERMINAL_STEP - state.step).max(0) as f64;
     let safety_buffer_ms = OVERAGE_SAFETY_BASE_MS + OVERAGE_SAFETY_PER_TURN_MS * remaining_turns;
+    let mut overage_turn_cap_ms: u64 = 0;
+    let mut overage_initial_gap = f64::INFINITY;
+    let mut overage_final_gap = f64::INFINITY;
     if overage_remaining_ms > safety_buffer_ms {
         let available = overage_remaining_ms - safety_buffer_ms;
         let turn_cap = (available.floor() as u64).min(OVERAGE_PER_TURN_CAP_MS);
+        overage_turn_cap_ms = turn_cap;
         let contested = max_player_ship_share(&root.state) < OVERAGE_DECIDED_SHARE;
         if turn_cap >= OVERAGE_CHUNK_MS && contested {
+            overage_initial_gap = root_top2_gap(&root);
             while overage_used_ms + OVERAGE_CHUNK_MS <= turn_cap
                 && root_top2_gap(&root) < OVERAGE_CLOSE_GAP
             {
@@ -757,7 +762,23 @@ pub fn best_move(
                 }
                 overage_used_ms += OVERAGE_CHUNK_MS;
             }
+            overage_final_gap = root_top2_gap(&root);
         }
+    }
+    if overage_used_ms > 0 {
+        eprintln!(
+            "[duck-overage] step={} player={} spent={}ms remaining={:.0}ms safety={:.0}ms cap={}ms gap={:.3}->{:.3} iters={} root_visits={}",
+            state.step,
+            me,
+            overage_used_ms,
+            overage_remaining_ms,
+            safety_buffer_ms,
+            overage_turn_cap_ms,
+            overage_initial_gap,
+            overage_final_gap,
+            iters,
+            root.visits
+        );
     }
 
     crate::profiling::ITERATIONS.fetch_add(iters as u64, std::sync::atomic::Ordering::Relaxed);
