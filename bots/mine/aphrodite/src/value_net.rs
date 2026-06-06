@@ -330,7 +330,11 @@ pub fn predict_with_cache(state: &GameState, me: i32, cache: &EntityCache) -> Op
     // from the evaluated state, so a 4p game's late 2-survivor leaves switch to
     // the 2p model automatically. Falls back to the primary net if no 2p net.
     let two_left = count_alive_players(state) == 2;
-    let m = if two_left { weights_2p().or_else(weights) } else { weights() }?;
+    let m = if two_left {
+        weights_2p().or_else(weights)
+    } else {
+        weights()
+    }?;
     let y = match m {
         Model::Xgb { model, kind } => match kind {
             InputKind::Full => {
@@ -442,7 +446,10 @@ pub mod summary_features_v2 {
         let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::new();
         for f in &state.fleets {
             if let Some((pid, dt)) = cached_predict_fleet_collision(f, state) {
-                arrivals.entry(pid).or_default().push((f.owner, f.ships, dt));
+                arrivals
+                    .entry(pid)
+                    .or_default()
+                    .push((f.owner, f.ships, dt));
             }
         }
         // Distance-weighted inbound fleet ships at planet `pid` for one side.
@@ -643,14 +650,20 @@ pub mod summary_features_v2 {
         let n_alive = (0..NP).filter(|&p| alive[p]).count() as f32;
         // alive opponents (not me, not neutral)
         let opp_players: Vec<usize> = (0..NP).filter(|&p| alive[p] && p != me_u).collect();
-        let max_opp = opp_players.iter().map(|&p| strength[p]).fold(0.0f32, f32::max);
+        let max_opp = opp_players
+            .iter()
+            .map(|&p| strength[p])
+            .fold(0.0f32, f32::max);
         let min_opp = opp_players
             .iter()
             .map(|&p| strength[p])
             .fold(f32::INFINITY, f32::min);
         let total_opp: f32 = opp_players.iter().map(|&p| strength[p]).sum();
         // rank: how many opponents are strictly stronger than me (0 = leader).
-        let my_strength_rank = opp_players.iter().filter(|&&p| strength[p] > my_strength).count() as f32;
+        let my_strength_rank = opp_players
+            .iter()
+            .filter(|&&p| strength[p] > my_strength)
+            .count() as f32;
         // ratio to the strongest opponent (>1 ⇒ I lead; denom clamped ≥1).
         let leader_strength_ratio = my_strength / max_opp.max(1.0);
         // spread among opponents (low ⇒ balanced field likely to fight itself).

@@ -23,8 +23,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::apollo::cache::{AimCacheVerdict, EntityCache, InvariantVerdict};
 use crate::apollo::constants::{
-    A_S_LOOKAHEAD, MAX_COORD_DELAY, OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS,
-    SUBSET_TOP_TARGETS,
+    A_S_LOOKAHEAD, MAX_COORD_DELAY, OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS, SUBSET_TOP_TARGETS,
 };
 use crate::apollo::engine::{MoveAction, Planet};
 use crate::apollo::helpers::{
@@ -188,7 +187,8 @@ pub fn resolve_shot(
             match cache.invariant_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
                 InvariantVerdict::Use(r) => Some(r),
                 InvariantVerdict::SingleSolve => {
-                    let r = aim_with_prediction(cache, src_id, target_id, ships, launch_turn_offset);
+                    let r =
+                        aim_with_prediction(cache, src_id, target_id, ships, launch_turn_offset);
                     cache.aim_cache_store(src_id, target_id, ships, launch_turn_offset, r);
                     r
                 }

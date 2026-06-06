@@ -42,8 +42,8 @@ const K_NON_ROOT_DEFAULT: usize = 4;
 const OVERAGE_PER_TURN_CAP_MS: u64 = 2000;
 /// Safety reserve to keep untouched in the engine's overage pool, computed as
 /// a base amount plus a per-turn multiplier
-const OVERAGE_SAFETY_BASE_MS: f64 = 2500.0;
-const OVERAGE_SAFETY_PER_TURN_MS: f64 = 15.0;
+const OVERAGE_SAFETY_BASE_MS: f64 = 2000.0;
+const OVERAGE_SAFETY_PER_TURN_MS: f64 = 50.0;
 /// Grant overage in chunks this size, re-checking the decision gap between each.
 const OVERAGE_CHUNK_MS: u64 = 250;
 /// The root decision counts as "close" (worth more search) while the gap
@@ -171,7 +171,10 @@ fn open_env_file(var: &str) -> Option<File> {
 
 fn open_tree_stats() -> Option<File> {
     let mut f = open_env_file("APHRODITE_DUMP_TREE_STATS_PATH")?;
-    let _ = writeln!(f, "step,iters,root_visits,my_K,opp_K,nodes,leaves,max_depth");
+    let _ = writeln!(
+        f,
+        "step,iters,root_visits,my_K,opp_K,nodes,leaves,max_depth"
+    );
     Some(f)
 }
 
@@ -210,8 +213,7 @@ fn maybe_dump_leaf(state: &GameState, me: i32) {
         });
         let _ = w.write_all(&search_step.to_le_bytes());
         let _ = w.write_all(&leaf_step.to_le_bytes());
-        let bytes =
-            unsafe { std::slice::from_raw_parts(v2.as_ptr() as *const u8, v2.len() * 4) };
+        let bytes = unsafe { std::slice::from_raw_parts(v2.as_ptr() as *const u8, v2.len() * 4) };
         let _ = w.write_all(bytes);
     });
 }
@@ -664,7 +666,12 @@ fn root_top2_gap(root: &Node) -> f64 {
 /// `overage_remaining_ms` is the engine's `remainingOverageTime` (seconds,
 /// converted to ms by the caller) for THIS turn, or 0.0 when overage use is
 /// disabled (dev) — in which case the extension below is skipped entirely.
-pub fn best_move(state: &GameState, me: i32, budget_ms: u64, overage_remaining_ms: f64) -> Vec<Action> {
+pub fn best_move(
+    state: &GameState,
+    me: i32,
+    budget_ms: u64,
+    overage_remaining_ms: f64,
+) -> Vec<Action> {
     // Build/refresh the persistent shared apollo cache before any candidate
     // generation or rollout reads it.
     refresh_cache(state);

@@ -90,14 +90,22 @@ fn main() -> io::Result<()> {
             profiling::reset();
         }
         let __turn_t0 = std::time::Instant::now();
-        // `remainingOverageTime` is reported in SECONDS by the engine; convert
-        // to ms for the planner. 0.0 when overage use is disabled.
+        // `remainingOverageTime` is reported in SECONDS by the engine. When it
+        // is nearly exhausted, shrink the base search cap to leave margin for
+        // wrapper/redirect overhead.
+        let remaining_overage_s = v["remainingOverageTime"].as_f64().unwrap_or(0.0);
+        let effective_budget_ms = if remaining_overage_s <= 2.0 {
+            budget_ms.min(900)
+        } else {
+            budget_ms
+        };
+        // Convert to ms for the planner. 0.0 when overage use is disabled.
         let overage_ms = if use_overage {
-            v["remainingOverageTime"].as_f64().unwrap_or(0.0) * 1000.0
+            remaining_overage_s * 1000.0
         } else {
             0.0
         };
-        let actions = duct::best_move(&state, state.player, budget_ms, overage_ms);
+        let actions = duct::best_move(&state, state.player, effective_budget_ms, overage_ms);
         // Final no-loss reroute pass on the chosen plan — runs after the planner
         // has fully committed (apollo's `redirect_moves` tail, ported via the
         // bridge since `Action` tuples drop the target the pass needs).
