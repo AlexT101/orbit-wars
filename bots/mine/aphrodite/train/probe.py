@@ -24,13 +24,13 @@ the sharpest trap is HIGH gain + LOW sib_ratio (loved globally, useless in-searc
 Usage
 -----
     # run the full batch then analyze
-    python train/probe.py --weights train/weights/xgb_2p_full65.json \
-        --model train/weights/xgb_2p_full65.json \
+    python train/probe.py --weights train/weights/xgb_2p.json \
+        --model train/weights/xgb_2p.json \
         --opponents producer owheuristic apollo_fast apollo hellburner prometheus_v2 \
         --games 4 --budget-ms 300 --max-steps 150 --out-dir train/data/2p/_probe
 
     # re-analyze an existing batch without replaying
-    python train/probe.py --reuse --model train/weights/xgb_2p_full65.json \
+    python train/probe.py --reuse --model train/weights/xgb_2p.json \
         --out-dir train/data/2p/_probe
 """
 
@@ -502,10 +502,10 @@ def analyze(out_dir: Path, model_path, drop_ratio):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--weights", type=Path,
-                   default=Path("train/weights/xgb_2p_full65.json"),
+                   default=Path("train/weights/xgb_2p.json"),
                    help="value net aphrodite plays under during the probe")
     p.add_argument("--model", type=Path,
-                   default=Path("train/weights/xgb_2p_full65.json"),
+                   default=Path("train/weights/xgb_2p.json"),
                    help="xgb json whose per-feature gain is cross-referenced")
     p.add_argument("--opponents", nargs="+",
                    default=["producer", "owheuristic", "apollo_fast", "apollo",

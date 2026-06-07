@@ -50,11 +50,11 @@ SUMMARY_V2_DIM = 65
 LEAF_RECORD_BYTES = 4 + 4 + 4 * SUMMARY_V2_DIM  # search_step:i32, leaf_step:i32, feats
 
 DEFAULT_WEIGHTS = {
-    2: "train/weights/xgb_2p_shapdrop.json",
-    4: "train/weights/xgb_4p_shapdrop.json",
+    2: "train/weights/xgb_2p.json",
+    4: "train/weights/xgb_4p.json",
 }
 # The 2-players-left net (used when a 4p game collapses to 1v1) is always the 2p net.
-WEIGHTS_2P_NAME = "train/weights/xgb_2p_shapdrop.json"
+WEIGHTS_2P_NAME = "train/weights/xgb_2p.json"
 
 
 def read_leaves(path: Path):
