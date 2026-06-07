@@ -380,7 +380,7 @@ def stack_encoded(items: list[EncodedObs]) -> dict[str, np.ndarray]:
         "pair_reachable_mask": np.stack([x.pair_reachable_mask for x in items])
         .reshape((-1, *PAIR_TURN_SHAPE))
         .astype(np.float32),
-        "takeover_features": np.stack([x.takeover_features for x in items]).astype(np.float32),
+        "planet_timeline_features": np.stack([x.planet_timeline_features for x in items]).astype(np.float32),
     }
 
 
@@ -531,7 +531,7 @@ def write_samples_chunk(
         "action_mask": torch.as_tensor(encoded["action_mask"], dtype=torch.bool),
         "pair_turns": torch.as_tensor(np.rint(encoded["pair_turns"] * 20.0).clip(0, 255), dtype=torch.uint8),
         "pair_reachable_mask": torch.as_tensor(encoded["pair_reachable_mask"].astype(np.bool_), dtype=torch.bool),
-        "takeover_features": torch.as_tensor(encoded["takeover_features"].astype(np.bool_), dtype=torch.bool),
+        "planet_timeline_features": torch.as_tensor(encoded["planet_timeline_features"], dtype=torch.float16),
         "labels": torch.as_tensor(labels, dtype=torch.long),
         "values": torch.as_tensor(values, dtype=torch.float32),
         "weights": torch.as_tensor(weights, dtype=torch.float32),

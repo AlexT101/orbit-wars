@@ -27,7 +27,7 @@ REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
 
-from constants import PAIR_TURN_SHAPE, TAKEOVER_SHAPE, TOKEN_SHAPE  # noqa: E402
+from constants import PAIR_TURN_SHAPE, PLANET_TIMELINE_SHAPE, TOKEN_SHAPE  # noqa: E402
 from features import ACTION_DIM  # noqa: E402
 from model import build_policy  # noqa: E402
 
@@ -151,20 +151,20 @@ class ChunkedILDataset(Dataset):
         chunk_index = bisect_right(self.offsets, idx) - 1
         local_idx = idx - self.offsets[chunk_index]
         tensors = self._load_chunk(chunk_index)
-        for key in ("tokens", "presence", "pair_turns", "pair_reachable_mask", "takeover_features"):
+        for key in ("tokens", "presence", "pair_turns", "pair_reachable_mask", "planet_timeline_features"):
             if key not in tensors:
                 raise KeyError(
                     f"dataset chunk {self.paths[chunk_index]} is missing {key!r}; "
                     f"rebuild the v{DATASET_FORMAT_VERSION} dataset with python {IL_DIR / 'build_dataset.py'}"
                 )
         return {
-            "planets": tensors["tokens"][local_idx].float(),
-            "planet_mask": tensors["presence"][local_idx].float(),
+            "planets": tensors["tokens"][local_idx, 0].float(),
+            "planet_mask": tensors["presence"][local_idx, 0].float(),
             "globals_": tensors["globals_"][local_idx].float(),
             "action_mask": tensors["action_mask"][local_idx].bool(),
             "pair_turns": tensors["pair_turns"][local_idx].float() / 20.0,
             "pair_reachable_mask": tensors["pair_reachable_mask"][local_idx].float(),
-            "takeover_features": tensors["takeover_features"][local_idx].float(),
+            "planet_timeline_features": tensors["planet_timeline_features"][local_idx].float(),
             "label": tensors["labels"][local_idx].long(),
             "value": tensors["values"][local_idx].float(),
             "weight": tensors["weights"][local_idx].float(),
@@ -348,7 +348,7 @@ def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
         "action_mask": (ACTION_DIM,),
         "pair_turns": PAIR_TURN_SHAPE,
         "pair_reachable_mask": PAIR_TURN_SHAPE,
-        "takeover_features": TAKEOVER_SHAPE,
+        "planet_timeline_features": PLANET_TIMELINE_SHAPE,
     }
     missing = [key for key in expected if key not in tensors]
     if missing:
@@ -429,7 +429,7 @@ def model_forward(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> tup
         batch["action_mask"],
         pair_turns=batch.get("pair_turns"),
         pair_reachable_mask=batch.get("pair_reachable_mask"),
-        takeover_features=batch.get("takeover_features"),
+        planet_timeline_features=batch.get("planet_timeline_features"),
     )
 
 
