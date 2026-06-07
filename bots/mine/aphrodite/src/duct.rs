@@ -45,7 +45,7 @@ const OVERAGE_PER_TURN_CAP_MS: u64 = 1000;
 const OVERAGE_SAFETY_BASE_MS: f64 = 2000.0;
 const OVERAGE_SAFETY_PER_TURN_MS: f64 = 100.0;
 /// Grant overage in chunks this size, re-checking the decision gap between each.
-const OVERAGE_CHUNK_MS: u64 = 250;
+const OVERAGE_CHUNK_MS: u64 = 200;
 /// The root decision counts as "close" (worth more search) while the gap
 /// between the best and second-best candidate average values is below this.
 /// Values are clamped predictions in [-1, 1].
