@@ -29,7 +29,12 @@ def main() -> None:
     metas: list[np.ndarray] = []
     sources: list[np.ndarray] = []
     win_rates: list[np.ndarray] = []
+    # Per-game (names, rewards) rows accumulated in global-gid order, so a
+    # downstream rating fit (Bradley-Terry) can see who played whom and who won.
+    game_names_all: list[np.ndarray] = []
+    game_rewards_all: list[np.ndarray] = []
     have_win_rate = True
+    have_games = True
     game_offset = 0
 
     for source_idx, path in enumerate(args.inputs):
@@ -46,6 +51,21 @@ def main() -> None:
         unique_games = np.unique(old_games)
         remap = {int(g): game_offset + i for i, g in enumerate(unique_games)}
         meta[:, 0] = np.fromiter((remap[int(g)] for g in old_games), dtype=np.int32, count=old_games.shape[0])
+
+        # Carry per-game names/rewards aligned to the new global gids: global gid
+        # == game_offset + i for the i-th entry of sorted `unique_games`, so
+        # appending in that order keeps the combined arrays gid-indexed. Note the
+        # per-file arrays are indexed by the file's ORIGINAL (full) gid, of which
+        # `unique_games` selects exactly the rows referenced by `meta`.
+        if "game_names" in d.files and "game_rewards" in d.files:
+            gn = d["game_names"]
+            gr = d["game_rewards"]
+            for g in unique_games:
+                game_names_all.append(gn[int(g)])
+                game_rewards_all.append(gr[int(g)])
+        else:
+            have_games = False
+
         game_offset += unique_games.shape[0]
 
         xs.append(x)
@@ -66,6 +86,12 @@ def main() -> None:
         extra["win_rate"] = np.concatenate(win_rates).astype(np.float32)
     else:
         print("note: not all inputs had `win_rate`; dropping it from the combined NPZ")
+    if have_games and game_names_all:
+        extra["game_names"] = np.array(game_names_all, dtype="<U64")
+        extra["game_rewards"] = np.array(game_rewards_all, dtype=np.float32)
+    else:
+        print("note: not all inputs had game_names/game_rewards; dropping them "
+              "(rating-based quality weighting will be unavailable)")
     np.savez_compressed(
         out,
         summary_v2=np.concatenate(xs).astype(np.float32),

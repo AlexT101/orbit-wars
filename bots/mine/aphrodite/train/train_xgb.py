@@ -253,9 +253,88 @@ def quality_weights(win_rate, floor: float, enabled: bool):
     from scipy.stats import rankdata
     pct = rankdata(wr, method="average") / wr.shape[0]
     w = floor + (1.0 - floor) * pct
-    print(f"  [quality] floor={floor}  win_rate range [{wr.min():.3f}, {wr.max():.3f}]  "
+    print(f"  [quality] floor={floor}  strength range [{wr.min():.3f}, {wr.max():.3f}]  "
           f"weight range [{w.min():.3f}, {w.max():.3f}]")
     return w.astype(np.float32)
+
+
+def bradley_terry_ratings(game_names, game_rewards, min_games: int, iters: int = 200):
+    """Fit a Bradley-Terry skill rating per player from game outcomes.
+
+    Unlike raw win rate, this is OPPONENT-ADJUSTED: a player who goes ~.500
+    against strong opponents outrates one who goes ~.500 against weak ones —
+    important on an Elo-matched ladder where win rates compress toward 0.5.
+
+    Each game is decomposed into pairwise "higher reward beats lower reward"
+    comparisons (so it handles 2p and 4p). Strengths theta_i are fit by the
+    standard MM iteration `theta_i <- wins_i / sum_j n_ij/(theta_i+theta_j)`,
+    renormalized to geometric mean 1. Returns {name: log(theta)} (higher =
+    stronger) for players with >= `min_games` appearances; others are omitted so
+    the caller falls back to the median rating for them.
+    """
+    from collections import defaultdict
+
+    names = sorted({str(n) for n in game_names.reshape(-1).tolist()})
+    idx = {n: i for i, n in enumerate(names)}
+    P = len(names)
+    wins = np.zeros(P)
+    appearances = np.zeros(P)
+    pair_count: dict = defaultdict(float)  # (lo_idx, hi_idx) -> games between them
+
+    n_players = game_names.shape[1]
+    for gi in range(game_names.shape[0]):
+        row = game_names[gi]
+        rew = game_rewards[gi]
+        ids = [idx[str(row[s])] for s in range(n_players)]
+        for s in ids:
+            appearances[s] += 1
+        for a in range(n_players):
+            for b in range(a + 1, n_players):
+                ra, rb = float(rew[a]), float(rew[b])
+                if ra == rb:
+                    continue  # tie: no information
+                ia, ib = ids[a], ids[b]
+                wins[ia if ra > rb else ib] += 1
+                pair_count[(min(ia, ib), max(ia, ib))] += 1
+
+    adj: dict = defaultdict(list)
+    for (i, j), c in pair_count.items():
+        adj[i].append((j, c))
+        adj[j].append((i, c))
+
+    theta = np.ones(P)
+    for _ in range(iters):
+        new = theta.copy()
+        for i in range(P):
+            denom = 0.0
+            ti = theta[i]
+            for (j, c) in adj[i]:
+                denom += c / (ti + theta[j])
+            if denom > 0 and wins[i] > 0:
+                new[i] = wins[i] / denom
+        new = np.where(new <= 0, 1e-9, new)
+        theta = new / np.exp(np.mean(np.log(new)))  # renormalize geo-mean -> 1
+
+    rating = {names[i]: float(np.log(theta[i])) for i in range(P) if appearances[i] >= min_games}
+    if rating:
+        vals = np.array(list(rating.values()))
+        print(f"  [rating] Bradley-Terry over {len(rating)}/{P} players (>= {min_games} games); "
+              f"log-strength range [{vals.min():.3f}, {vals.max():.3f}]")
+    return rating
+
+
+def per_row_strength_from_rating(game_names, meta, rating: dict):
+    """Map each row to its player's rating via meta (gid, _, slot, _). Players
+    not in `rating` (too few games) get the median, so they weigh neutrally."""
+    n_games, n_players = game_names.shape
+    med = float(np.median(list(rating.values()))) if rating else 0.0
+    grid = np.empty((n_games, n_players), dtype=np.float32)
+    for g in range(n_games):
+        for s in range(n_players):
+            grid[g, s] = rating.get(str(game_names[g, s]), med)
+    gid = meta[:, 0].astype(np.int64)
+    slot = meta[:, 2].astype(np.int64)
+    return grid[gid, slot]
 
 
 # ── decisiveness down-weighting ─────────────────────────────────────────────
@@ -437,8 +516,12 @@ def main():
     p.add_argument("--recency-halflife", type=float, default=0.0,
                    help="down-weight older rows by 0.5 per this many days (reads combine_npz `source`; 0 = uniform). Use with --no-filter.")
     p.add_argument("--quality-weight", action="store_true",
-                   help="soft-weight rows by player strength (reads `win_rate` from the strong-median gate). "
-                        "Multiplies into the recency weight. Use with --no-filter.")
+                   help="soft-weight rows by player strength. Multiplies into the recency weight. "
+                        "Use with --no-filter.")
+    p.add_argument("--quality-metric", choices=("winrate", "rating"), default="winrate",
+                   help="player-strength signal for --quality-weight. winrate: precomputed `win_rate` "
+                        "column (opponent-dependent). rating: opponent-adjusted Bradley-Terry rating fit "
+                        "from game_names+game_rewards (better on an Elo-matched ladder).")
     p.add_argument("--quality-floor", type=float, default=0.25,
                    help="weakest kept player's quality weight (strongest = 1.0); only with --quality-weight")
     p.add_argument("--decisiveness-weight", action="store_true",
@@ -501,6 +584,16 @@ def main():
         print("\n--filter-only set; skipping training.")
         print("Done.")
         return
+
+    # When quality-weighting by Bradley-Terry rating, replace the per-row
+    # strength signal (win_rate) with an opponent-adjusted rating fit from the
+    # game outcomes. Done before the drop so it rides the same row-align path.
+    if args.quality_weight and args.quality_metric == "rating":
+        if "game_names" not in d.files or "game_rewards" not in d.files:
+            raise SystemExit("--quality-metric rating needs game_names+game_rewards in the NPZ; "
+                             "rebuild combined.npz with the updated combine_npz.py")
+        ratings = bradley_terry_ratings(d["game_names"], d["game_rewards"], args.min_games)
+        row_win_rate = per_row_strength_from_rating(d["game_names"], ms, ratings)
 
     # Hard-drop fully decided rows before weighting and the split, so every
     # downstream array (weights from win_rate/features, val_mask from meta)
