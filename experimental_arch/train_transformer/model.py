@@ -6,6 +6,14 @@ from torch import nn
 from features import GLOBAL_FEATURES, MAX_PLANETS, PLANET_FEATURES, SEND_FRACTIONS
 
 
+def with_timeline_features(planets, planet_timeline_features=None):
+    if planet_timeline_features is None:
+        extra = planets.new_zeros((*planets.shape[:-1], PLANET_FEATURES - planets.shape[-1]))
+    else:
+        extra = planet_timeline_features.to(dtype=planets.dtype, device=planets.device)
+    return torch.cat([planets, extra], dim=-1)
+
+
 class OrbitPolicy(nn.Module):
     """Entity-pair policy with a shared pooled value head."""
 
@@ -35,9 +43,18 @@ class OrbitPolicy(nn.Module):
             nn.Linear(hidden, 1),
         )
 
-    def forward(self, planets, planet_mask, globals_, action_mask=None):
+    def forward(
+        self,
+        planets,
+        planet_mask,
+        globals_,
+        action_mask=None,
+        pair_turns=None,
+        pair_reachable_mask=None,
+        planet_timeline_features=None,
+    ):
         batch = planets.shape[0]
-        encoded = self.planet_encoder(planets)
+        encoded = self.planet_encoder(with_timeline_features(planets, planet_timeline_features))
         mask = planet_mask.unsqueeze(-1)
         pooled = (encoded * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
 
@@ -110,9 +127,18 @@ class EntityTransformerPolicy(nn.Module):
             nn.Linear(hidden, 1),
         )
 
-    def forward(self, planets, planet_mask, globals_, action_mask=None):
+    def forward(
+        self,
+        planets,
+        planet_mask,
+        globals_,
+        action_mask=None,
+        pair_turns=None,
+        pair_reachable_mask=None,
+        planet_timeline_features=None,
+    ):
         batch = planets.shape[0]
-        planet_tokens = self.planet_encoder(planets)
+        planet_tokens = self.planet_encoder(with_timeline_features(planets, planet_timeline_features))
         global_token = self.global_encoder(globals_).unsqueeze(1)
         tokens = torch.cat([global_token, planet_tokens], dim=1)
         global_valid = torch.ones(batch, 1, dtype=torch.bool, device=planet_mask.device)
@@ -151,7 +177,7 @@ def build_policy(
 ) -> nn.Module:
     if model_type == "mlp":
         return OrbitPolicy(hidden=hidden)
-    if model_type == "entity_transformer":
+    if model_type in {"entity_transformer", "entity_transformer_temporal"}:
         return EntityTransformerPolicy(
             hidden=hidden,
             layers=transformer_layers,
@@ -166,4 +192,7 @@ def tensorize(encoded, device="cpu"):
         "planet_mask": torch.as_tensor(encoded.planet_mask, dtype=torch.float32, device=device).unsqueeze(0),
         "globals_": torch.as_tensor(encoded.globals, dtype=torch.float32, device=device).unsqueeze(0),
         "action_mask": torch.as_tensor(encoded.action_mask, dtype=torch.bool, device=device).unsqueeze(0),
+        "planet_timeline_features": torch.as_tensor(
+            encoded.planet_timeline_features, dtype=torch.float32, device=device
+        ).unsqueeze(0),
     }

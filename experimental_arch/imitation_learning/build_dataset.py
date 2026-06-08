@@ -29,10 +29,17 @@ if str(TROJAN_TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TROJAN_TRAIN_DIR))
 
 from build_from_zip import SUMMARY_V2_DIM, normalize_obs  # noqa: E402
-from constants import ACTIONS_DIM, PAIR_TURN_SHAPE, PLANET_SLOTS, SEND_ALL_ACTION  # noqa: E402
+from constants import ACTIONS_DIM, PAIR_TURN_SHAPE, PLANET_SLOTS  # noqa: E402
 from engineered_features import append_engineered_features, append_tempo_features  # noqa: E402
 from extras_v4_build import EXTRA_DIM  # noqa: E402
-from features import ACTION_DIM, EncodedObs, discrete_action_index, encoded_from_feat  # noqa: E402
+from features import (  # noqa: E402
+    ACTION_DIM,
+    SEND_ACTIONS,
+    SEND_FRACTIONS,
+    EncodedObs,
+    discrete_action_index,
+    encoded_from_feat,
+)
 from orbit_wars_model import encode_obs as rust_encode_obs  # noqa: E402
 
 
@@ -43,17 +50,16 @@ ISAIAH_NAME = "Isaiah @ Tufa Labs"
 XGB_MODEL_PATH = TROJAN_TRAIN_DIR / "weights" / "xgb_46p12e88t11_latest.json"
 EXTRACT_V4_BIN = REPO_ROOT / "bots" / "mine" / "trojan_horse" / "target" / "release" / "extract_v4"
 OUT_DIR = IL_DIR / "data"
-DATASET_FORMAT_VERSION = 4
-DATASET_STATS_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4_stats.json"
-DATASET_DIR = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4_chunks"
-DATASET_DB = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4.sqlite"
-DATASET_MANIFEST_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v4_manifest.json"
+DATASET_FORMAT_VERSION = 5
+DATASET_STATS_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5_stats.json"
+DATASET_DIR = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5_chunks"
+DATASET_DB = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5.sqlite"
+DATASET_MANIFEST_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5_manifest.json"
 
 MAX_REPLAYS = None
 MAX_SAMPLES = None
 MAX_ANGLE_ERROR = 0.08
-REQUIRE_FULL_SEND = True
-FULL_SEND_TOLERANCE = 0.08
+SEND_FRACTION_TOLERANCE = 0.25
 VALUE_RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM + 4 * EXTRA_DIM
 SHOW_PROGRESS = True
 
@@ -68,8 +74,8 @@ class DatasetBuildConfig:
     max_replays: int | None
     max_samples: int | None
     max_angle_error: float
-    require_full_send: bool
-    full_send_tolerance: float
+    send_fractions: tuple[float, ...]
+    send_fraction_tolerance: float
 
 
 @dataclass(frozen=True)
@@ -120,8 +126,8 @@ def make_config() -> DatasetBuildConfig:
         max_replays=MAX_REPLAYS,
         max_samples=MAX_SAMPLES,
         max_angle_error=MAX_ANGLE_ERROR,
-        require_full_send=REQUIRE_FULL_SEND,
-        full_send_tolerance=FULL_SEND_TOLERANCE,
+        send_fractions=tuple(float(x) for x in SEND_FRACTIONS),
+        send_fraction_tolerance=SEND_FRACTION_TOLERANCE,
     )
 
 
@@ -229,6 +235,15 @@ def ship_fraction(obs: dict[str, Any], move: list[Any]) -> float | None:
     return None
 
 
+def nearest_send_bin(frac: float | None, tolerance: float) -> int | None:
+    if frac is None or not math.isfinite(frac) or frac <= 0.0:
+        return None
+    best_bin = min(range(len(SEND_FRACTIONS)), key=lambda i: abs(float(SEND_FRACTIONS[i]) - frac))
+    if abs(float(SEND_FRACTIONS[best_bin]) - frac) > tolerance:
+        return None
+    return int(best_bin)
+
+
 def obs_with_step(obs: dict[str, Any], turn_index: int) -> dict[str, Any]:
     if "step" in obs and obs.get("step") is not None:
         return obs
@@ -243,6 +258,7 @@ def encode_replay_move(
     player: int,
     max_angle_error: float,
     feat: dict[str, Any],
+    send_bin: int,
 ) -> tuple[int | None, str]:
     if len(move) < 3:
         return None, "short_move"
@@ -256,14 +272,17 @@ def encode_replay_move(
 
     best_label: int | None = None
     best_delta = float("inf")
+    if send_bin < 0 or send_bin >= len(SEND_ACTIONS):
+        return None, "bad_send_bin"
+    raw_action = SEND_ACTIONS[send_bin]
     for target_slot in range(PLANET_SLOTS):
-        raw_idx = (source_slot * PLANET_SLOTS + target_slot) * ACTIONS_DIM + SEND_ALL_ACTION
+        raw_idx = (source_slot * PLANET_SLOTS + target_slot) * ACTIONS_DIM + raw_action
         if raw_idx >= len(feat["mask"]) or not bool(feat["mask"][raw_idx]):
             continue
         delta = angle_delta(float(feat["angles"][raw_idx]), move_angle)
         if delta < best_delta:
             best_delta = delta
-            best_label = discrete_action_index(source_slot, target_slot)
+            best_label = discrete_action_index(source_slot, target_slot, send_bin)
     if best_label is None:
         return None, "no_valid_target"
     if best_delta > max_angle_error:
@@ -274,8 +293,7 @@ def encode_replay_move(
 def build_replay_samples(
     ref: ReplayRef,
     max_angle_error: float,
-    require_full_send: bool,
-    full_send_tolerance: float,
+    send_fraction_tolerance: float,
     max_samples: int | None = None,
 ) -> ReplayBuildResult:
     samples: list[ReplaySample] = []
@@ -324,10 +342,18 @@ def build_replay_samples(
             encoded = encoded_from_feat(feat)
             for move in action:
                 frac = ship_fraction(obs, move)
-                if require_full_send and (frac is None or abs(frac - 1.0) > full_send_tolerance):
+                send_bin = nearest_send_bin(frac, send_fraction_tolerance)
+                if send_bin is None:
                     skipped_bad_ship_fraction += 1
                     continue
-                label, _reason = encode_replay_move(obs, move, ref.player, max_angle_error, feat)
+                label, _reason = encode_replay_move(
+                    obs,
+                    move,
+                    ref.player,
+                    max_angle_error,
+                    feat,
+                    send_bin,
+                )
                 if label is None:
                     skipped_invalid += 1
                     continue
@@ -741,8 +767,7 @@ def main() -> int:
         result = build_replay_samples(
             ref,
             max_angle_error=cfg.max_angle_error,
-            require_full_send=cfg.require_full_send,
-            full_send_tolerance=cfg.full_send_tolerance,
+            send_fraction_tolerance=cfg.send_fraction_tolerance,
             max_samples=remaining,
         )
         if result.samples:

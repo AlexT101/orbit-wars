@@ -6,7 +6,8 @@
 //! Frames: `NUM_FRAMES` snapshots at `t`, `t+1`, `t+10`, `t_resolved` (first
 //! future turn with no fleets in flight). Each frame has `PLANET_SLOTS = 44`
 //! planet tokens. Action space is `(44, 44, ACTIONS_DIM)` = `(source, target,
-//! action)`: noop or send 100% of the source's ships to the selected target.
+//! action)`: noop, send 50%, or send 100% of the source's ships to the
+//! selected target.
 //!
 //! Outputs (dict keys / shapes in [`Features::into_py_dict`]):
 //!   - `tokens`   `(NUM_FRAMES, 44, TOKEN_DIM)`  per-planet features, all frames
@@ -47,12 +48,14 @@ thread_local! {
 }
 
 pub const PLANET_SLOTS: usize = 44;
-pub const ACTIONS_DIM: usize = 2;
+pub const ACTIONS_DIM: usize = 3;
 pub const NUM_FRAMES: usize = 4;
 /// Per-planet token width. See [`fill_token`] for the layout.
 pub const TOKEN_DIM: usize = 11;
 /// Board-level feature width. See [`compute_globals`] for the layout.
 pub const GLOBAL_DIM: usize = 16;
+pub const PLANET_TIMELINE_SAMPLES: [usize; 11] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 64];
+pub const PLANET_TIMELINE_DIM: usize = PLANET_TIMELINE_SAMPLES.len() * 2 + 9;
 
 /// Future-frame offsets (turns from `t`). The 4th frame, `t_resolved`, is found
 /// dynamically (first turn with no fleets), so it isn't a fixed offset here.
@@ -69,8 +72,11 @@ const RESOLVE_CAP: usize = 96;
 /// Per-source noop action. It is valid only at target slot 0, giving each
 /// source row one way to do nothing without duplicating noop across targets.
 const NOOP_ACTION: usize = 0;
+/// Send half the source ships, rounded down. Invalid when the source has < 2
+/// ships.
+const SEND_HALF_ACTION: usize = 1;
 /// Send every ship currently on the source planet.
-const SEND_ALL_ACTION: usize = 1;
+const SEND_ALL_ACTION: usize = 2;
 
 // ---- normalization -------------------------------------------------------
 /// `log1p(x) / log1p(full)`: 0 at x=0, ~1 at x=full. For non-negative inputs.
@@ -94,6 +100,10 @@ fn norm_turns(t: usize) -> f32 {
 #[inline]
 fn norm_ships(s: i64) -> f32 {
     log_norm(s as f64, 1000.0)
+}
+#[inline]
+fn norm_signed_ships(s: i64) -> f32 {
+    signed_log_norm(s as f64, 1000.0)
 }
 #[inline]
 fn norm_prod(p: i64) -> f32 {
@@ -354,6 +364,7 @@ impl Trajectory {
 fn action_count(a: usize, src_ships: i64) -> Option<i64> {
     let c = match a {
         NOOP_ACTION => return None,
+        SEND_HALF_ACTION => src_ships / 2,
         SEND_ALL_ACTION => src_ships,
         _ => return None,
     };
@@ -378,6 +389,7 @@ pub struct Features {
     pub mask: Vec<u8>,           // (44, 44, ACTIONS_DIM), frame t
     pub ship_counts: Vec<i64>,   // (44, 44, ACTIONS_DIM), frame t
     pub reachable_mask: Vec<u8>, // (NUM_FRAMES, 44, 44, ACTIONS_DIM)
+    pub planet_timeline_features: Vec<f32>, // (44, PLANET_TIMELINE_DIM)
     /// Raw per-frame planet state `[id, owner, x, y, ships]`, present planets
     /// only. Not a model input — exposed for validation/debugging against the
     /// reference engine.
@@ -420,6 +432,14 @@ impl Features {
         d.set_item(
             "reachable_mask_shape",
             (NUM_FRAMES, PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM),
+        )?;
+        d.set_item(
+            "planet_timeline_features",
+            self.planet_timeline_features.into_pyarray(py),
+        )?;
+        d.set_item(
+            "planet_timeline_features_shape",
+            (PLANET_SLOTS, PLANET_TIMELINE_DIM),
         )?;
         Ok(d.into_any().unbind())
     }
@@ -469,6 +489,124 @@ fn fill_token(
 /// fleet_ships`; enemy aggregates all non-self players; shares are own/(own+enemy)
 /// (0.5 when both are 0). Counts are /44; ships/production are log-normalized;
 /// diffs are signed-log.
+#[inline]
+fn owner_side(owner: i64, player: i64) -> i64 {
+    if owner == player {
+        1
+    } else if owner >= 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+#[inline]
+fn scaled_tick(t: Option<usize>) -> f32 {
+    t.map(|x| (x.min(AIM_HORIZON) as f32) / (AIM_HORIZON as f32))
+        .unwrap_or(1.0)
+}
+
+fn planet_at_turn<'a>(traj: &'a Trajectory, planet_id: i64, turn: usize) -> Option<&'a Planet> {
+    traj.snapshots
+        .get(turn)
+        .and_then(|planets| planets.iter().find(|p| p.id == planet_id))
+}
+
+fn signed_balance_at(traj: &Trajectory, planet_id: i64, turn: usize, player: i64) -> (i64, i64) {
+    let Some(p) = planet_at_turn(traj, planet_id, turn) else {
+        return (0, 0);
+    };
+    let side = owner_side(p.owner, player);
+    let balance = match side {
+        1 => p.ships,
+        -1 => -p.ships,
+        _ => 0,
+    };
+    (side, balance)
+}
+
+fn compute_planet_timeline_features(
+    traj: &Trajectory,
+    slot_id: &[i64],
+    player: i64,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; PLANET_SLOTS * PLANET_TIMELINE_DIM];
+    for si in 0..PLANET_SLOTS {
+        let id = slot_id[si];
+        if id < 0 {
+            continue;
+        }
+        let base = si * PLANET_TIMELINE_DIM;
+        let mut write = base;
+
+        for &turn in &PLANET_TIMELINE_SAMPLES {
+            let (_, balance) = signed_balance_at(traj, id, turn, player);
+            out[write] = norm_signed_ships(balance);
+            write += 1;
+        }
+        for &turn in &PLANET_TIMELINE_SAMPLES {
+            let (side, _) = signed_balance_at(traj, id, turn, player);
+            out[write] = side as f32;
+            write += 1;
+        }
+
+        let (initial_side, _) = signed_balance_at(traj, id, 0, player);
+        let mut first_enemy: Option<usize> = None;
+        let mut first_mine: Option<usize> = None;
+        let mut first_loss: Option<usize> = None;
+        let mut first_gain: Option<usize> = None;
+        let mut ever_enemy = false;
+        let mut ever_mine = initial_side == 1;
+        let mut prev_side = initial_side;
+        let mut flips = 0usize;
+        let mut min_balance = i64::MAX;
+
+        for turn in 0..=AIM_HORIZON {
+            let (side, balance) = signed_balance_at(traj, id, turn, player);
+            min_balance = min_balance.min(balance);
+            if turn > 0 && side != prev_side {
+                flips += 1;
+            }
+            prev_side = side;
+
+            if side == -1 {
+                ever_enemy = true;
+                first_enemy.get_or_insert(turn);
+            }
+            if side == 1 {
+                ever_mine = true;
+                first_mine.get_or_insert(turn);
+            }
+            if initial_side == 1 && side != 1 {
+                first_loss.get_or_insert(turn);
+            }
+            if initial_side != 1 && side == 1 {
+                first_gain.get_or_insert(turn);
+            }
+        }
+        let (_, final_balance) = signed_balance_at(traj, id, AIM_HORIZON, player);
+
+        out[write] = scaled_tick(first_enemy);
+        write += 1;
+        out[write] = scaled_tick(first_mine);
+        write += 1;
+        out[write] = scaled_tick(first_loss);
+        write += 1;
+        out[write] = scaled_tick(first_gain);
+        write += 1;
+        out[write] = ever_enemy as i32 as f32;
+        write += 1;
+        out[write] = ever_mine as i32 as f32;
+        write += 1;
+        out[write] = (flips.min(8) as f32) / 8.0;
+        write += 1;
+        out[write] = norm_signed_ships(min_balance);
+        write += 1;
+        out[write] = norm_signed_ships(final_balance);
+    }
+    out
+}
+
 fn compute_globals(state: &EngineState, player: i64) -> Vec<f32> {
     let np = state.num_players;
     let (mut own_planet_ships, mut enemy_planet_ships, mut neutral_ships) = (0i64, 0i64, 0i64);
@@ -613,6 +751,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
     let mut mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut ship_counts = vec![0i64; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut reachable_mask = vec![0u8; NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    let planet_timeline_features = compute_planet_timeline_features(&traj, &slot_id, player);
     for si in 0..PLANET_SLOTS {
         mask[(si * PLANET_SLOTS) * ACTIONS_DIM + NOOP_ACTION] = 1;
     }
@@ -698,6 +837,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
         mask,
         ship_counts,
         reachable_mask,
+        planet_timeline_features,
         frame_planets,
     }
 }

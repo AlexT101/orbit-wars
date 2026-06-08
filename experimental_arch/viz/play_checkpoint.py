@@ -80,12 +80,8 @@ class CheckpointAgent:
 
     def act(self, obs: dict) -> list[list[float]]:
         encoded = encode_obs(obs, player=self.player)
-        if self.model_type == "entity_transformer_temporal":
-            planets = encoded.tokens
-            planet_mask = encoded.presence
-        else:
-            planets = encoded.planets
-            planet_mask = encoded.planet_mask
+        planets = encoded.planets
+        planet_mask = encoded.planet_mask
         batch = {
             "planets": torch.as_tensor(planets, dtype=torch.float32, device=self.device).unsqueeze(0),
             "planet_mask": torch.as_tensor(planet_mask, dtype=torch.float32, device=self.device).unsqueeze(0),
@@ -103,8 +99,8 @@ class CheckpointAgent:
                 dtype=torch.float32,
                 device=self.device,
             ).unsqueeze(0)
-            batch["takeover_features"] = torch.as_tensor(
-                encoded.takeover_features,
+            batch["planet_timeline_features"] = torch.as_tensor(
+                encoded.planet_timeline_features,
                 dtype=torch.float32,
                 device=self.device,
             ).unsqueeze(0)

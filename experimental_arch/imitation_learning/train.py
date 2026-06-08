@@ -32,8 +32,8 @@ from features import ACTION_DIM  # noqa: E402
 from model import build_policy  # noqa: E402
 
 
-DATASET_FORMAT_VERSION = 4
-DATASET_PATH = IL_DIR / "data" / "isaiah_tufa_labs_2p_wins_bc_v4_manifest.json"
+DATASET_FORMAT_VERSION = 5
+DATASET_PATH = IL_DIR / "data" / "isaiah_tufa_labs_2p_wins_bc_v5_manifest.json"
 OUT_DIR = IL_DIR / "checkpoints" / "isaiah_bc_transformer"
 LATEST_CHECKPOINT = OUT_DIR / "latest.pt"
 BEST_CHECKPOINT = OUT_DIR / "best.pt"

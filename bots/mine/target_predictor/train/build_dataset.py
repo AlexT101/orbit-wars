@@ -46,7 +46,9 @@ SUN_RADIUS = 10.0
 BOARD = 100.0
 ROT_LIMIT = 50.0
 MAX_SPEED = 6.0
-MAX_TIME = 100  # max turns to simulate fleet trajectories looking for impact
+MAX_TIME = 150  # max turns to simulate fleet trajectories looking for impact
+                # (board diagonal ≈ 141, a path bending around the sun is slightly
+                # longer, so 150 gives safety margin for slow fleets)
 
 N_MAX = 50      # planet pad slot count: games start with up to 40 planets and
                 # 4 comets spawn at step ~50, pushing peak to ~44.
@@ -216,7 +218,7 @@ def _get_fastsim():
     global _FASTSIM
     if _FASTSIM is None:
         from pathlib import Path as _P
-        _here = _P(__file__).resolve().parents[2] / "alphaduck"
+        _here = _P(__file__).resolve().parents[3] / "alphaduck"
         if str(_here) not in sys.path:
             sys.path.insert(0, str(_here))
         import fastsim as _fs
@@ -880,9 +882,10 @@ def process_game(game_id_int, game_json):
 # ---------------------------------------------------------------------------
 
 
-def iter_game_jsons(zip_paths, max_games=None):
+def iter_game_jsons(zip_paths, max_games=None, max_per_zip=None):
     n = 0
     for zp in zip_paths:
+        n_this_zip = 0
         with zipfile.ZipFile(zp) as zf:
             for name in sorted(zf.namelist()):
                 if not name.endswith(".json"):
@@ -900,8 +903,11 @@ def iter_game_jsons(zip_paths, max_games=None):
                     gid = abs(hash(base)) % (2 ** 31 - 1)
                 yield gid, g
                 n += 1
+                n_this_zip += 1
                 if max_games is not None and n >= max_games:
                     return
+                if max_per_zip is not None and n_this_zip >= max_per_zip:
+                    break
 
 
 def _worker(args):
@@ -912,7 +918,7 @@ def _worker(args):
         return []
 
 
-def build(zip_paths, out_path, max_games=None, workers=1, progress_every=200):
+def build(zip_paths, out_path, max_games=None, workers=1, progress_every=200, max_per_zip=None):
     t0 = time.time()
     rows_buf = []
     n_games_kept = 0
@@ -925,7 +931,7 @@ def build(zip_paths, out_path, max_games=None, workers=1, progress_every=200):
               f"rows={len(rows_buf)} ({gps:.1f} g/s)", flush=True)
 
     if workers <= 1:
-        for gid, gj in iter_game_jsons(zip_paths, max_games):
+        for gid, gj in iter_game_jsons(zip_paths, max_games, max_per_zip):
             n_games_total += 1
             rs = process_game(gid, gj)
             if rs:
@@ -936,7 +942,7 @@ def build(zip_paths, out_path, max_games=None, workers=1, progress_every=200):
     else:
         # use imap_unordered, chunk by yielding (gid, json) pairs
         with mp.Pool(workers) as pool:
-            for rs in pool.imap_unordered(_worker, iter_game_jsons(zip_paths, max_games), chunksize=4):
+            for rs in pool.imap_unordered(_worker, iter_game_jsons(zip_paths, max_games, max_per_zip), chunksize=4):
                 n_games_total += 1
                 if rs:
                     n_games_kept += 1
@@ -1012,6 +1018,8 @@ def main():
     ap.add_argument("--out", type=pathlib.Path,
                     default=pathlib.Path(__file__).resolve().parent / "data" / "targets.npz")
     ap.add_argument("--max-games", type=int, default=None)
+    ap.add_argument("--max-per-zip", type=int, default=None,
+                    help="cap games taken from each zip; lets you sample across many days")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 1) - 1))
     args = ap.parse_args()
 
@@ -1019,8 +1027,8 @@ def main():
     if not zip_paths:
         print(f"no zips found in {args.zip_dir}", file=sys.stderr)
         return 1
-    print(f"input: {len(zip_paths)} zips, workers={args.workers}, max_games={args.max_games}")
-    return build(zip_paths, args.out, args.max_games, args.workers)
+    print(f"input: {len(zip_paths)} zips, workers={args.workers}, max_games={args.max_games}, max_per_zip={args.max_per_zip}")
+    return build(zip_paths, args.out, args.max_games, args.workers, max_per_zip=args.max_per_zip)
 
 
 if __name__ == "__main__":
