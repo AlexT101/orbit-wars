@@ -1,0 +1,18 @@
+[package]
+name = "aim_native"
+version = "0.1.0"
+edition = "2021"
+description = "Forked aim solver from apollo, with build_dataset_v17-friendly pyfunctions and lazy aim_cache."
+
+[lib]
+name = "aim_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+rustc-hash = "2.0"
+parking_lot = "0.12"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
