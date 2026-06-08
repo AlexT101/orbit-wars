@@ -4,6 +4,7 @@ import json
 import os
 import random
 import sys
+import time
 from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
@@ -32,9 +33,10 @@ from features import ACTION_DIM  # noqa: E402
 from model import build_policy  # noqa: E402
 
 
-DATASET_FORMAT_VERSION = 5
-DATASET_PATH = IL_DIR / "data" / "isaiah_tufa_labs_2p_wins_bc_v5_manifest.json"
-OUT_DIR = IL_DIR / "checkpoints" / "isaiah_bc_transformer"
+DATASET_FORMAT_VERSION = 1
+OSTEO_DATA_DIR = Path("/home/ubuntu/osteo_data")
+DATASET_PATH = Path(os.environ.get("IL_DATASET_PATH", str(OSTEO_DATA_DIR / "manifest.json"))).expanduser()
+OUT_DIR = Path(os.environ.get("IL_OUT_DIR", str(IL_DIR / "checkpoints" / "osteo_bc_transformer"))).expanduser()
 LATEST_CHECKPOINT = OUT_DIR / "latest.pt"
 BEST_CHECKPOINT = OUT_DIR / "best.pt"
 METRICS_JSONL = OUT_DIR / "metrics.jsonl"
@@ -46,27 +48,56 @@ MODEL = "entity_transformer_temporal"
 HIDDEN = 128
 TRANSFORMER_LAYERS = 3
 TRANSFORMER_HEADS = 4
-EPOCHS = 12
-BATCH_SIZE = 64
-DATALOADER_WORKERS = min(8, os.cpu_count() or 1)
-DATALOADER_PREFETCH_FACTOR = 4
+EPOCHS = 1_000_000
+BATCH_SIZE = 512
+DATALOADER_WORKERS = 2
+DATALOADER_PREFETCH_FACTOR = 2
 USE_AMP = True
 AMP_DTYPE = "bfloat16"
 LOG_EVERY_STEPS = 200
-CHECKPOINT_EVERY_STEPS = 1000
+CHECKPOINT_TARGET_SECONDS = 15 * 60
+CHECKPOINT_ASSUMED_ROWS_PER_SEC = 3000
+CHECKPOINT_EVERY_STEPS = max(1, round(CHECKPOINT_TARGET_SECONDS * CHECKPOINT_ASSUMED_ROWS_PER_SEC / BATCH_SIZE))
 CHECKPOINT_EVERY_EPOCHS = 1
 LEARNING_RATE = 3.0e-4
+LR_PLATEAU_FACTOR = 0.5
+LR_PLATEAU_PATIENCE = 2
+MIN_LEARNING_RATE = 1.0e-6
 WEIGHT_DECAY = 1.0e-4
 MAX_GRAD_NORM = 1.0
-VAL_FRACTION = 0.10
-USE_WANDB = True
+VAL_FRACTION = 0.02
+USE_WANDB = os.environ.get("IL_USE_WANDB", "1").lower() in {"1", "true", "yes", "on"}
 WANDB_PROJECT = "orbit-wars"
-WANDB_RUN_NAME = "isaiah-bc-transformer"
-ISAIAH_NAME = "Isaiah @ Tufa Labs"
+WANDB_RUN_NAME = "osteo-bc-transformer"
+DATASET_NAME = "osteo_top20_2p_winners"
+MAX_TRAIN_STEPS = int(os.environ.get("IL_MAX_TRAIN_STEPS", "0") or "0")
+MAX_VAL_BATCHES = int(os.environ.get("IL_MAX_VAL_BATCHES", "0") or "0")
+MAX_CHUNKS = int(os.environ.get("IL_MAX_CHUNKS", "0") or "0")
 
 if "IL_EPOCHS" in os.environ:
     EPOCHS = int(os.environ["IL_EPOCHS"])
+if "IL_BATCH_SIZE" in os.environ:
+    BATCH_SIZE = int(os.environ["IL_BATCH_SIZE"])
+CHECKPOINT_EVERY_STEPS = max(1, round(CHECKPOINT_TARGET_SECONDS * CHECKPOINT_ASSUMED_ROWS_PER_SEC / BATCH_SIZE))
+if "IL_CHECKPOINT_EVERY_STEPS" in os.environ:
+    CHECKPOINT_EVERY_STEPS = int(os.environ["IL_CHECKPOINT_EVERY_STEPS"])
+if "IL_DATALOADER_WORKERS" in os.environ:
+    DATALOADER_WORKERS = int(os.environ["IL_DATALOADER_WORKERS"])
 RESUME_CHECKPOINT = os.environ.get("IL_RESUME_CHECKPOINT")
+AUTO_RESUME = os.environ.get("IL_AUTO_RESUME", "1").lower() in {"1", "true", "yes", "on"}
+
+REQUIRED_CHUNK_KEYS = (
+    "tokens",
+    "presence",
+    "globals_",
+    "action_mask",
+    "pair_turns",
+    "pair_reachable_mask",
+    "planet_timeline_features",
+    "labels",
+    "player_rank",
+    "our_ship_fraction",
+)
 
 
 def rebase_legacy_path(path: str | Path, *, manifest_dir: Path) -> Path:
@@ -75,6 +106,13 @@ def rebase_legacy_path(path: str | Path, *, manifest_dir: Path) -> Path:
     if candidate.is_absolute():
         if candidate.exists():
             return candidate
+        try:
+            suffix = candidate.relative_to("/home/ec2-user/osteo_data")
+            rebased = OSTEO_DATA_DIR / suffix
+            if rebased.exists():
+                return rebased
+        except ValueError:
+            pass
         parts = candidate.parts
         if "experimental_arch" in parts:
             suffix = parts[parts.index("experimental_arch") + 1 :]
@@ -91,7 +129,7 @@ def rebase_legacy_path(path: str | Path, *, manifest_dir: Path) -> Path:
 @dataclass(frozen=True)
 class ILConfig:
     dataset_path: str
-    player_name: str
+    dataset_name: str
     action_dim: int
     seed: int
     device: str
@@ -109,20 +147,26 @@ class ILConfig:
     checkpoint_every_steps: int
     checkpoint_every_epochs: int
     learning_rate: float
+    lr_plateau_factor: float
+    lr_plateau_patience: int
+    min_learning_rate: float
     weight_decay: float
     val_fraction: float
     use_wandb: bool
     wandb_project: str
     wandb_run_name: str
     resume_checkpoint: str | None
+    auto_resume: bool
+    max_train_steps: int
+    max_val_batches: int
+    max_chunks: int
 
 
 class ChunkedILDataset(Dataset):
-    def __init__(self, chunks: list[dict], manifest_dir: Path, cache_size: int = 2) -> None:
+    def __init__(self, chunks: list[dict], manifest_dir: Path, cache_size: int = 1) -> None:
         self.chunks = chunks
         self.paths = [rebase_legacy_path(chunk["path"], manifest_dir=manifest_dir) for chunk in chunks]
         self.lengths = [int(chunk["rows"]) for chunk in chunks]
-        self.game_ids_by_chunk = [str(chunk["game_id"]) for chunk in chunks]
         self.offsets = [0]
         for length in self.lengths:
             self.offsets.append(self.offsets[-1] + length)
@@ -140,8 +184,31 @@ class ChunkedILDataset(Dataset):
         if chunk_index in self._cache:
             self._cache.move_to_end(chunk_index)
             return self._cache[chunk_index]
-        payload = torch.load(self.paths[chunk_index], map_location="cpu", weights_only=False)
-        tensors = payload["tensors"]
+        path = self.paths[chunk_index]
+        with np.load(path, allow_pickle=False) as payload:
+            missing = [key for key in REQUIRED_CHUNK_KEYS if key not in payload]
+            if missing:
+                raise KeyError(f"dataset chunk {path} is missing {missing}")
+            our_ship_fraction = payload["our_ship_fraction"].astype(np.float32, copy=False)
+            player_rank = payload["player_rank"].astype(np.float32, copy=False)
+            weights = ((1.0 - our_ship_fraction) ** 2) * (1.0 - player_rank / 30.0)
+            weights = np.clip(weights, 0.0, None).astype(np.float32, copy=False)
+            tensors = {
+                "tokens": torch.from_numpy(payload["tokens"]),
+                "presence": torch.from_numpy(payload["presence"]),
+                "globals_": torch.from_numpy(payload["globals_"]),
+                "action_mask": torch.from_numpy(payload["action_mask"]),
+                "pair_turns": torch.from_numpy(payload["pair_turns"]),
+                "pair_reachable_mask": torch.from_numpy(payload["pair_reachable_mask"]),
+                "planet_timeline_features": torch.from_numpy(payload["planet_timeline_features"]),
+                "labels": torch.from_numpy(payload["labels"]),
+                "steps": torch.from_numpy(payload["steps"]),
+                "players": torch.from_numpy(payload["players"]),
+                "player_rank": torch.from_numpy(payload["player_rank"]),
+                "opponent_rank": torch.from_numpy(payload["opponent_rank"]),
+                "our_ship_fraction": torch.from_numpy(payload["our_ship_fraction"]),
+                "weights": torch.from_numpy(weights),
+            }
         self._cache[chunk_index] = tensors
         while len(self._cache) > self.cache_size:
             self._cache.popitem(last=False)
@@ -151,23 +218,18 @@ class ChunkedILDataset(Dataset):
         chunk_index = bisect_right(self.offsets, idx) - 1
         local_idx = idx - self.offsets[chunk_index]
         tensors = self._load_chunk(chunk_index)
-        for key in ("tokens", "presence", "pair_turns", "pair_reachable_mask", "planet_timeline_features"):
-            if key not in tensors:
-                raise KeyError(
-                    f"dataset chunk {self.paths[chunk_index]} is missing {key!r}; "
-                    f"rebuild the v{DATASET_FORMAT_VERSION} dataset with python {IL_DIR / 'build_dataset.py'}"
-                )
         return {
             "planets": tensors["tokens"][local_idx, 0].float(),
             "planet_mask": tensors["presence"][local_idx, 0].float(),
             "globals_": tensors["globals_"][local_idx].float(),
             "action_mask": tensors["action_mask"][local_idx].bool(),
-            "pair_turns": tensors["pair_turns"][local_idx].float() / 20.0,
+            "pair_turns": tensors["pair_turns"][local_idx].float(),
             "pair_reachable_mask": tensors["pair_reachable_mask"][local_idx].float(),
             "planet_timeline_features": tensors["planet_timeline_features"][local_idx].float(),
             "label": tensors["labels"][local_idx].long(),
-            "value": tensors["values"][local_idx].float(),
             "weight": tensors["weights"][local_idx].float(),
+            "our_ship_fraction": tensors["our_ship_fraction"][local_idx].float(),
+            "player_rank": tensors["player_rank"][local_idx].long(),
         }
 
 
@@ -205,52 +267,6 @@ class ChunkBatchSampler(Sampler[list[int]]):
         return (rows + self.batch_size - 1) // self.batch_size
 
 
-class WeightedChunkBatchSampler(Sampler[list[int]]):
-    def __init__(
-        self,
-        dataset: ChunkedILDataset,
-        chunk_indices: list[int],
-        batch_size: int,
-        num_samples: int,
-        seed: int,
-    ) -> None:
-        self.dataset = dataset
-        self.chunk_indices = list(chunk_indices)
-        self.batch_size = batch_size
-        self.num_samples = int(num_samples)
-        self.seed = seed
-        self.epoch = 0
-        sums = []
-        for chunk_index in self.chunk_indices:
-            chunk = self.dataset.chunks[chunk_index]
-            weight_sum = chunk.get("weight_sum")
-            if weight_sum is None:
-                weight_sum = float(self.dataset._load_chunk(chunk_index)["weights"].float().sum().item())
-            sums.append(max(float(weight_sum), 1.0e-8))
-        self.chunk_weights = torch.tensor(sums, dtype=torch.float32)
-
-    def __iter__(self):
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-        self.epoch += 1
-        remaining = self.num_samples
-        while remaining > 0:
-            batch_n = min(self.batch_size, remaining)
-            picked = int(torch.multinomial(self.chunk_weights, 1, replacement=True, generator=generator).item())
-            chunk_index = self.chunk_indices[picked]
-            chunk = self.dataset._load_chunk(chunk_index)
-            weights = chunk["weights"].float().clamp_min(0.0)
-            if float(weights.sum().item()) <= 0.0:
-                weights = torch.ones_like(weights)
-            local_rows = torch.multinomial(weights, batch_n, replacement=True, generator=generator)
-            base = self.dataset.offsets[chunk_index]
-            yield [base + int(i) for i in local_rows.tolist()]
-            remaining -= batch_n
-
-    def __len__(self) -> int:
-        return (self.num_samples + self.batch_size - 1) // self.batch_size
-
-
 def append_jsonl(path: Path, row: dict) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, sort_keys=True) + "\n")
@@ -259,6 +275,8 @@ def append_jsonl(path: Path, row: dict) -> None:
 def checkpoint_payload(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau,
+    scaler: torch.amp.GradScaler,
     cfg: ILConfig,
     epoch: int,
     global_step: int,
@@ -267,6 +285,8 @@ def checkpoint_payload(
     return {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict(),
         "config": asdict(cfg),
         "epoch": epoch,
         "global_step": global_step,
@@ -278,6 +298,8 @@ def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau,
+    scaler: torch.amp.GradScaler,
     cfg: ILConfig,
     epoch: int,
     global_step: int,
@@ -285,15 +307,30 @@ def save_checkpoint(
     run,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(checkpoint_payload(model, optimizer, cfg, epoch, global_step, metrics), path)
+    torch.save(checkpoint_payload(model, optimizer, scheduler, scaler, cfg, epoch, global_step, metrics), path)
     if run is not None:
         wandb.save(str(path), policy="now")
+
+
+def resolve_resume_path(cfg: ILConfig) -> Path | None:
+    if cfg.resume_checkpoint:
+        resume_path = Path(cfg.resume_checkpoint).expanduser()
+        if not resume_path.is_absolute():
+            resume_path = IL_DIR / resume_path
+        return resume_path
+    if cfg.auto_resume and LATEST_CHECKPOINT.exists():
+        return LATEST_CHECKPOINT
+    return None
+
+
+def current_lr(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
 
 
 def make_config() -> ILConfig:
     return ILConfig(
         dataset_path=str(DATASET_PATH),
-        player_name=ISAIAH_NAME,
+        dataset_name=DATASET_NAME,
         action_dim=ACTION_DIM,
         seed=SEED,
         device=DEVICE,
@@ -311,36 +348,40 @@ def make_config() -> ILConfig:
         checkpoint_every_steps=CHECKPOINT_EVERY_STEPS,
         checkpoint_every_epochs=CHECKPOINT_EVERY_EPOCHS,
         learning_rate=LEARNING_RATE,
+        lr_plateau_factor=LR_PLATEAU_FACTOR,
+        lr_plateau_patience=LR_PLATEAU_PATIENCE,
+        min_learning_rate=MIN_LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
         val_fraction=VAL_FRACTION,
         use_wandb=USE_WANDB,
         wandb_project=WANDB_PROJECT,
         wandb_run_name=WANDB_RUN_NAME,
         resume_checkpoint=RESUME_CHECKPOINT,
+        auto_resume=AUTO_RESUME,
+        max_train_steps=MAX_TRAIN_STEPS,
+        max_val_batches=MAX_VAL_BATCHES,
+        max_chunks=MAX_CHUNKS,
     )
 
 
-def load_prebuilt_dataset(path: Path, expected_player_name: str) -> tuple[ChunkedILDataset, dict]:
+def load_prebuilt_dataset(path: Path, max_chunks: int = 0) -> tuple[ChunkedILDataset, dict]:
     if not path.exists():
-        raise FileNotFoundError(
-            f"prebuilt IL manifest not found: {path}\n"
-            f"Run: python {IL_DIR / 'build_dataset.py'}"
-        )
+        raise FileNotFoundError(f"prebuilt osteo IL manifest not found: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("format_version") != DATASET_FORMAT_VERSION:
-        raise ValueError(f"unsupported IL manifest format_version={payload.get('format_version')!r}")
-    player_name = payload.get("player_name")
-    if player_name != expected_player_name:
-        raise ValueError(f"dataset player name mismatch: expected {expected_player_name!r}, got {player_name!r}")
+        raise ValueError(f"unsupported osteo IL manifest format_version={payload.get('format_version')!r}")
+    if int(payload.get("action_dim", ACTION_DIM)) != ACTION_DIM:
+        raise ValueError(f"dataset action_dim={payload.get('action_dim')!r}, expected {ACTION_DIM}")
     chunks = list(payload.get("chunks") or [])
+    if max_chunks > 0:
+        chunks = chunks[:max_chunks]
     if not chunks:
         raise ValueError(f"IL manifest has no chunks: {path}")
-    return ChunkedILDataset(chunks, manifest_dir=path.parent), dict(payload.get("stats") or {})
+    stats = {key: value for key, value in payload.items() if key != "chunks"}
+    return ChunkedILDataset(chunks, manifest_dir=path.parent), stats
 
 
 def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
-    payload = torch.load(dataset.paths[0], map_location="cpu", weights_only=False)
-    tensors = payload.get("tensors", {})
     expected = {
         "tokens": TOKEN_SHAPE,
         "presence": TOKEN_SHAPE[:2],
@@ -350,29 +391,33 @@ def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
         "pair_reachable_mask": PAIR_TURN_SHAPE,
         "planet_timeline_features": PLANET_TIMELINE_SHAPE,
     }
-    missing = [key for key in expected if key not in tensors]
-    if missing:
-        raise ValueError(
-            f"dataset chunk {dataset.paths[0]} is missing {missing}; "
-            f"rebuild with python {IL_DIR / 'build_dataset.py'}"
-        )
-    for key, shape in expected.items():
-        got = tuple(tensors[key].shape[1:])
-        if got != tuple(shape):
-            raise ValueError(f"dataset tensor {key!r} has shape tail {got}, expected {shape}")
+    path = dataset.paths[0]
+    with np.load(path, allow_pickle=False) as payload:
+        missing = [key for key in (*expected.keys(), "labels", "player_rank", "our_ship_fraction") if key not in payload]
+        if missing:
+            raise ValueError(f"dataset chunk {path} is missing {missing}")
+        chunk_version = int(payload["format_version"][0]) if "format_version" in payload else None
+        if chunk_version != DATASET_FORMAT_VERSION:
+            raise ValueError(f"dataset chunk {path} format_version={chunk_version!r}, expected {DATASET_FORMAT_VERSION}")
+        action_dim = int(payload["action_dim"][0]) if "action_dim" in payload else None
+        if action_dim != ACTION_DIM:
+            raise ValueError(f"dataset chunk {path} action_dim={action_dim!r}, expected {ACTION_DIM}")
+        for key, shape in expected.items():
+            got = tuple(payload[key].shape[1:])
+            if got != tuple(shape):
+                raise ValueError(f"dataset tensor {key!r} has shape tail {got}, expected {shape}")
 
 
-def split_chunks_by_game(dataset: ChunkedILDataset, val_fraction: float, seed: int) -> tuple[list[int], list[int]]:
-    games = sorted(set(dataset.game_ids_by_chunk))
-    if len(games) < 2:
-        chunks = list(range(len(dataset.chunks)))
-        return chunks, []
+def split_chunks(dataset: ChunkedILDataset, val_fraction: float, seed: int) -> tuple[list[int], list[int]]:
     rng = random.Random(seed)
-    rng.shuffle(games)
-    n_val = max(1, int(round(len(games) * val_fraction)))
-    val_games = set(games[:n_val])
-    train_chunks = [i for i, game_id in enumerate(dataset.game_ids_by_chunk) if game_id not in val_games]
-    val_chunks = [i for i, game_id in enumerate(dataset.game_ids_by_chunk) if game_id in val_games]
+    chunks = list(range(len(dataset.chunks)))
+    if len(chunks) < 2:
+        return chunks, []
+    rng.shuffle(chunks)
+    n_val = max(1, int(round(len(chunks) * val_fraction)))
+    val_chunks = set(chunks[:n_val])
+    train_chunks = [i for i in range(len(dataset.chunks)) if i not in val_chunks]
+    val_chunks = [i for i in range(len(dataset.chunks)) if i in val_chunks]
     return train_chunks, val_chunks
 
 
@@ -384,8 +429,8 @@ def make_loaders(
     num_workers: int,
     pin_memory: bool,
     prefetch_factor: int,
-) -> tuple[DataLoader, DataLoader, int, int]:
-    train_chunks, val_chunks = split_chunks_by_game(dataset, val_fraction, seed)
+) -> tuple[DataLoader, DataLoader, dict[str, float]]:
+    train_chunks, val_chunks = split_chunks(dataset, val_fraction, seed)
     if not val_chunks:
         val_chunks = train_chunks[:1]
         train_chunks = train_chunks[1:] or val_chunks
@@ -400,13 +445,7 @@ def make_loaders(
         loader_kwargs["prefetch_factor"] = prefetch_factor
     train_loader = DataLoader(
         dataset,
-        batch_sampler=WeightedChunkBatchSampler(
-            dataset,
-            train_chunks,
-            batch_size,
-            num_samples=train_rows,
-            seed=seed,
-        ),
+        batch_sampler=ChunkBatchSampler(dataset, train_chunks, batch_size, shuffle=True, seed=seed),
         **loader_kwargs,
     )
     val_loader = DataLoader(
@@ -414,7 +453,17 @@ def make_loaders(
         batch_sampler=ChunkBatchSampler(dataset, val_chunks, batch_size, shuffle=False, seed=seed),
         **loader_kwargs,
     )
-    return train_loader, val_loader, train_rows, val_rows
+    split_stats = {
+        "train_rows": int(train_rows),
+        "val_rows": int(val_rows),
+        "total_rows": int(train_rows + val_rows),
+        "train_chunks": int(len(train_chunks)),
+        "val_chunks": int(len(val_chunks)),
+        "total_chunks": int(len(train_chunks) + len(val_chunks)),
+        "train_fraction": train_rows / max(1, train_rows + val_rows),
+        "val_fraction": val_rows / max(1, train_rows + val_rows),
+    }
+    return train_loader, val_loader, split_stats
 
 
 def batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
@@ -466,8 +515,11 @@ def resolve_amp_dtype(dtype_name: str) -> torch.dtype:
     raise ValueError(f"unsupported AMP_DTYPE={dtype_name!r}; expected 'bfloat16' or 'float16'")
 
 
-def ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(logits, labels)
+def weighted_ce_loss(logits: torch.Tensor, labels: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    loss_rows = F.cross_entropy(logits, labels, reduction="none")
+    weights = weights.to(dtype=loss_rows.dtype).clamp_min(0.0)
+    denom = weights.sum().clamp_min(1.0e-8)
+    return (loss_rows * weights).sum() / denom
 
 
 @torch.no_grad()
@@ -477,22 +529,28 @@ def evaluate(
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    max_batches: int = 0,
 ) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
+    total_weighted_loss = 0.0
+    total_weight = 0.0
     total = 0
     correct = 0
     launch_total = 0
     launch_correct = 0
     noop_total = 0
     noop_correct = 0
-    for raw_batch in loader:
+    for batch_index, raw_batch in enumerate(loader, start=1):
         batch = batch_to_device(raw_batch, device)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             logits, _value = model_forward(model, batch)
         loss_rows = F.cross_entropy(logits, batch["label"], reduction="none")
+        weights = batch["weight"].to(dtype=loss_rows.dtype).clamp_min(0.0)
         pred = torch.argmax(logits, dim=-1)
         total_loss += float(loss_rows.sum().item())
+        total_weighted_loss += float((loss_rows * weights).sum().item())
+        total_weight += float(weights.sum().item())
         total += int(batch["label"].numel())
         correct += int((pred == batch["label"]).sum().item())
         launch_mask = batch["label"] != 0
@@ -501,12 +559,16 @@ def evaluate(
         noop_total += int(noop_mask.sum().item())
         launch_correct += int(((pred == batch["label"]) & launch_mask).sum().item())
         noop_correct += int(((pred == batch["label"]) & noop_mask).sum().item())
+        if max_batches > 0 and batch_index >= max_batches:
+            break
     return {
         "loss": total_loss / max(1, total),
+        "weighted_loss": total_weighted_loss / max(1.0e-8, total_weight),
         "accuracy": correct / max(1, total),
         "launch_accuracy": launch_correct / max(1, launch_total),
         "noop_accuracy": noop_correct / max(1, noop_total),
         "rows": float(total),
+        "weight_mean": total_weight / max(1, total),
     }
 
 
@@ -521,13 +583,13 @@ def main() -> int:
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    if not cfg.resume_checkpoint:
+    resume_path = resolve_resume_path(cfg)
+    if resume_path is None:
         METRICS_JSONL.write_text("", encoding="utf-8")
 
-    dataset, stats_payload = load_prebuilt_dataset(Path(cfg.dataset_path), cfg.player_name)
+    dataset, stats_payload = load_prebuilt_dataset(Path(cfg.dataset_path), cfg.max_chunks)
     validate_dataset_schema(dataset)
     DATASET_STATS_JSON.write_text(json.dumps(stats_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    dataset_stats = stats_payload.get("dataset", {})
 
     if cfg.use_wandb:
         if wandb is None:
@@ -542,6 +604,7 @@ def main() -> int:
                 "out_dir": str(OUT_DIR),
                 "latest_checkpoint": str(LATEST_CHECKPOINT),
                 "best_checkpoint": str(BEST_CHECKPOINT),
+                "resolved_resume_checkpoint": str(resume_path) if resume_path is not None else None,
             },
             resume="allow",
         )
@@ -549,39 +612,34 @@ def main() -> int:
         wandb.define_metric("*", step_metric="epoch")
 
     if run is not None:
+        rows = int(stats_payload.get("rows", len(dataset)))
+        noop_rows = int(stats_payload.get("noop_rows", 0))
+        launch_rows = int(stats_payload.get("launch_rows", 0))
         wandb.log(
             {
-                "dataset/replays_seen": dataset_stats.get("replays_seen", 0),
-                "dataset/replays_kept": dataset_stats.get("replays_kept", 0),
-                "dataset/rows": dataset_stats.get("rows", len(dataset)),
-                "dataset/noop_rows": dataset_stats.get("noop_rows", 0),
-                "dataset/launch_rows": dataset_stats.get("launch_rows", 0),
-                "dataset/skipped_invalid": dataset_stats.get("skipped_invalid", 0),
-                "dataset/skipped_bad_ship_fraction": dataset_stats.get("skipped_bad_ship_fraction", 0),
-                "dataset/multi_launch_steps": dataset_stats.get("multi_launch_steps", 0),
-                "dataset/noop_fraction": stats_payload["noop_fraction"],
-                "dataset/launch_fraction": stats_payload["launch_fraction"],
-                "value/mean": stats_payload["value_mean"],
-                "value/p50": stats_payload["value_p50"],
-                "value/p90": stats_payload["value_p90"],
-                "sample_weight/mean": stats_payload["sample_weight_mean"],
-                "sample_weight/p10": stats_payload["sample_weight_p10"],
-                "sampling/value_weighted": 1,
-                "loss/value_weighted": 0,
+                "dataset/processed_replays": stats_payload.get("processed_replays", 0),
+                "dataset/rows": rows,
+                "dataset/noop_rows": noop_rows,
+                "dataset/launch_rows": launch_rows,
+                "dataset/noop_fraction": noop_rows / max(1, rows),
+                "dataset/launch_fraction": launch_rows / max(1, rows),
+                "sampling/weighted": 0,
+                "loss/sample_weighted": 1,
                 "epoch": 0,
             }
         )
     print(
         f"loaded {cfg.dataset_path}\n"
-        f"rows={len(dataset)} games={stats_payload.get('unique_games', len(set(dataset.game_ids_by_chunk)))} "
-        f"launch={dataset_stats.get('launch_rows', 0)} noop={dataset_stats.get('noop_rows', 0)} "
-        f"invalid={dataset_stats.get('skipped_invalid', 0)} "
-        f"bad_frac={dataset_stats.get('skipped_bad_ship_fraction', 0)} "
-        f"weight_mean={stats_payload.get('sample_weight_mean', 0.0):.3f} "
-        f"device={device} amp={int(amp_enabled)} amp_dtype={cfg.amp_dtype} workers={actual_workers}"
+        f"rows={len(dataset)} chunks={len(dataset.chunks)} "
+        f"manifest_rows={stats_payload.get('rows', len(dataset))} "
+        f"launch={stats_payload.get('launch_rows', 0)} noop={stats_payload.get('noop_rows', 0)} "
+        f"processed_replays={stats_payload.get('processed_replays', 0)} "
+        f"device={device} amp={int(amp_enabled)} amp_dtype={cfg.amp_dtype} workers={actual_workers} "
+        f"max_train_steps={cfg.max_train_steps} max_val_batches={cfg.max_val_batches} "
+        f"checkpoint_every_steps={cfg.checkpoint_every_steps} auto_resume={int(cfg.auto_resume)}"
     )
 
-    train_loader, val_loader, train_rows, val_rows = make_loaders(
+    train_loader, val_loader, split_stats = make_loaders(
         dataset,
         cfg.batch_size,
         cfg.val_fraction,
@@ -590,27 +648,48 @@ def main() -> int:
         cfg.device.startswith("cuda"),
         cfg.dataloader_prefetch_factor,
     )
+    print(
+        f"split train_rows={split_stats['train_rows']} val_rows={split_stats['val_rows']} "
+        f"train_chunks={split_stats['train_chunks']} val_chunks={split_stats['val_chunks']} "
+        f"val_fraction={split_stats['val_fraction']:.3f}"
+    )
 
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and amp_dtype == torch.float16)
     model = build_policy(cfg.model, cfg.hidden, cfg.transformer_layers, cfg.transformer_heads).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=cfg.lr_plateau_factor,
+        patience=cfg.lr_plateau_patience,
+        min_lr=cfg.min_learning_rate,
+    )
     best_val = float("inf")
     global_step = 0
     start_epoch = 1
 
-    if cfg.resume_checkpoint:
-        resume_path = Path(cfg.resume_checkpoint).expanduser()
-        if not resume_path.is_absolute():
-            resume_path = IL_DIR / resume_path
+    if resume_path is not None:
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        if "scaler" in ckpt:
+            scaler.load_state_dict(ckpt["scaler"])
         global_step = int(ckpt.get("global_step", 0))
-        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        checkpoint_epoch = int(ckpt.get("epoch", 0))
         metrics = ckpt.get("metrics") or {}
-        best_val = float(metrics.get("val_loss", best_val))
-        print(f"resumed from {resume_path} at epoch={start_epoch - 1} global_step={global_step}")
+        if "epoch_complete" in metrics:
+            epoch_complete = bool(metrics["epoch_complete"])
+        else:
+            epoch_complete = "val_weighted_loss" in metrics or "val_loss" in metrics
+        start_epoch = checkpoint_epoch + 1 if epoch_complete else checkpoint_epoch
+        best_val = float(metrics.get("val_weighted_loss", metrics.get("val_loss", best_val)))
+        print(
+            f"resumed from {resume_path} at checkpoint_epoch={checkpoint_epoch} "
+            f"start_epoch={start_epoch} global_step={global_step} lr={current_lr(optimizer):.3g}"
+        )
 
     if start_epoch > cfg.epochs:
         print(f"nothing to do: resume starts at epoch {start_epoch}, but IL_EPOCHS/EPOCHS is {cfg.epochs}")
@@ -620,9 +699,12 @@ def main() -> int:
         model.train()
         train_losses: list[float] = []
         train_accs: list[float] = []
+        train_weight_means: list[float] = []
         recent_losses: list[float] = []
         recent_accs: list[float] = []
+        recent_weight_means: list[float] = []
         epoch_rows = 0
+        epoch_train_steps = 0
         epoch_t0 = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
         log_t0 = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
         wall_t0 = None
@@ -636,10 +718,11 @@ def main() -> int:
             wall_t0 = time.perf_counter()
         for raw_batch in train_loader:
             global_step += 1
+            epoch_train_steps += 1
             batch = batch_to_device(raw_batch, device)
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
                 logits, _value = model_forward(model, batch)
-                loss = ce_loss(logits, batch["label"])
+                loss = weighted_ce_loss(logits, batch["label"], batch["weight"])
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -650,12 +733,15 @@ def main() -> int:
                 pred = torch.argmax(logits, dim=-1)
                 acc = float((pred == batch["label"]).float().mean().item())
                 loss_value = float(loss.item())
+                weight_mean = float(batch["weight"].float().mean().item())
                 batch_rows = int(batch["label"].numel())
                 epoch_rows += batch_rows
                 train_accs.append(acc)
                 train_losses.append(loss_value)
+                train_weight_means.append(weight_mean)
                 recent_accs.append(acc)
                 recent_losses.append(loss_value)
+                recent_weight_means.append(weight_mean)
 
             if cfg.log_every_steps and global_step % cfg.log_every_steps == 0:
                 if device.type == "cuda":
@@ -678,12 +764,16 @@ def main() -> int:
                     "global_step": global_step,
                     "train/loss_recent": float(np.mean(recent_losses)),
                     "train/accuracy_recent": float(np.mean(recent_accs)),
+                    "train/sample_weight_mean_recent": float(np.mean(recent_weight_means)),
                     "train/rows_per_sec": rows_per_sec,
+                    "train/lr": current_lr(optimizer),
                 }
                 print(
                     f"step {global_step} epoch={epoch:02d} "
                     f"loss={log_row['train/loss_recent']:.4f} "
                     f"acc={log_row['train/accuracy_recent']:.3f} "
+                    f"w={log_row['train/sample_weight_mean_recent']:.4f} "
+                    f"lr={log_row['train/lr']:.3g} "
                     f"rows/s={rows_per_sec:.0f}",
                     flush=True,
                 )
@@ -691,20 +781,47 @@ def main() -> int:
                     wandb.log(log_row, step=global_step)
                 recent_losses.clear()
                 recent_accs.clear()
+                recent_weight_means.clear()
 
             if cfg.checkpoint_every_steps and global_step % cfg.checkpoint_every_steps == 0:
+                checkpoint_metrics = {
+                    "train_loss_recent": float(np.mean(train_losses[-100:])),
+                    "epoch_rows": epoch_rows,
+                    "learning_rate": current_lr(optimizer),
+                    "epoch_complete": False,
+                }
+                step_checkpoint = OUT_DIR / f"step_{global_step:09d}.pt"
                 save_checkpoint(
                     LATEST_CHECKPOINT,
                     model,
                     optimizer,
+                    scheduler,
+                    scaler,
                     cfg,
                     epoch,
                     global_step,
-                    {"train_loss_recent": float(np.mean(train_losses[-100:])), "epoch_rows": epoch_rows},
+                    checkpoint_metrics,
                     run,
                 )
+                save_checkpoint(
+                    step_checkpoint,
+                    model,
+                    optimizer,
+                    scheduler,
+                    scaler,
+                    cfg,
+                    epoch,
+                    global_step,
+                    checkpoint_metrics,
+                    run,
+                )
+            if cfg.max_train_steps > 0 and epoch_train_steps >= cfg.max_train_steps:
+                break
 
-        val = evaluate(model, val_loader, device, amp_enabled, amp_dtype)
+        val = evaluate(model, val_loader, device, amp_enabled, amp_dtype, cfg.max_val_batches)
+        lr_before_scheduler = current_lr(optimizer)
+        scheduler.step(val["weighted_loss"])
+        lr_after_scheduler = current_lr(optimizer)
         if device.type == "cuda":
             epoch_end = torch.cuda.Event(enable_timing=True)
             epoch_end.record()
@@ -721,13 +838,23 @@ def main() -> int:
             "global_step": global_step,
             "train_loss": float(np.mean(train_losses)),
             "train_accuracy": float(np.mean(train_accs)),
+            "train_sample_weight_mean": float(np.mean(train_weight_means)),
             "val_loss": val["loss"],
+            "val_weighted_loss": val["weighted_loss"],
             "val_accuracy": val["accuracy"],
             "val_launch_accuracy": val["launch_accuracy"],
             "val_noop_accuracy": val["noop_accuracy"],
-            "train_rows": int(train_rows),
-            "val_rows": int(val_rows),
+            "val_sample_weight_mean": val["weight_mean"],
+            "train_rows": int(split_stats["train_rows"]),
+            "val_rows": int(split_stats["val_rows"]),
+            "split_train_chunks": int(split_stats["train_chunks"]),
+            "split_val_chunks": int(split_stats["val_chunks"]),
+            "split_train_fraction": float(split_stats["train_fraction"]),
+            "split_val_fraction": float(split_stats["val_fraction"]),
             "train_rows_per_sec": epoch_rows / max(epoch_seconds, 1.0e-9),
+            "learning_rate": lr_after_scheduler,
+            "learning_rate_before_scheduler": lr_before_scheduler,
+            "epoch_complete": True,
         }
         append_jsonl(METRICS_JSONL, row)
         if run is not None:
@@ -735,29 +862,63 @@ def main() -> int:
                 {
                     "train/loss": row["train_loss"],
                     "train/accuracy": row["train_accuracy"],
+                    "train/sample_weight_mean": row["train_sample_weight_mean"],
                     "val/loss": row["val_loss"],
+                    "val/weighted_loss": row["val_weighted_loss"],
                     "val/accuracy": row["val_accuracy"],
                     "val/launch_accuracy": row["val_launch_accuracy"],
                     "val/noop_accuracy": row["val_noop_accuracy"],
+                    "val/sample_weight_mean": row["val_sample_weight_mean"],
                     "rows/train": row["train_rows"],
                     "rows/val": row["val_rows"],
+                    "split/train_chunks": row["split_train_chunks"],
+                    "split/val_chunks": row["split_val_chunks"],
+                    "split/train_fraction": row["split_train_fraction"],
+                    "split/val_fraction": row["split_val_fraction"],
                     "train/rows_per_sec_epoch": row["train_rows_per_sec"],
+                    "train/lr_epoch": row["learning_rate"],
+                    "train/lr_before_scheduler": row["learning_rate_before_scheduler"],
                     "epoch": epoch,
                 }
             )
         print(
             f"epoch {epoch:02d} train_loss={row['train_loss']:.4f} "
             f"train_acc={row['train_accuracy']:.3f} val_loss={row['val_loss']:.4f} "
+            f"val_weighted={row['val_weighted_loss']:.4f} "
             f"val_acc={row['val_accuracy']:.3f} launch={row['val_launch_accuracy']:.3f} "
+            f"lr={row['learning_rate']:.3g} "
             f"rows/s={row['train_rows_per_sec']:.0f}"
         )
 
-        save_checkpoint(LATEST_CHECKPOINT, model, optimizer, cfg, epoch, global_step, row, run)
+        save_checkpoint(LATEST_CHECKPOINT, model, optimizer, scheduler, scaler, cfg, epoch, global_step, row, run)
         if cfg.checkpoint_every_epochs and epoch % cfg.checkpoint_every_epochs == 0:
-            save_checkpoint(OUT_DIR / f"epoch_{epoch:03d}.pt", model, optimizer, cfg, epoch, global_step, row, run)
-        if row["val_loss"] < best_val:
-            best_val = row["val_loss"]
-            save_checkpoint(BEST_CHECKPOINT, model, optimizer, cfg, epoch, global_step, row, run)
+            save_checkpoint(
+                OUT_DIR / f"epoch_{epoch:06d}_step_{global_step:09d}.pt",
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                cfg,
+                epoch,
+                global_step,
+                row,
+                run,
+            )
+        if row["val_weighted_loss"] < best_val:
+            best_val = row["val_weighted_loss"]
+            save_checkpoint(BEST_CHECKPOINT, model, optimizer, scheduler, scaler, cfg, epoch, global_step, row, run)
+            save_checkpoint(
+                OUT_DIR / f"best_step_{global_step:09d}.pt",
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                cfg,
+                epoch,
+                global_step,
+                row,
+                run,
+            )
 
     print(f"wrote {LATEST_CHECKPOINT}")
     print(f"best {BEST_CHECKPOINT}")
