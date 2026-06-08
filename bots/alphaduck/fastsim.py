@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "target_predictor" / "train"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mine" / "target_predictor" / "train"))
 import build_dataset as bd  # for engine constants
 
 try:

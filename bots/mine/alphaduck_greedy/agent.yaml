@@ -1,0 +1,5 @@
+name: alphaduck_greedy
+description: "PairNetV17 policy head argmax, no MCTS. Same v17_jun weights as alphaduck."
+author: Derek Wang
+license: "Apache 2.0"
+tags: [transformer, learned, greedy]

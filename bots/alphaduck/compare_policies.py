@@ -13,8 +13,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bots" / "mine" / "target_predictor" / "train"))
+sys.path.insert(0, str(ROOT / "bots" / "alphaduck" / "train"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import build_dataset as bd
