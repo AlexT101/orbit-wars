@@ -1,7 +1,7 @@
 """Play alphaduck vs a list of opponents over N seeds × 2 seats; report results.
 
 Usage:
-  python3 bots/mine/alphaduck/eval_alphaduck.py \
+  python3 bots/alphaduck/eval_alphaduck.py \
     --opponents random nearest-sniper alphaow \
     --seeds 3 \
     --budget-ms 400

@@ -6,9 +6,9 @@
   - Step controls (slider, prev/next, play, arrows)
 
 Usage:
-  python3 bots/mine/alphaduck/replay_viewer.py            # auto-pick first 2p replay
-  python3 bots/mine/alphaduck/replay_viewer.py --replay <zip>:<json>
-  python3 bots/mine/alphaduck/replay_viewer.py --out my.html --no-open
+  python3 bots/alphaduck/replay_viewer.py            # auto-pick first 2p replay
+  python3 bots/alphaduck/replay_viewer.py --replay <zip>:<json>
+  python3 bots/alphaduck/replay_viewer.py --out my.html --no-open
 """
 
 from __future__ import annotations
@@ -27,8 +27,9 @@ import numpy as np
 import torch
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent.parent
+ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT / "bots" / "mine" / "target_predictor" / "train"))
+sys.path.insert(0, str(ROOT / "bots" / "alphaduck" / "train"))
 sys.path.insert(0, str(HERE))
 
 import build_dataset as bd
@@ -159,7 +160,17 @@ def precompute(game, ck, model):
             # (those don't sum to 1 — that was the bug).
             pair_logits_n = pair_logits[:n, :n].copy()
             np.fill_diagonal(pair_logits_n, -1e9)
-            if ck.get("policy_loss_weight", 0.0) > 0:
+            has_policy = ck.get("policy_loss_weight", 0.0) > 0
+            is_conditional = bool(ck.get("policy_conditional", False))
+            if has_policy and is_conditional:
+                # Conditional: P(target|launch) = softmax(pair_logits); P(noop) from sigmoid head.
+                # Joint: pair_probs[i, j] = (1 - noop[i]) * cond[i, j].  Matches main.py exactly.
+                flat = pair_logits_n - pair_logits_n.max(axis=1, keepdims=True)
+                ex = np.exp(flat)
+                cond_pair = ex / ex.sum(axis=1, keepdims=True)
+                noop_probs = 1.0 / (1.0 + np.exp(-noop_logits[:n]))
+                probs = (1.0 - noop_probs)[:, None] * cond_pair
+            elif has_policy:
                 full = np.concatenate([noop_logits[:n, None], pair_logits_n], axis=1)
                 full = full - full.max(axis=1, keepdims=True)
                 ex = np.exp(full)
@@ -214,6 +225,7 @@ def precompute(game, ck, model):
             ],
             "fleets": [
                 {"x": round(f["x"], 2), "y": round(f["y"], 2),
+                 "angle": round(float(f["angle"]), 4),
                  "owner": int(f["owner"]), "ships": int(f["ships"])}
                 for f in state["fleets"]
             ],
@@ -232,16 +244,17 @@ HTML = """<!doctype html>
 <title>alphaduck replay viewer</title>
 <style>
 :root {
-  --bg: #0b0d12; --panel: #11151c; --fg: #dbeafe; --muted: #94a3b8;
-  --p0: #3a86ff; --p0d: #1d4ed8; --p1: #ff006e; --p1d: #b91c1c;
+  --bg: #05070b; --panel: #0e1218; --fg: #e2e8f0; --muted: #94a3b8;
+  --p0: #38bdf8; --p0d: #0c4a6e; --p1: #f43f5e; --p1d: #881337;
   --neut: #94a3b8; --sun: #fde047; --comet: #ffffff;
 }
 * { box-sizing: border-box; }
 body { background: var(--bg); color: var(--fg); margin: 0;
   font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
-.wrap { display: grid; grid-template-columns: 740px 1fr;
+.wrap { display: grid; grid-template-columns: 760px 1fr;
   grid-template-rows: 1fr auto; gap: 8px; padding: 8px; height: 100vh; }
-#board { background: var(--panel); border-radius: 6px; cursor: pointer; }
+#board { background: radial-gradient(ellipse at center, #0a1424 0%, #03070d 70%);
+  border-radius: 8px; cursor: pointer; box-shadow: 0 0 30px rgba(56, 189, 248, 0.06) inset; }
 .side { display: grid; grid-template-rows: auto 1fr; gap: 8px; min-width: 380px; }
 .panel { background: var(--panel); border-radius: 6px; padding: 10px; }
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -404,31 +417,83 @@ function render() {
     document.getElementById("status").textContent = `step ${t}/${STEPS.length - 1} (no data)`;
     return;
   }
-  svg.appendChild(svgEl("rect", {x:0, y:0, width:100, height:100, fill:"#0b0d12"}));
-  svg.appendChild(svgEl("circle", {cx:50, cy:50, r:10, fill:"#fde047"}));
+
+  // <defs> for gradients + filters
+  const defs = svgEl("defs", {});
+  defs.innerHTML = `
+    <radialGradient id="sun-grad">
+      <stop offset="0%" stop-color="#fff5a0"/>
+      <stop offset="40%" stop-color="#fde047"/>
+      <stop offset="80%" stop-color="#facc15" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#facc15" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="p0-grad"><stop offset="0%" stop-color="#bae6fd"/><stop offset="60%" stop-color="#38bdf8"/><stop offset="100%" stop-color="#0369a1"/></radialGradient>
+    <radialGradient id="p1-grad"><stop offset="0%" stop-color="#fecdd3"/><stop offset="60%" stop-color="#f43f5e"/><stop offset="100%" stop-color="#9f1239"/></radialGradient>
+    <radialGradient id="neut-grad"><stop offset="0%" stop-color="#e2e8f0"/><stop offset="60%" stop-color="#94a3b8"/><stop offset="100%" stop-color="#475569"/></radialGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="0.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  `;
+  svg.appendChild(defs);
+
+  // Sun
+  svg.appendChild(svgEl("circle", {cx:50, cy:50, r:14, fill:"url(#sun-grad)", opacity:"0.6"}));
+  svg.appendChild(svgEl("circle", {cx:50, cy:50, r:10, fill:"#fde047", filter:"url(#glow)"}));
+
+  // Orbit rings for planets (faint dashed circles at planet's center distance)
+  const ringSet = new Set();
+  for (const p of s.planets) {
+    if (p.comet) continue;
+    const dx = p.x - 50, dy = p.y - 50;
+    const dist = Math.hypot(dx, dy);
+    const key = dist.toFixed(1);
+    if (!ringSet.has(key) && dist > 11) {
+      ringSet.add(key);
+      svg.appendChild(svgEl("circle", {cx:50, cy:50, r:dist, fill:"none",
+        stroke:"#1e293b", "stroke-width":0.12, "stroke-dasharray":"0.5,0.5"}));
+    }
+  }
 
   for (const p of s.planets) {
-    const r = Math.max(1.2, p.r);
-    const fill = PCOL[p.owner] || "#94a3b8";
-    const stroke = p.comet ? "#ffffff" : "#1f2937";
+    const r = Math.max(1.5, p.r * 1.1);
+    const grad = p.owner === 0 ? "url(#p0-grad)" : p.owner === 1 ? "url(#p1-grad)" : "url(#neut-grad)";
+    const stroke = p.comet ? "#ffffff" : (p.owner === 0 ? "#0369a1" : p.owner === 1 ? "#9f1239" : "#475569");
     const sel = p.id === selectedPid;
-    const sw = sel ? 1.2 : (p.comet ? 0.5 : 0.25);
-    const c = svgEl("circle", {cx:p.x, cy:p.y, r:r, fill:fill, stroke: sel ? "#fde047" : stroke, "stroke-width": sw});
+    const sw = sel ? 0.6 : (p.comet ? 0.4 : 0.2);
+    // Outer halo for owned planets
+    if (p.owner >= 0 && !p.comet) {
+      svg.appendChild(svgEl("circle", {cx:p.x, cy:p.y, r:r + 0.8, fill:grad, opacity:0.2}));
+    }
+    const c = svgEl("circle", {cx:p.x, cy:p.y, r:r, fill:grad,
+      stroke: sel ? "#fde047" : stroke, "stroke-width": sw, filter: sel ? "url(#glow)" : ""});
     c.style.cursor = "pointer";
     c.addEventListener("click", (ev) => { ev.stopPropagation(); selectedPid = p.id; render(); });
     svg.appendChild(c);
     if (p.ships > 0) {
       const txt = svgEl("text", {x:p.x, y:p.y + 0.5, "text-anchor":"middle", "dominant-baseline":"middle",
-                                  "font-size":1.6, "font-weight":"bold", fill:"#0b0d12"});
+                                  "font-size":1.7, "font-weight":"bold",
+                                  fill: p.owner >= 0 ? "#0a0f1a" : "#0a0f1a"});
       txt.textContent = p.ships;
       txt.style.pointerEvents = "none";
       svg.appendChild(txt);
     }
   }
+  // Fleets: rotate triangle to face heading
   for (const f of s.fleets) {
     const fc = PCOL[f.owner] || "#94a3b8";
-    const points = `${f.x},${f.y - 0.7} ${f.x + 0.6},${f.y + 0.5} ${f.x - 0.6},${f.y + 0.5}`;
-    svg.appendChild(svgEl("polygon", {points: points, fill: fc, stroke:"white", "stroke-width":0.08}));
+    const sz = 0.9 + 0.05 * Math.min(20, Math.sqrt(Math.max(1, f.ships || 1)));
+    // Triangle pointing up; we'll rotate via SVG transform
+    const angleDeg = (f.angle || 0) * 180 / Math.PI + 90; // +90 because triangle points up by default
+    const points = `0,${-sz} ${sz * 0.7},${sz * 0.6} ${-sz * 0.7},${sz * 0.6}`;
+    const tri = svgEl("polygon", {points, fill: fc, stroke:"#0a0f1a", "stroke-width":0.1,
+      transform: `translate(${f.x} ${f.y}) rotate(${angleDeg})`, filter:"url(#glow)"});
+    svg.appendChild(tri);
+    // Small ship count label next to fleet
+    if (f.ships >= 5) {
+      const lbl = svgEl("text", {x:f.x, y:f.y - sz - 0.3, "text-anchor":"middle",
+                                  "font-size":1.0, fill:"#cbd5e1", opacity:0.7});
+      lbl.textContent = f.ships;
+      lbl.style.pointerEvents = "none";
+      svg.appendChild(lbl);
+    }
   }
   setStats(s);
   renderDetail(s);
@@ -481,7 +546,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--replay", default=None)
     ap.add_argument("--ckpt", type=Path,
-                    default=ROOT / "bots" / "mine" / "target_predictor" / "train" / "weights" / "transformer_pair_v9.pt")
+                    default=ROOT / "bots" / "mine" / "target_predictor" / "train" / "weights" / "transformer_pair_v15_cond.pt")
     ap.add_argument("--out", type=Path, default=HERE / "replay_viewer.html")
     ap.add_argument("--no-open", action="store_true")
     args = ap.parse_args()
