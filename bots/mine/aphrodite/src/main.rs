@@ -52,6 +52,16 @@ fn main() -> io::Result<()> {
             }
         };
         let state = parse_state(&v);
+        if v.get("__cmd").and_then(Value::as_str) == Some("value") {
+            let value = value_net::predict(&state, state.player);
+            let response = match value {
+                Some(y) => json!({"value": y}),
+                None => json!({"value": null}),
+            };
+            writeln!(out, "{}", response)?;
+            out.flush()?;
+            continue;
+        }
         if let Some(f) = dump.as_mut() {
             let feats = value_net::extract_features(&state, state.player);
             let v2 = value_net::summary_features_v2::extract(&state, state.player);
