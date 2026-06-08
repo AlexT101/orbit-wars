@@ -23,7 +23,6 @@ REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train_transformer"
 BOTS_DIR = REPO_ROOT / "bots"
 DEFAULT_CHECKPOINT = IL_DIR / "checkpoints" / "osteo_bc_transformer" / "latest.pt"
-DEFAULT_OUT = IL_DIR / "replays" / "latest_vs_hellburner.html"
 
 PLAYERS = 2
 MAX_STEPS = 500
@@ -282,6 +281,22 @@ def print_wsl_scp_command(remote_path: Path) -> None:
     )
 
 
+def safe_name(value: str) -> str:
+    chars = []
+    for ch in value:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            chars.append(ch)
+        else:
+            chars.append("_")
+    name = "".join(chars).strip("._")
+    return name or "opponent"
+
+
+def default_replay_path(checkpoint: Path, opponent: str) -> Path:
+    ckpt_name = "latest" if checkpoint == DEFAULT_CHECKPOINT else checkpoint.stem
+    return IL_DIR / "replays" / f"{safe_name(ckpt_name)}_vs_{safe_name(opponent)}.html"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play an osteo imitation-learning checkpoint.")
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT), help="IL .pt checkpoint; defaults to latest.pt")
@@ -290,12 +305,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
-    parser.add_argument("--deterministic", action="store_true", help="argmax for hero instead of sampling")
+    parser.set_defaults(deterministic=False)
+    parser.add_argument(
+        "--deterministic",
+        dest="deterministic",
+        action="store_true",
+        help="argmax for hero instead of sampling",
+    )
+    parser.add_argument(
+        "--sample",
+        dest="deterministic",
+        action="store_false",
+        help="sample hero actions from the policy; this is the default",
+    )
     parser.add_argument("--opponent-deterministic", action="store_true", help="argmax for checkpoint opponents")
     parser.set_defaults(render=True)
     parser.add_argument("--render", dest="render", action="store_true", help="write an HTML replay for the first game")
     parser.add_argument("--no-render", dest="render", action="store_false", help="skip HTML replay output")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--out", type=Path, default=None, help="HTML replay path; defaults to replays/<checkpoint>_vs_<opponent>.html")
     return parser.parse_args()
 
 
@@ -304,6 +331,7 @@ def main() -> int:
     checkpoint = resolve_ref(args.checkpoint)
     if not checkpoint.exists():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
+    out_path = args.out if args.out is not None else default_replay_path(checkpoint, args.opponent)
 
     hero = CheckpointAgent(checkpoint, deterministic=args.deterministic, device=args.device)
     opponent = make_agent(
@@ -320,8 +348,9 @@ def main() -> int:
     print(f"checkpoint_step: {hero.global_step} epoch: {hero.epoch}")
     print(f"opponent: {args.opponent} ({opponent.name})")
     print(f"device: {args.device}")
+    print(f"hero_policy: {'argmax' if args.deterministic else 'sample'}")
     for i in range(args.games):
-        render_out = args.out if args.render and i == 0 else None
+        render_out = out_path if args.render and i == 0 else None
         result = play_game(
             hero=hero,
             opponent=opponent,

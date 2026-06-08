@@ -15,6 +15,19 @@ BOTS_DIR = ROOT / "bots"
 MAX_STEPS = 500
 
 
+def scores_from_rows(planets: list[list[float]], fleets: list[list[float]], num_players: int) -> list[int]:
+    scores = [0] * num_players
+    for planet in planets:
+        owner = int(planet[1])
+        if 0 <= owner < num_players:
+            scores[owner] += int(planet[5])
+    for fleet in fleets:
+        owner = int(fleet[1])
+        if 0 <= owner < num_players:
+            scores[owner] += int(fleet[6])
+    return scores
+
+
 @contextlib.contextmanager
 def _silence_imports():
     sys.stdout.flush()
@@ -107,6 +120,11 @@ def run_rust_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> in
 
     snap = engine.snapshot()
     print(f"Finished: done={done} steps={steps_run}")
+    scores = scores_from_rows(snap.planets, snap.fleets, len(agents))
+    if len(scores) == 2:
+        print(f"Score: {scores[0]}-{scores[1]} diff={scores[0] - scores[1]:+d}")
+    else:
+        print("Score: " + ", ".join(str(score) for score in scores))
     rewards = snap.rewards if snap.rewards is not None else [None] * len(agents)
     for i, reward in enumerate(rewards):
         avg_ms = (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
