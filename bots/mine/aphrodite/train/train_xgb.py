@@ -258,19 +258,27 @@ def quality_weights(win_rate, floor: float, enabled: bool):
     return w.astype(np.float32)
 
 
-def bradley_terry_ratings(game_names, game_rewards, min_games: int, iters: int = 200):
-    """Fit a Bradley-Terry skill rating per player from game outcomes.
+def bradley_terry_ratings(game_names, game_rewards, min_games: int, iters: int = 200,
+                          prior_strength: float = 3.0):
+    """Fit a (regularized) Bradley-Terry skill rating per player from outcomes.
 
     Unlike raw win rate, this is OPPONENT-ADJUSTED: a player who goes ~.500
     against strong opponents outrates one who goes ~.500 against weak ones —
     important on an Elo-matched ladder where win rates compress toward 0.5.
 
     Each game is decomposed into pairwise "higher reward beats lower reward"
-    comparisons (so it handles 2p and 4p). Strengths theta_i are fit by the
-    standard MM iteration `theta_i <- wins_i / sum_j n_ij/(theta_i+theta_j)`,
-    renormalized to geometric mean 1. Returns {name: log(theta)} (higher =
-    stronger) for players with >= `min_games` appearances; others are omitted so
-    the caller falls back to the median rating for them.
+    comparisons (so it handles 2p and 4p). Strengths theta_i are fit by an MM
+    iteration with a Gamma(K, K) prior (`prior_strength=K`):
+
+        theta_i <- (wins_i + K) / (sum_j n_ij/(theta_i+theta_j) + K)
+
+    The prior == K pseudo-games against an average (strength-1) opponent, half
+    won. It both BOUNDS the estimate (an undefeated few-game player no longer
+    diverges to +inf) and SHRINKS low-sample players toward the field mean, so a
+    5-game 4-0 run can't outrank a 3000-game veteran. Renormalized to geometric
+    mean 1. Returns {name: log(theta)} (higher = stronger) for players with
+    >= `min_games` appearances; others are omitted so the caller falls back to
+    the median rating for them.
     """
     from collections import defaultdict
 
@@ -302,6 +310,7 @@ def bradley_terry_ratings(game_names, game_rewards, min_games: int, iters: int =
         adj[i].append((j, c))
         adj[j].append((i, c))
 
+    K = float(prior_strength)
     theta = np.ones(P)
     for _ in range(iters):
         new = theta.copy()
@@ -310,8 +319,9 @@ def bradley_terry_ratings(game_names, game_rewards, min_games: int, iters: int =
             ti = theta[i]
             for (j, c) in adj[i]:
                 denom += c / (ti + theta[j])
-            if denom > 0 and wins[i] > 0:
-                new[i] = wins[i] / denom
+            # Gamma(K, K) prior: bounds undefeated divergence + shrinks low-game
+            # players toward the strength-1 (average) anchor.
+            new[i] = (wins[i] + K) / (denom + K)
         new = np.where(new <= 0, 1e-9, new)
         theta = new / np.exp(np.mean(np.log(new)))  # renormalize geo-mean -> 1
 
