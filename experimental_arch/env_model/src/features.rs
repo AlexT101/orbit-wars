@@ -17,6 +17,8 @@
 //!   - `reachable_mask` `(NUM_FRAMES, 44, 44, ACTIONS_DIM)` per-frame clean-launch bits
 //!   - `angles` / `mask` `(44, 44, ACTIONS_DIM)`  decision frame (t) only
 //!   - `ship_counts` `(44, 44, ACTIONS_DIM)` integer ships sent by each action
+//!   - `pair_outcome_features` `(44, 44, ACTIONS_DIM, PAIR_OUTCOME_DIM)`
+//!     resolve-frame counterfactual ownership features for each launch.
 //!
 //! `angles`/`mask`/`ship_counts` are frame t only: the policy acts now. `turns`
 //! and `reachable_mask` are computed for every frame so temporal message
@@ -51,11 +53,15 @@ pub const PLANET_SLOTS: usize = 44;
 pub const ACTIONS_DIM: usize = 3;
 pub const NUM_FRAMES: usize = 4;
 /// Per-planet token width. See [`fill_token`] for the layout.
-pub const TOKEN_DIM: usize = 11;
+pub const TOKEN_DIM: usize = 15;
 /// Board-level feature width. See [`compute_globals`] for the layout.
 pub const GLOBAL_DIM: usize = 16;
 pub const PLANET_TIMELINE_SAMPLES: [usize; 11] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 64];
 pub const PLANET_TIMELINE_DIM: usize = PLANET_TIMELINE_SAMPLES.len() * 2 + 9;
+/// Per `(source, target, action)` counterfactual features:
+/// `[source_still_mine_at_resolve, target_mine_after_launch_at_resolve,
+///   target_takeover_delta_at_resolve, target_takeover_time]`.
+pub const PAIR_OUTCOME_DIM: usize = 4;
 
 /// Future-frame offsets (turns from `t`). The 4th frame, `t_resolved`, is found
 /// dynamically (first turn with no fleets), so it isn't a fixed offset here.
@@ -106,12 +112,12 @@ fn norm_signed_ships(s: i64) -> f32 {
     signed_log_norm(s as f64, 1000.0)
 }
 #[inline]
-fn norm_prod(p: i64) -> f32 {
-    log_norm(p as f64, 10.0)
-}
-#[inline]
 fn norm_count(c: usize) -> f32 {
     c as f32 / PLANET_SLOTS as f32
+}
+#[inline]
+fn production_index(p: i64) -> usize {
+    p.clamp(1, 5) as usize - 1
 }
 
 /// Geometry of one planet at one turn.
@@ -390,6 +396,7 @@ pub struct Features {
     pub ship_counts: Vec<i64>,   // (44, 44, ACTIONS_DIM), frame t
     pub reachable_mask: Vec<u8>, // (NUM_FRAMES, 44, 44, ACTIONS_DIM)
     pub planet_timeline_features: Vec<f32>, // (44, PLANET_TIMELINE_DIM)
+    pub pair_outcome_features: Vec<f32>, // (44, 44, ACTIONS_DIM, PAIR_OUTCOME_DIM)
     /// Raw per-frame planet state `[id, owner, x, y, ships]`, present planets
     /// only. Not a model input — exposed for validation/debugging against the
     /// reference engine.
@@ -441,15 +448,24 @@ impl Features {
             "planet_timeline_features_shape",
             (PLANET_SLOTS, PLANET_TIMELINE_DIM),
         )?;
+        d.set_item(
+            "pair_outcome_features",
+            self.pair_outcome_features.into_pyarray(py),
+        )?;
+        d.set_item(
+            "pair_outcome_features_shape",
+            (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM, PAIR_OUTCOME_DIM),
+        )?;
         Ok(d.into_any().unbind())
     }
 }
 
 /// Per-planet token: `[is_mine, is_enemy, is_neutral, is_comet, is_orbiting,
-/// production, ships, x, y, dist_to_sun, angular_velocity]`. Positions and
-/// distance-to-sun are normalized by board size. `angular_velocity` is the
-/// board's orbital rate for orbiting planets and 0 for static planets / comets,
-/// scaled to ~[0, 1] (board rate is ~0.025–0.05).
+/// prod_1, prod_2, prod_3, prod_4, prod_5, ships, x, y, dist_to_sun,
+/// angular_velocity]`. Positions and distance-to-sun are normalized by board
+/// size. `angular_velocity` is the board's orbital rate for orbiting planets
+/// and 0 for static planets / comets, scaled to ~[0, 1] (board rate is
+/// ~0.025–0.05).
 fn fill_token(
     tk: &mut [f32],
     p: &Planet,
@@ -469,12 +485,12 @@ fn fill_token(
     tk[2] = (p.owner == -1) as i32 as f32;
     tk[3] = is_comet as i32 as f32;
     tk[4] = is_orbiting as i32 as f32;
-    tk[5] = norm_prod(p.production);
-    tk[6] = norm_ships(p.ships);
-    tk[7] = norm_dist(p.x);
-    tk[8] = norm_dist(p.y);
-    tk[9] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
-    tk[10] = if is_orbiting {
+    tk[5 + production_index(p.production)] = 1.0;
+    tk[10] = norm_ships(p.ships);
+    tk[11] = norm_dist(p.x);
+    tk[12] = norm_dist(p.y);
+    tk[13] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
+    tk[14] = if is_orbiting {
         (angular_velocity / 0.05) as f32
     } else {
         0.0
@@ -603,6 +619,102 @@ fn compute_planet_timeline_features(
         out[write] = norm_signed_ships(min_balance);
         write += 1;
         out[write] = norm_signed_ships(final_balance);
+    }
+    out
+}
+
+fn apply_arrival_at_resolve(owner: i64, ships: i64, player: i64, count: i64) -> (i64, i64) {
+    if count <= 0 {
+        return (owner, ships);
+    }
+    if owner == player {
+        (owner, ships + count)
+    } else {
+        let after = ships - count;
+        if after < 0 {
+            (player, after.abs())
+        } else {
+            (owner, after)
+        }
+    }
+}
+
+fn source_still_mine_at_resolve(
+    resolved_by_id: &FxHashMap<i64, &Planet>,
+    source_id: i64,
+    player: i64,
+    count: i64,
+) -> bool {
+    resolved_by_id
+        .get(&source_id)
+        .is_some_and(|p| p.owner == player && p.ships - count >= 0)
+}
+
+fn compute_pair_outcome_features(
+    traj: &Trajectory,
+    slot_id: &[i64],
+    player: i64,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM * PAIR_OUTCOME_DIM];
+    let resolved_turn = traj.offsets[NUM_FRAMES - 1];
+    let resolved_by_id: FxHashMap<i64, &Planet> = traj
+        .snapshots
+        .get(resolved_turn)
+        .map(|planets| planets.iter().map(|p| (p.id, p)).collect())
+        .unwrap_or_default();
+    let current_by_id: FxHashMap<i64, &Planet> =
+        traj.frame_planets(0).iter().map(|p| (p.id, p)).collect();
+
+    for si in 0..PLANET_SLOTS {
+        let src_id = slot_id[si];
+        if src_id < 0 {
+            continue;
+        }
+        let Some(src_now) = current_by_id.get(&src_id) else {
+            continue;
+        };
+        if src_now.owner != player {
+            continue;
+        }
+        for sj in 0..PLANET_SLOTS {
+            if si == sj {
+                continue;
+            }
+            let dst_id = slot_id[sj];
+            if dst_id < 0 {
+                continue;
+            }
+            let Some(dst_resolved) = resolved_by_id.get(&dst_id) else {
+                continue;
+            };
+            for a in 0..ACTIONS_DIM {
+                let Some(count) = action_count(a, src_now.ships) else {
+                    continue;
+                };
+                let Some((arrival_turn, _theta)) = traj.aim(0, src_id, dst_id, count) else {
+                    continue;
+                };
+                let source_retained =
+                    source_still_mine_at_resolve(&resolved_by_id, src_id, player, count);
+                let (target_owner_after, _target_ships_after) = apply_arrival_at_resolve(
+                    dst_resolved.owner,
+                    dst_resolved.ships,
+                    player,
+                    count,
+                );
+                let target_owned_after = target_owner_after == player;
+                let target_takeover_delta = dst_resolved.owner != player && target_owned_after;
+                let base = ((si * PLANET_SLOTS + sj) * ACTIONS_DIM + a) * PAIR_OUTCOME_DIM;
+                out[base] = source_retained as i32 as f32;
+                out[base + 1] = target_owned_after as i32 as f32;
+                out[base + 2] = target_takeover_delta as i32 as f32;
+                out[base + 3] = if target_takeover_delta {
+                    norm_turns(arrival_turn)
+                } else {
+                    0.0
+                };
+            }
+        }
     }
     out
 }
@@ -752,6 +864,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
     let mut ship_counts = vec![0i64; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut reachable_mask = vec![0u8; NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let planet_timeline_features = compute_planet_timeline_features(&traj, &slot_id, player);
+    let pair_outcome_features = compute_pair_outcome_features(&traj, &slot_id, player);
     for si in 0..PLANET_SLOTS {
         mask[(si * PLANET_SLOTS) * ACTIONS_DIM + NOOP_ACTION] = 1;
     }
@@ -838,6 +951,7 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
         ship_counts,
         reachable_mask,
         planet_timeline_features,
+        pair_outcome_features,
         frame_planets,
     }
 }
@@ -1140,12 +1254,17 @@ mod tests {
                 f.reachable_mask.len(),
                 NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM
             );
+            assert_eq!(
+                f.pair_outcome_features.len(),
+                PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM * PAIR_OUTCOME_DIM
+            );
             for v in f
                 .tokens
                 .iter()
                 .chain(f.turns.iter())
                 .chain(f.angles.iter())
                 .chain(f.globals.iter())
+                .chain(f.pair_outcome_features.iter())
             {
                 assert!(v.is_finite(), "non-finite feature");
             }
@@ -1163,14 +1282,14 @@ mod tests {
             for token in f.tokens.chunks_exact(TOKEN_DIM) {
                 if token[0..5].iter().any(|&x| x > 0.0) {
                     assert!(
-                        (0.0..=1.0).contains(&token[7]),
+                        (0.0..=1.0).contains(&token[11]),
                         "x out of [0,1]: {}",
-                        token[7]
+                        token[11]
                     );
                     assert!(
-                        (0.0..=1.0).contains(&token[8]),
+                        (0.0..=1.0).contains(&token[12]),
                         "y out of [0,1]: {}",
-                        token[8]
+                        token[12]
                     );
                 }
             }

@@ -3,7 +3,10 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from features import GLOBAL_FEATURES, MAX_PLANETS, PLANET_FEATURES, SEND_FRACTIONS
+from features import GLOBAL_FEATURES, MAX_PLANETS, PLANET_FEATURES, SEND_ACTIONS, SEND_FRACTIONS
+
+PAIR_OUTCOME_FEATURES = 4
+PLANET_XY_SLICE = slice(11, 13)
 
 
 def with_timeline_features(planets, planet_timeline_features=None):
@@ -26,11 +29,11 @@ class OrbitPolicy(nn.Module):
             nn.Linear(hidden, hidden),
             nn.Tanh(),
         )
-        pair_features = hidden * 4 + 4 + GLOBAL_FEATURES
+        pair_features = hidden * 4 + 4 + GLOBAL_FEATURES + PAIR_OUTCOME_FEATURES
         self.pair_head = nn.Sequential(
             nn.Linear(pair_features, hidden),
             nn.Tanh(),
-            nn.Linear(hidden, len(SEND_FRACTIONS)),
+            nn.Linear(hidden, 1),
         )
         self.noop_head = nn.Sequential(
             nn.Linear(hidden + GLOBAL_FEATURES, hidden),
@@ -51,6 +54,7 @@ class OrbitPolicy(nn.Module):
         action_mask=None,
         pair_turns=None,
         pair_reachable_mask=None,
+        pair_outcome_features=None,
         planet_timeline_features=None,
     ):
         batch = planets.shape[0]
@@ -62,7 +66,7 @@ class OrbitPolicy(nn.Module):
         tgt = encoded.unsqueeze(1).expand(batch, MAX_PLANETS, MAX_PLANETS, -1)
         pair = torch.cat([src, tgt, src - tgt, src * tgt], dim=-1)
 
-        xy = planets[..., 7:9]
+        xy = planets[..., PLANET_XY_SLICE]
         src_xy = xy.unsqueeze(2).expand(batch, MAX_PLANETS, MAX_PLANETS, 2)
         tgt_xy = xy.unsqueeze(1).expand(batch, MAX_PLANETS, MAX_PLANETS, 2)
         delta = tgt_xy - src_xy
@@ -70,8 +74,13 @@ class OrbitPolicy(nn.Module):
         pair_geom = torch.cat([delta, dist, dist.clamp_min(1e-4).reciprocal().clamp_max(20.0)], dim=-1)
         g = globals_.view(batch, 1, 1, GLOBAL_FEATURES).expand(batch, MAX_PLANETS, MAX_PLANETS, -1)
 
-        pair_logits = self.pair_head(torch.cat([pair, pair_geom, g], dim=-1))
-        pair_logits = pair_logits.reshape(batch, -1)
+        pair_base = torch.cat([pair, pair_geom, g], dim=-1)
+        pair_base = pair_base.unsqueeze(3).expand(batch, MAX_PLANETS, MAX_PLANETS, len(SEND_FRACTIONS), -1)
+        if pair_outcome_features is None:
+            outcome = pair_base.new_zeros((batch, MAX_PLANETS, MAX_PLANETS, len(SEND_FRACTIONS), PAIR_OUTCOME_FEATURES))
+        else:
+            outcome = pair_outcome_features[:, :, :, SEND_ACTIONS, :].to(dtype=pair_base.dtype, device=pair_base.device)
+        pair_logits = self.pair_head(torch.cat([pair_base, outcome], dim=-1)).reshape(batch, -1)
         noop_logits = self.noop_head(torch.cat([pooled, globals_], dim=-1))
         logits = torch.cat([noop_logits, pair_logits], dim=-1)
         if action_mask is not None:
@@ -108,13 +117,13 @@ class EntityTransformerPolicy(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=layers)
         self.final_norm = nn.LayerNorm(hidden)
-        pair_features = hidden * 4 + 4 + GLOBAL_FEATURES
+        pair_features = hidden * 4 + 4 + GLOBAL_FEATURES + PAIR_OUTCOME_FEATURES
         self.pair_head = nn.Sequential(
             nn.Linear(pair_features, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
             nn.GELU(),
-            nn.Linear(hidden, len(SEND_FRACTIONS)),
+            nn.Linear(hidden, 1),
         )
         self.noop_head = nn.Sequential(
             nn.Linear(hidden + GLOBAL_FEATURES, hidden),
@@ -135,6 +144,7 @@ class EntityTransformerPolicy(nn.Module):
         action_mask=None,
         pair_turns=None,
         pair_reachable_mask=None,
+        pair_outcome_features=None,
         planet_timeline_features=None,
     ):
         batch = planets.shape[0]
@@ -152,7 +162,7 @@ class EntityTransformerPolicy(nn.Module):
         tgt = planet_encoded.unsqueeze(1).expand(batch, MAX_PLANETS, MAX_PLANETS, -1)
         pair = torch.cat([src, tgt, src - tgt, src * tgt], dim=-1)
 
-        xy = planets[..., 7:9]
+        xy = planets[..., PLANET_XY_SLICE]
         src_xy = xy.unsqueeze(2).expand(batch, MAX_PLANETS, MAX_PLANETS, 2)
         tgt_xy = xy.unsqueeze(1).expand(batch, MAX_PLANETS, MAX_PLANETS, 2)
         delta = tgt_xy - src_xy
@@ -160,7 +170,13 @@ class EntityTransformerPolicy(nn.Module):
         pair_geom = torch.cat([delta, dist, dist.clamp_min(1e-4).reciprocal().clamp_max(20.0)], dim=-1)
         g = globals_.view(batch, 1, 1, GLOBAL_FEATURES).expand(batch, MAX_PLANETS, MAX_PLANETS, -1)
 
-        pair_logits = self.pair_head(torch.cat([pair, pair_geom, g], dim=-1)).reshape(batch, -1)
+        pair_base = torch.cat([pair, pair_geom, g], dim=-1)
+        pair_base = pair_base.unsqueeze(3).expand(batch, MAX_PLANETS, MAX_PLANETS, len(SEND_FRACTIONS), -1)
+        if pair_outcome_features is None:
+            outcome = pair_base.new_zeros((batch, MAX_PLANETS, MAX_PLANETS, len(SEND_FRACTIONS), PAIR_OUTCOME_FEATURES))
+        else:
+            outcome = pair_outcome_features[:, :, :, SEND_ACTIONS, :].to(dtype=pair_base.dtype, device=pair_base.device)
+        pair_logits = self.pair_head(torch.cat([pair_base, outcome], dim=-1)).reshape(batch, -1)
         state = torch.cat([global_encoded, globals_], dim=-1)
         logits = torch.cat([self.noop_head(state), pair_logits], dim=-1)
         if action_mask is not None:
@@ -192,6 +208,9 @@ def tensorize(encoded, device="cpu"):
         "planet_mask": torch.as_tensor(encoded.planet_mask, dtype=torch.float32, device=device).unsqueeze(0),
         "globals_": torch.as_tensor(encoded.globals, dtype=torch.float32, device=device).unsqueeze(0),
         "action_mask": torch.as_tensor(encoded.action_mask, dtype=torch.bool, device=device).unsqueeze(0),
+        "pair_outcome_features": torch.as_tensor(
+            encoded.pair_outcome_features, dtype=torch.float32, device=device
+        ).unsqueeze(0),
         "planet_timeline_features": torch.as_tensor(
             encoded.planet_timeline_features, dtype=torch.float32, device=device
         ).unsqueeze(0),

@@ -107,6 +107,11 @@ class OsteoILAgent:
                 dtype=torch.float32,
                 device=self.device,
             ).unsqueeze(0),
+            "pair_outcome_features": torch.as_tensor(
+                encoded.pair_outcome_features,
+                dtype=torch.float32,
+                device=self.device,
+            ).unsqueeze(0),
             "planet_timeline_features": torch.as_tensor(
                 encoded.planet_timeline_features,
                 dtype=torch.float32,

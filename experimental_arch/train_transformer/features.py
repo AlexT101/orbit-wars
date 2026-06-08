@@ -16,6 +16,7 @@ from constants import (
     GLOBAL_DIM,
     LAUNCH_GATE_CHOICES,
     NOOP_CHOICE,
+    PAIR_OUTCOME_SHAPE,
     PLANET_SLOTS,
     PLANET_TIMELINE_DIM,
     PLANET_TIMELINE_SHAPE,
@@ -48,6 +49,7 @@ class EncodedObs:
     action_mask: np.ndarray
     pair_turns: np.ndarray
     pair_reachable_mask: np.ndarray
+    pair_outcome_features: np.ndarray
     planet_timeline_features: np.ndarray
 
 
@@ -59,6 +61,7 @@ def observation_space() -> spaces.Dict:
             "presence": spaces.Box(0.0, 1.0, shape=PRESENCE_SHAPE, dtype=np.float32),
             "turns": spaces.Box(0.0, np.inf, shape=TURN_SHAPE, dtype=np.float32),
             "reachable_mask": spaces.Box(0, 1, shape=TURN_SHAPE, dtype=np.uint8),
+            "pair_outcome_features": spaces.Box(-np.inf, np.inf, shape=PAIR_OUTCOME_SHAPE, dtype=np.float32),
             "planet_timeline_features": spaces.Box(
                 -np.inf, np.inf, shape=PLANET_TIMELINE_SHAPE, dtype=np.float32
             ),
@@ -96,6 +99,7 @@ def encode_features(obs: dict[str, Any], player: int) -> tuple[dict[str, np.ndar
         "presence": feat["presence"].reshape(PRESENCE_SHAPE).astype(np.float32),
         "turns": feat["turns"].reshape(TURN_SHAPE).astype(np.float32),
         "reachable_mask": feat["reachable_mask"].reshape(TURN_SHAPE).astype(np.uint8),
+        "pair_outcome_features": feat["pair_outcome_features"].reshape(PAIR_OUTCOME_SHAPE).astype(np.float32),
         "planet_timeline_features": feat["planet_timeline_features"]
         .reshape(PLANET_TIMELINE_SHAPE)
         .astype(np.float32),
@@ -109,6 +113,7 @@ def encoded_from_feat(feat: dict[str, Any]) -> EncodedObs:
     presence = feat["presence"].reshape(PRESENCE_SHAPE).astype(np.float32)
     turns = feat["turns"].reshape(TURN_SHAPE).astype(np.float32)
     reachable = feat["reachable_mask"].reshape(TURN_SHAPE).astype(np.uint8)
+    pair_outcome = feat["pair_outcome_features"].reshape(PAIR_OUTCOME_SHAPE).astype(np.float32)
     timeline = feat["planet_timeline_features"].reshape(PLANET_TIMELINE_SHAPE).astype(np.float32)
     return EncodedObs(
         planets=tokens[0],
@@ -119,6 +124,7 @@ def encoded_from_feat(feat: dict[str, Any]) -> EncodedObs:
         action_mask=discrete_action_mask(feat),
         pair_turns=turns[0],
         pair_reachable_mask=reachable[0],
+        pair_outcome_features=pair_outcome,
         planet_timeline_features=timeline,
     )
 

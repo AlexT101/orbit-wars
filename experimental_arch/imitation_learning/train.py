@@ -28,12 +28,12 @@ REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
 
-from constants import PAIR_TURN_SHAPE, PLANET_TIMELINE_SHAPE, TOKEN_SHAPE  # noqa: E402
+from constants import PAIR_OUTCOME_SHAPE, PAIR_TURN_SHAPE, PLANET_TIMELINE_SHAPE, TOKEN_SHAPE  # noqa: E402
 from features import ACTION_DIM  # noqa: E402
 from model import build_policy  # noqa: E402
 
 
-DATASET_FORMAT_VERSION = 1
+DATASET_FORMAT_VERSION = 2
 OSTEO_DATA_DIR = Path("/home/ubuntu/osteo_data")
 DATASET_PATH = Path(os.environ.get("IL_DATASET_PATH", str(OSTEO_DATA_DIR / "manifest.json"))).expanduser()
 OUT_DIR = Path(os.environ.get("IL_OUT_DIR", str(IL_DIR / "checkpoints" / "osteo_bc_transformer"))).expanduser()
@@ -93,6 +93,7 @@ REQUIRED_CHUNK_KEYS = (
     "action_mask",
     "pair_turns",
     "pair_reachable_mask",
+    "pair_outcome_features",
     "planet_timeline_features",
     "labels",
     "player_rank",
@@ -200,6 +201,7 @@ class ChunkedILDataset(Dataset):
                 "action_mask": torch.from_numpy(payload["action_mask"]),
                 "pair_turns": torch.from_numpy(payload["pair_turns"]),
                 "pair_reachable_mask": torch.from_numpy(payload["pair_reachable_mask"]),
+                "pair_outcome_features": torch.from_numpy(payload["pair_outcome_features"]),
                 "planet_timeline_features": torch.from_numpy(payload["planet_timeline_features"]),
                 "labels": torch.from_numpy(payload["labels"]),
                 "steps": torch.from_numpy(payload["steps"]),
@@ -225,6 +227,7 @@ class ChunkedILDataset(Dataset):
             "action_mask": tensors["action_mask"][local_idx].bool(),
             "pair_turns": tensors["pair_turns"][local_idx].float(),
             "pair_reachable_mask": tensors["pair_reachable_mask"][local_idx].float(),
+            "pair_outcome_features": tensors["pair_outcome_features"][local_idx].float(),
             "planet_timeline_features": tensors["planet_timeline_features"][local_idx].float(),
             "label": tensors["labels"][local_idx].long(),
             "weight": tensors["weights"][local_idx].float(),
@@ -389,6 +392,7 @@ def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
         "action_mask": (ACTION_DIM,),
         "pair_turns": PAIR_TURN_SHAPE,
         "pair_reachable_mask": PAIR_TURN_SHAPE,
+        "pair_outcome_features": PAIR_OUTCOME_SHAPE,
         "planet_timeline_features": PLANET_TIMELINE_SHAPE,
     }
     path = dataset.paths[0]
@@ -478,6 +482,7 @@ def model_forward(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> tup
         batch["action_mask"],
         pair_turns=batch.get("pair_turns"),
         pair_reachable_mask=batch.get("pair_reachable_mask"),
+        pair_outcome_features=batch.get("pair_outcome_features"),
         planet_timeline_features=batch.get("planet_timeline_features"),
     )
 
