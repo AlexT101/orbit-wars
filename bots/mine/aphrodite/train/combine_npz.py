@@ -29,6 +29,9 @@ def main() -> None:
     metas: list[np.ndarray] = []
     sources: list[np.ndarray] = []
     win_rates: list[np.ndarray] = []
+    auxes: list[np.ndarray] = []          # v3 decisiveness_aux, if present
+    have_aux = True
+    feat_key = None                       # "summary_v3" (4p) or "summary_v2"
     # Per-game (names, rewards) rows accumulated in global-gid order, so a
     # downstream rating fit (Bradley-Terry) can see who played whom and who won.
     game_names_all: list[np.ndarray] = []
@@ -39,9 +42,14 @@ def main() -> None:
 
     for source_idx, path in enumerate(args.inputs):
         d = np.load(path, allow_pickle=False)
-        if "summary_v2" not in d.files or "labels" not in d.files or "meta" not in d.files:
-            raise SystemExit(f"{path} is missing one of: summary_v2, labels, meta")
-        x = d["summary_v2"].astype(np.float32)
+        key = "summary_v3" if "summary_v3" in d.files else "summary_v2"
+        if key not in d.files or "labels" not in d.files or "meta" not in d.files:
+            raise SystemExit(f"{path} is missing one of: summary_v2/summary_v3, labels, meta")
+        if feat_key is None:
+            feat_key = key
+        elif key != feat_key:
+            raise SystemExit(f"{path} has {key} but earlier inputs had {feat_key}; don't mix feature versions")
+        x = d[key].astype(np.float32)
         y = d["labels"].astype(np.float32)
         meta = d["meta"].astype(np.int32).copy()
         if x.shape[0] != y.shape[0] or x.shape[0] != meta.shape[0]:
@@ -77,6 +85,10 @@ def main() -> None:
             win_rates.append(d["win_rate"].astype(np.float32))
         else:
             have_win_rate = False
+        if "decisiveness_aux" in d.files:
+            auxes.append(d["decisiveness_aux"].astype(np.float32))
+        else:
+            have_aux = False
         print(f"{path}: rows={x.shape[0]:,} games={unique_games.shape[0]:,}")
 
     out = args.out
@@ -92,9 +104,11 @@ def main() -> None:
     else:
         print("note: not all inputs had game_names/game_rewards; dropping them "
               "(rating-based quality weighting will be unavailable)")
+    if have_aux and auxes:
+        extra["decisiveness_aux"] = np.concatenate(auxes).astype(np.float32)
+    extra[feat_key] = np.concatenate(xs).astype(np.float32)
     np.savez_compressed(
         out,
-        summary_v2=np.concatenate(xs).astype(np.float32),
         labels=np.concatenate(ys).astype(np.float32),
         meta=np.concatenate(metas).astype(np.int32),
         source=np.concatenate(sources).astype(np.int16),

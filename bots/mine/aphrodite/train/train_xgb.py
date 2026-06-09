@@ -371,6 +371,18 @@ _DEC_FLOOR = 0.2             # min weight kept for blowouts (preserves extreme c
 _DEC_DROP_LEAD = 0.80        # drop rows where a side's advantage exceeds this
 _DEC_DROP_MATURE = 0.75      # ...AND this much production is claimed (never drops early leads)
 
+# ── player-count-correct decided/decisiveness from `decisiveness_aux` ────────
+# The summary_v2-column metric above uses d_rel = max(adv, 1-adv) on a [0.5, 1]
+# scale (0.5 = even), which is ONLY valid for 2p — in 4p "even" is 0.25, so it
+# mis-flags ordinary positions as decided. With `decisiveness_aux` present
+# (per-player ship strength + production + neutral prod) we instead use the
+# seat-invariant top-two strength gap `lead = (s1 - s2)/(s1 + s2)` in [0, 1]
+# (0 = even regardless of player count) and all-player `claimed`. Thresholds are
+# the [0.5,1]→[0,1] remaps of the ones above (drop_lead 0.80→0.60, lead_tau
+# 0.70→0.40), so 2p reduces to the same behaviour.
+_DEC_LEAD_TAU_AUX = 0.40
+_DEC_DROP_LEAD_AUX = 0.60
+
 
 def _has_summary_cols(X, who: str) -> bool:
     """True if X is wide enough to index the summary_v2 columns used below."""
@@ -454,6 +466,56 @@ def decided_keep_mask(X, enabled: bool):
     drop = (d_rel > _DEC_DROP_LEAD) & (claimed > _DEC_DROP_MATURE)
     keep = ~drop
     print(f"  [drop-decided] lead>{_DEC_DROP_LEAD} & claimed>{_DEC_DROP_MATURE}: "
+          f"dropping {int(drop.sum()):,}/{len(drop):,} rows ({100 * drop.mean():.1f}%)")
+    return keep
+
+
+def _lead_claimed_from_aux(aux):
+    """Player-count-correct (lead, claimed) from `decisiveness_aux`
+    (`[ship[0..4], prod[0..4], neutral_prod]` per row).
+
+      lead    = (s1 - s2)/(s1 + s2) over the top-two ship strengths — in [0, 1],
+                0 = even REGARDLESS of player count (fixes the 2p-only metric).
+      claimed = Σ player prod / (Σ player prod + neutral prod).
+    """
+    aux = aux.astype(np.float64)
+    ship = aux[:, 0:4]
+    prod = aux[:, 4:8]
+    neutral = aux[:, 8]
+    top2 = np.sort(ship, axis=1)[:, ::-1][:, :2]  # two strongest per row
+    s1, s2 = top2[:, 0], top2[:, 1]
+    lead = np.where(s1 + s2 > 1e-9, (s1 - s2) / np.maximum(s1 + s2, 1e-9), 0.0)
+    pl = prod.sum(axis=1)
+    claimed = np.where(pl + neutral > 1e-9, pl / np.maximum(pl + neutral, 1e-9), 0.0)
+    return lead.astype(np.float32), claimed.astype(np.float32)
+
+
+def decisiveness_weights_aux(aux, enabled: bool):
+    """Player-count-correct decisiveness weight from `decisiveness_aux`. Same
+    sigmoid shape as `decisiveness_weights` but on the [0,1] top-two-gap `lead`
+    (tau remapped to `_DEC_LEAD_TAU_AUX`)."""
+    if not enabled or aux is None:
+        return None
+    lead, claimed = _lead_claimed_from_aux(aux)
+    lead_term = 1.0 / (1.0 + np.exp(-_DEC_LEAD_K * (lead - _DEC_LEAD_TAU_AUX)))
+    mature_term = 1.0 / (1.0 + np.exp(-_DEC_MATURE_K * (claimed - _DEC_MATURE_TAU)))
+    decisiveness = lead_term * mature_term
+    w = _DEC_FLOOR + (1.0 - _DEC_FLOOR) * (1.0 - decisiveness) ** _DEC_ALPHA
+    print(f"  [decisiveness/aux] floor={_DEC_FLOOR} alpha={_DEC_ALPHA} "
+          f"lead(tau={_DEC_LEAD_TAU_AUX},k={_DEC_LEAD_K}) mature(tau={_DEC_MATURE_TAU},k={_DEC_MATURE_K})  "
+          f"weight range [{w.min():.3f}, {w.max():.3f}] mean={w.mean():.3f}  "
+          f"rows<0.5w: {100 * (w < 0.5).mean():.1f}%")
+    return w.astype(np.float32)
+
+
+def decided_keep_mask_aux(aux, enabled: bool):
+    """Player-count-correct decided-drop from `decisiveness_aux`."""
+    if not enabled or aux is None:
+        return None
+    lead, claimed = _lead_claimed_from_aux(aux)
+    drop = (lead > _DEC_DROP_LEAD_AUX) & (claimed > _DEC_DROP_MATURE)
+    keep = ~drop
+    print(f"  [drop-decided/aux] lead>{_DEC_DROP_LEAD_AUX} & claimed>{_DEC_DROP_MATURE}: "
           f"dropping {int(drop.sum()):,}/{len(drop):,} rows ({100 * drop.mean():.1f}%)")
     return keep
 
@@ -559,22 +621,27 @@ def main():
 
     print(f"Loading {args.input}...")
     d = np.load(args.input, allow_pickle=False)
+    feat_key = "summary_v3" if "summary_v3" in d.files else "summary_v2"
     n_games = len(np.unique(d["meta"][:, 0])) if "game_names" not in d.files else d["game_names"].shape[0]
-    n_rows = d["summary_v2"].shape[0]
-    print(f"  {n_games} games / {n_rows:,} rows")
+    n_rows = d[feat_key].shape[0]
+    print(f"  {n_games} games / {n_rows:,} rows  (features: {feat_key}, {d[feat_key].shape[1]}-d)")
 
     source = d["source"] if "source" in d.files else None
     win_rate = d["win_rate"] if "win_rate" in d.files else None
+    # player-count-correct decided/decisiveness inputs (4p v3); None for v2.
+    aux = d["decisiveness_aux"] if "decisiveness_aux" in d.files else None
+    row_aux = None
 
     if args.no_filter or "game_names" not in d.files:
         print("\n=== STEP 1: no filter ===")
         if not args.no_filter and "game_names" not in d.files:
             print("  input has no game_names; training on all rows")
-        Xs = d["summary_v2"].astype(np.float32)
+        Xs = d[feat_key].astype(np.float32)
         ys = d["labels"].astype(np.float32)
         ms = d["meta"].astype(np.int32)
         row_source = source
         row_win_rate = win_rate
+        row_aux = aux
     else:
         if args.top10_out is None:
             raise SystemExit("--top10-out is required unless --no-filter is set")
@@ -589,6 +656,7 @@ def main():
             Xs, ys, ms, sub = filter_top_n(d, top_set, args.top10_out)
             row_win_rate = win_rate[sub] if win_rate is not None else None
         row_source = source[sub] if source is not None else None
+        row_aux = aux[sub] if aux is not None else None
 
     if args.filter_only:
         print("\n--filter-only set; skipping training.")
@@ -608,16 +676,21 @@ def main():
     # Hard-drop fully decided rows before weighting and the split, so every
     # downstream array (weights from win_rate/features, val_mask from meta)
     # stays row-aligned.
-    keep = decided_keep_mask(Xs, args.drop_decided)
+    # Player-count-correct decided/decisiveness when `decisiveness_aux` is present
+    # (4p v3); otherwise the summary_v2-column metric (valid for 2p).
+    keep = (decided_keep_mask_aux(row_aux, args.drop_decided) if row_aux is not None
+            else decided_keep_mask(Xs, args.drop_decided))
     if keep is not None:
         Xs, ys, ms = Xs[keep], ys[keep], ms[keep]
         row_source = row_source[keep] if row_source is not None else None
         row_win_rate = row_win_rate[keep] if row_win_rate is not None else None
+        row_aux = row_aux[keep] if row_aux is not None else None
 
     weight = combine_sample_weights(
         recency_weights(row_source, args.recency_halflife),
         quality_weights(row_win_rate, args.quality_floor, args.quality_weight),
-        decisiveness_weights(Xs, args.decisiveness_weight),
+        (decisiveness_weights_aux(row_aux, args.decisiveness_weight) if row_aux is not None
+         else decisiveness_weights(Xs, args.decisiveness_weight)),
     )
 
     # Zero SHAP-dropped feature columns last, after the drop/weights have read

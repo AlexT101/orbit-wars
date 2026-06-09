@@ -69,6 +69,14 @@ thread_local! {
     /// (`bots/mine/apollo/src/lib.rs`).
     static CACHE: RefCell<Option<(GeometryKey, crate::apollo::cache::EntityCache)>> =
         RefCell::new(None);
+
+    /// Search-scoped hot L1 aim cache, shared across all value-net leaf evals in a
+    /// turn (cleared per turn in `refresh_cache`). The value net re-queries the
+    /// same planet-pair pressures across thousands of leaves; this RefCell fronts
+    /// the `Mutex`-locked L2 `EntityCache::aim_cache`. Per-thread, so no
+    /// cross-thread contention. Keyed by `(src,dst,ships,abs_launch)` — entries
+    /// for different node steps coexist safely.
+    static EVAL_L1: crate::apollo::world::ShotL1 = RefCell::new(Default::default());
 }
 
 /// Fingerprint of a game's fixed geometry: angular velocity plus the static
@@ -120,6 +128,8 @@ fn refresh_cache(state: &GameState) {
             cache.clear_aim_cache_slot(state.step - 1);
         }
     });
+    // Drop last turn's value-net L1 entries (bounds memory; L2/L3 persist).
+    EVAL_L1.with(|l1| l1.borrow_mut().clear());
 }
 
 /// Run `f` with the shared entity cache's `current_turn` set to `turn`. Used by
@@ -153,6 +163,14 @@ thread_local! {
     /// probe can group leaves by the search they belong to.
     static SEARCH_STEP: std::cell::Cell<i64> = std::cell::Cell::new(0);
     static LEAVES_THIS_SEARCH: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    /// Monotonic per-search id (bumped each `best_move`), used as the v3 leaf-dump
+    /// cohort key so searches stay separable even when root steps collide across
+    /// probe positions from different games.
+    static SEARCH_SEQ: std::cell::Cell<i32> = std::cell::Cell::new(0);
+    /// `APHRODITE_DUMP_FEATURES=v3` makes the leaf dump emit the 145-d
+    /// `summary_v3` (4p probe) instead of the 65-d `summary_v2`.
+    static DUMP_V3: bool =
+        std::env::var("APHRODITE_DUMP_FEATURES").map(|v| v == "v3").unwrap_or(false);
 }
 
 fn open_env_file(var: &str) -> Option<File> {
@@ -206,15 +224,29 @@ fn maybe_dump_leaf(state: &GameState, me: i32) {
             }
             LEAVES_THIS_SEARCH.with(|c| c.set(n + 1));
         }
-        let search_step = SEARCH_STEP.with(|c| c.get()) as i32;
         let leaf_step = state.step as i32;
-        let v2 = with_cache_at(state.step, |cache| {
-            crate::value_net::summary_features_v2::extract_with_cache(state, me, cache)
-        });
-        let _ = w.write_all(&search_step.to_le_bytes());
-        let _ = w.write_all(&leaf_step.to_le_bytes());
-        let bytes = unsafe { std::slice::from_raw_parts(v2.as_ptr() as *const u8, v2.len() * 4) };
-        let _ = w.write_all(bytes);
+        if DUMP_V3.with(|v| *v) {
+            // 4p probe: cohort key = monotonic search id; feats = 145-d summary_v3.
+            let search_id = SEARCH_SEQ.with(|c| c.get());
+            let v3 = with_cache_at(state.step, |cache| {
+                EVAL_L1.with(|l1| {
+                    crate::value_net::summary_features_v3::extract_with_cache(state, me, cache, Some(l1))
+                })
+            });
+            let _ = w.write_all(&search_id.to_le_bytes());
+            let _ = w.write_all(&leaf_step.to_le_bytes());
+            let bytes = unsafe { std::slice::from_raw_parts(v3.as_ptr() as *const u8, v3.len() * 4) };
+            let _ = w.write_all(bytes);
+        } else {
+            let search_step = SEARCH_STEP.with(|c| c.get()) as i32;
+            let v2 = with_cache_at(state.step, |cache| {
+                crate::value_net::summary_features_v2::extract_with_cache(state, me, cache)
+            });
+            let _ = w.write_all(&search_step.to_le_bytes());
+            let _ = w.write_all(&leaf_step.to_le_bytes());
+            let bytes = unsafe { std::slice::from_raw_parts(v2.as_ptr() as *const u8, v2.len() * 4) };
+            let _ = w.write_all(bytes);
+        }
     });
 }
 
@@ -520,7 +552,7 @@ fn evaluate_inner(state: &GameState, me: i32) -> f64 {
     // feature extraction instead of building one per leaf. `with_cache_at` sets
     // the cache's current turn to this leaf's step before scoring.
     let __pred = with_cache_at(state.step, |cache| {
-        crate::value_net::predict_with_cache(state, me, cache)
+        EVAL_L1.with(|l1| crate::value_net::predict_with_cache(state, me, cache, Some(l1)))
     });
     crate::profiling::add(&crate::profiling::VALUE_NET_NS, __vn_t0);
     crate::profiling::inc(&crate::profiling::VALUE_NET_CALLS);
@@ -718,6 +750,7 @@ pub fn best_move(
     // Tag leaves dumped during this search with the root step, and reset the
     // per-search leaf cap counter.
     SEARCH_STEP.with(|c| c.set(state.step));
+    SEARCH_SEQ.with(|c| c.set(c.get() + 1));
     LEAVES_THIS_SEARCH.with(|c| c.set(0));
     let deadline = Instant::now() + std::time::Duration::from_millis(budget_ms);
     let mut iters = 0u32;

@@ -63,6 +63,45 @@ Extraction ≈ 9-14 min/day (gated to top-15). `build_ladder.py --gate elo-topn`
 - Both pending gauntlet vs live `xgb_2p.json` / `xgb_4p.json` (val sign-acc not comparable across day-sets — judge by gauntlet).
 - **NOT in use:** `filter_both_topn.py` + `xgb_2p_5_31_6_06_both10.json` — an experiment restricting 2p to games where BOTH players are top-10 that day (post-filters the combined npz, no re-extraction; compacts gids so `game_names` stays gid-aligned). Kept for reference only; not gauntletted, not deployed.
 
+## summary_v3 — 4p (FFA) feature redesign (NEW, implemented; spec: `FEATURE_SPEC_V3_4P.md`)
+A 145-d **4p-only** value-net input that fixes 4p-specific bugs in the 65-d
+`summary_v2` (2p is unaffected and stays on v2). Why: v2's `opp_*` blocks described
+only the *dominant* enemy (harming a weaker enemy was invisible; `dominant_enemy`
+identity-flipped between parent/child), "enemy support" pooled all opponents
+(rival opponents counted as mutual defenders → eval undervalued attacking), and
+pooled-enemy centroid/dispersion collapsed to ~constants. Also the decided/
+decisiveness metric used a 2p-only `max(adv,1-adv)` baseline that mis-flagged even
+4p positions (drop nuked 37.8%).
+- **Canonical orbital ordering** (flip-free): seats are always cycle `[0,1,3,2]` by
+  angle; opponents fill fixed slots `[next(me)=downstream, opposite, prev=upstream]`
+  by seat id — no geometry, stable across parent/child.
+- Per-opponent economy + directional pressure + continuous scale + `is_alive`
+  (dead slot → zeroed block, NOT a 1.0 "dominate"); two pairwise matrices
+  (in-flight=committed, vulnerability=latent, incl. opp→opp conflict signal);
+  share-normalized with 3 absolute anchors; `angular_velocity` added.
+- **decisiveness_aux** (training-only, 9-d): per-player ship/prod + neutral prod →
+  `train_xgb` computes the player-count-correct top-two-gap `lead=(s1-s2)/(s1+s2)`
+  (0=even for any N). Corrected 4p decided-drop now ~26-29% (was 37.8%).
+- Rust: `value_net::summary_features_v3` + `extract_v3` bin (628-B record:
+  step+player+145 feat+9 aux); single-pass owner-bucketed pressure feeds all of
+  aggregate/per-opponent/both matrices. Live eval wired (`detect_kind` 145→v3,
+  `predict_with_cache` v3 arm); Rust predict parity-verified == Python.
+- **L1 aim-cache threading (DONE, pending rebuild):** a per-thread, search-scoped
+  `EVAL_L1` (`duct.rs`, cleared each turn in `refresh_cache`) is threaded
+  `predict_with_cache → summary_features_v3::extract_with_cache → pressure_from →
+  resolve_shot`, fronting the `Mutex`-locked L2 for the value net's repeated
+  planet-pair pressure queries across the many leaves in a search. (2p/v2 path
+  left on `None`.) Needs `cargo build --release --bin aphrodite` to take effect.
+- Pipeline: `build_from_zip.py --features v3 --players 4` writes `summary_v3`+
+  `decisiveness_aux`; `combine_npz.py` auto-carries both; `train_xgb.py` auto-detects
+  the feature key and routes decided/decisiveness through the aux when present.
+- **v3 4p models** (7 days `6_01…6_07`, 2.60M rows, recency hl=6, rating quality):
+  - `xgb_4p_6_01_6_07_v3_noablate.json` — val 88.9% (≈ v2's 89.0%; redesign payoff
+    is MCTS eval quality, not historical val acc — judge by gauntlet).
+  - `xgb_4p_6_01_6_07_v3_decdrop_noablate.json` — corrected-decisiveness drop 29.3%.
+  - Per-day v3 data: `gated_replays_<day>_v3.npz`; combined `combined_v3_6_01_6_07.npz`.
+  - Pending gauntlet vs `xgb_4p_6_01_6_07.json` / live `xgb_4p.json`.
+
 ## Gotchas
 - val sign-acc is NOT comparable across drop/no-drop or different day-sets (val composition changes) — judge models by **gauntlet**, not val acc.
 - Elo-gated npz lacks `win_rate`; `--quality-metric winrate` would silently no-op.

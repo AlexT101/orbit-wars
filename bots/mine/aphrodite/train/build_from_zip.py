@@ -37,9 +37,13 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 APHRODITE_DIR = REPO / "bots" / "mine" / "aphrodite"
 BIN = APHRODITE_DIR / "target" / "release" / "extract_v2"
+BIN_V3 = APHRODITE_DIR / "target" / "release" / "extract_v3"
 
 SUMMARY_V2_DIM = 65
-RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM  # 272
+SUMMARY_V3_DIM = 145          # 4p FFA feature vector (see FEATURE_SPEC_V3_4P.md)
+AUX_DIM = 9                   # v3 decisiveness aux: ship[4]+prod[4]+neutral_prod
+RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM  # 272 (v2: step+player+feat)
+RECORD_BYTES_V3 = 8 + 4 + 4 * (SUMMARY_V3_DIM + AUX_DIM)  # 628 (v3: step+player+feat+aux)
 
 MIN_GAMES = 3   # min games a player needs before their win rate counts
 SEED = 0
@@ -77,27 +81,36 @@ def _agent_names(d: dict) -> list:
 def process_chunk(args):
     """One worker: open its own zip handle + one extract_v2 subprocess,
     stream all assigned games through it."""
-    zip_path, names, worker_id, zip_tag, n_players, keep_set = args
+    zip_path, names, worker_id, zip_tag, n_players, keep_set, feat_mode = args
+    is_v3 = feat_mode == "v3"
+    bin_path = BIN_V3 if is_v3 else BIN
+    rec_bytes = RECORD_BYTES_V3 if is_v3 else RECORD_BYTES
     zf = zipfile.ZipFile(zip_path)
     proc = subprocess.Popen(
-        [str(BIN)],
+        [str(bin_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
 
-    records = []  # (step, player, v2) in send order
+    records = []  # (step, player, feat, aux_or_None) in send order
 
     def reader():
         out = proc.stdout
+        fend = 12 + 4 * SUMMARY_V3_DIM
         while True:
-            raw = out.read(RECORD_BYTES)
-            if not raw or len(raw) < RECORD_BYTES:
+            raw = out.read(rec_bytes)
+            if not raw or len(raw) < rec_bytes:
                 break
             step = int.from_bytes(raw[:8], "little", signed=True)
             player = int.from_bytes(raw[8:12], "little", signed=True)
-            v2 = np.frombuffer(raw[12:], dtype=np.float32).copy()
-            records.append((step, player, v2))
+            if is_v3:
+                feat = np.frombuffer(raw[12:fend], dtype=np.float32).copy()
+                aux = np.frombuffer(raw[fend:fend + 4 * AUX_DIM], dtype=np.float32).copy()
+            else:
+                feat = np.frombuffer(raw[12:], dtype=np.float32).copy()
+                aux = None
+            records.append((step, player, feat, aux))
 
     rt = threading.Thread(target=reader, daemon=True)
     rt.start()
@@ -183,23 +196,28 @@ def process_chunk(args):
     if n < len(sent_meta):
         print(f"  [w{worker_id}] WARN got {len(records)} records for {len(sent_meta)} sent", flush=True)
     if n == 0:
-        return ([], [], [], game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
+        return ([], [], [], None, game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
 
-    feats = np.empty((n, SUMMARY_V2_DIM), dtype=np.float32)
+    dim = SUMMARY_V3_DIM if is_v3 else SUMMARY_V2_DIM
+    feats = np.empty((n, dim), dtype=np.float32)
+    aux_arr = np.empty((n, AUX_DIM), dtype=np.float32) if is_v3 else None
     labels = np.empty(n, dtype=np.float32)
     meta = np.empty((n, 4), dtype=np.int32)
     for i in range(n):
-        step, player, v2 = records[i]
+        step, player, feat, aux = records[i]
         local_gid, slot, reward = sent_meta[i]
-        feats[i] = v2
+        feats[i] = feat
+        if aux_arr is not None:
+            aux_arr[i] = aux
         labels[i] = reward
         meta[i] = (local_gid, step, player, n_players)
 
-    return (feats, labels, meta, game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
+    return (feats, labels, meta, aux_arr, game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
 
 
 def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 2,
-          keep_players=None):
+          keep_players=None, feat_mode: str = "v2"):
+    is_v3 = feat_mode == "v3"
     if isinstance(zip_paths, str):
         zip_paths = [zip_paths]
     # Elo gate (Phase 2): when given, extract feature rows ONLY for these players,
@@ -208,7 +226,7 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 
     if keep_players is not None:
         keep_set = set(json.loads(Path(keep_players).read_text(encoding="utf-8")))
         print(f"keep-players gate: {len(keep_set)} players; other players' rows skipped")
-    feats_all, labels_all, meta_all = [], [], []
+    feats_all, labels_all, meta_all, aux_all = [], [], [], []
     game_names_all = []  # global_gid -> tuple(names)
     game_rewards_all = [] # global_gid -> tuple(rewards)
     game_files_all = [] # global_gid -> "tag:entry"
@@ -227,18 +245,20 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 
         chunks = [names[i::n_workers] for i in range(n_workers)]
         t0 = time.time()
         with mp.Pool(n_workers) as pool:
-            results = pool.map(process_chunk, [(zip_path, c, i, tag, n_players, keep_set) for i, c in enumerate(chunks)])
+            results = pool.map(process_chunk, [(zip_path, c, i, tag, n_players, keep_set, feat_mode) for i, c in enumerate(chunks)])
         elapsed += time.time() - t0
         for res in results:
             if res is None:
                 continue
-            f, lbl, m, gnames, grewards, gfiles, n_games, sfmt, soth = res
+            f, lbl, m, aux, gnames, grewards, gfiles, n_games, sfmt, soth = res
             if len(f):
                 m = m.copy()
                 m[:, 0] += total_games  # offset local gids -> global
                 feats_all.append(f)
                 labels_all.append(lbl)
                 meta_all.append(m)
+                if is_v3 and aux is not None:
+                    aux_all.append(aux)
             game_names_all.extend(gnames)
             game_rewards_all.extend(grewards)
             game_files_all.extend(gfiles)
@@ -305,11 +325,20 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 
 
     out = Path(out_npz)
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out,
-        summary_v2=feats, labels=labels, meta=meta, is_strong=is_strong,
-        game_names=name_arr, game_rewards=reward_arr, game_files=file_arr,
-    )
+    if is_v3:
+        aux = np.concatenate(aux_all) if aux_all else np.zeros((feats.shape[0], AUX_DIM), np.float32)
+        assert aux.shape[0] == feats.shape[0], (aux.shape, feats.shape)
+        np.savez_compressed(
+            out,
+            summary_v3=feats, labels=labels, meta=meta, decisiveness_aux=aux,
+            game_names=name_arr, game_rewards=reward_arr, game_files=file_arr,
+        )
+    else:
+        np.savez_compressed(
+            out,
+            summary_v2=feats, labels=labels, meta=meta, is_strong=is_strong,
+            game_names=name_arr, game_rewards=reward_arr, game_files=file_arr,
+        )
     print(f"wrote {out}  ({out.stat().st_size / 1e6:.1f} MB)")
 
 
@@ -323,8 +352,13 @@ def main():
     p.add_argument("--keep-players", type=Path, default=None,
                    help="JSON list of player names (from elo_topn.py); extract ONLY these players' "
                         "rows. The Elo gate, applied during extraction so skipped rows cost nothing.")
+    p.add_argument("--features", choices=("v2", "v3"), default="v2",
+                   help="v2 = 65-d summary_v2 (default, 2p/4p); v3 = 145-d 4p summary_v3 + "
+                        "decisiveness_aux (extract_v3 binary). Use v3 only with --players 4.")
     args = p.parse_args()
-    build(args.zip, args.out, args.workers, args.limit, args.players, args.keep_players)
+    if args.features == "v3" and args.players != 4:
+        raise SystemExit("--features v3 is the 4p redesign; pass --players 4")
+    build(args.zip, args.out, args.workers, args.limit, args.players, args.keep_players, args.features)
 
 
 if __name__ == "__main__":

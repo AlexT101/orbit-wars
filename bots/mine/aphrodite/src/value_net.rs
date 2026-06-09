@@ -34,6 +34,7 @@
 //! returns `None`. Callers should fall back to the duck heuristic.
 
 use crate::apollo::cache::EntityCache;
+use crate::apollo::world::ShotL1;
 use crate::ow2_plan::cached_predict_fleet_collision;
 use crate::{GameState, Planet};
 use std::collections::HashMap;
@@ -209,6 +210,9 @@ enum InputKind {
     /// 46-d v2 summary (per-player + extrap + neutral block;
     /// see `summary_features_v2::extract`).
     SummaryV2,
+    /// 145-d v3 summary — 4p (FFA) per-opponent redesign
+    /// (see `summary_features_v3::extract`). 2p stays on `SummaryV2`.
+    SummaryV3,
 }
 
 /// Map a model's declared input width to the feature variant that produces it.
@@ -217,12 +221,15 @@ fn detect_kind(input_dim: usize) -> Option<InputKind> {
         Some(InputKind::Full)
     } else if input_dim == summary_features_v2::DIM {
         Some(InputKind::SummaryV2)
+    } else if input_dim == summary_features_v3::DIM {
+        Some(InputKind::SummaryV3)
     } else {
         eprintln!(
-            "[aphrodite] unknown input_dim={} (expected {} full / {} summary_v2)",
+            "[aphrodite] unknown input_dim={} (expected {} full / {} summary_v2 / {} summary_v3)",
             input_dim,
             INPUT_DIM,
-            summary_features_v2::DIM
+            summary_features_v2::DIM,
+            summary_features_v3::DIM
         );
         None
     }
@@ -324,7 +331,12 @@ fn count_alive_players(state: &GameState) -> usize {
 /// features. Caller must have set the cache's current turn to `state.step`
 /// (duct's `with_cache_at` does this). Returns `None` if no weights are loaded.
 /// Output is in `[-1, 1]` — MY perspective.
-pub fn predict_with_cache(state: &GameState, me: i32, cache: &EntityCache) -> Option<f64> {
+pub fn predict_with_cache(
+    state: &GameState,
+    me: i32,
+    cache: &EntityCache,
+    l1: Option<&ShotL1>,
+) -> Option<f64> {
     // Once only two players are alive the position is effectively 2-player, so
     // score it with the dedicated 2p net when one is loaded. The count comes
     // from the evaluated state, so a 4p game's late 2-survivor leaves switch to
@@ -348,6 +360,10 @@ pub fn predict_with_cache(state: &GameState, me: i32, cache: &EntityCache) -> Op
             }
             InputKind::SummaryV2 => {
                 let feats = summary_features_v2::extract_with_cache(state, me, cache);
+                model.predict_value(&feats)
+            }
+            InputKind::SummaryV3 => {
+                let feats = summary_features_v3::extract_with_cache(state, me, cache, l1);
                 model.predict_value(&feats)
             }
         },
@@ -977,6 +993,630 @@ pub mod summary_features_v2 {
         out[34..41].copy_from_slice(&neut);
         out[41..65].copy_from_slice(&rel);
         out
+    }
+}
+
+/// 4p (FFA) value-net features — see `train/FEATURE_SPEC_V3_4P.md`.
+///
+/// Canonical orbital ordering (flip-free) gives each opponent a fixed slot
+/// (downstream-adjacent / opposite / upstream-adjacent) by seat id, so harming
+/// any opponent registers and `dominant_enemy` identity-flip noise is gone.
+/// Per-opponent economy + directional pressure + continuous scale; two pairwise
+/// matrices (in-flight = committed, vulnerability = latent); share-normalized
+/// with a few absolute anchors. 2p is unaffected (stays on `summary_v2`).
+pub mod summary_features_v3 {
+    use super::*;
+    use crate::apollo::constants::OFFSET_LOOKAHEAD;
+    use crate::apollo::strategy::resolve_shot;
+    use crate::apollo::world::ShotL1;
+
+    pub const DIM: usize = 145;
+    pub const AUX_DIM: usize = 9;
+    const NP: usize = 4; // engine MAX_PLAYERS
+    const REL_HORIZON: i64 = 10;
+
+    /// Seat cycle by increasing orbital angle: always 0→1→3→2 (only the global
+    /// phase rotates per game). Orbit advances in the +angle (`next`) direction,
+    /// so next(me)=downstream-adjacent, next²=opposite, prev=upstream-adjacent.
+    const CYCLE: [i32; NP] = [0, 1, 3, 2];
+
+    fn cycle_pos(p: i32) -> usize {
+        CYCLE.iter().position(|&x| x == p).unwrap_or(0)
+    }
+    /// [downstream-adjacent, opposite, upstream-adjacent] opponent ids for `me`.
+    fn ordered_opponents(me: i32) -> [usize; 3] {
+        let i = cycle_pos(me);
+        [
+            CYCLE[(i + 1) % NP] as usize,
+            CYCLE[(i + 2) % NP] as usize,
+            CYCLE[(i + 3) % NP] as usize,
+        ]
+    }
+
+    #[inline]
+    fn rel_weight(turns: i64) -> f32 {
+        if turns < 0 || turns > REL_HORIZON {
+            0.0
+        } else {
+            (REL_HORIZON + 1 - turns) as f32 / (REL_HORIZON + 1) as f32
+        }
+    }
+
+    /// Clamped division — 0 when the denominator is ~0 (early game, dead teams).
+    #[inline]
+    fn sdiv(a: f32, b: f32) -> f32 {
+        if b > 1e-6 {
+            a / b
+        } else {
+            0.0
+        }
+    }
+
+    /// Distance-weighted ship pressure `src` can project onto planet `dst_id`
+    /// (max over launch offsets). Mirrors `summary_features_v2::pressure_from`.
+    /// `l1` is the search-scoped hot aim cache (the value net re-queries the same
+    /// planet-pairs across many leaves at a turn); `None` falls back to L2/L3.
+    fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64, l1: Option<&ShotL1>) -> f32 {
+        let mut best = 0.0f32;
+        for off in 0..=OFFSET_LOOKAHEAD {
+            let ships = (src.ships + src.production * off).max(1);
+            if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, l1) {
+                let contrib = ships as f32 * rel_weight(off + r.1);
+                if contrib > best {
+                    best = contrib;
+                }
+            }
+        }
+        best
+    }
+
+    fn min_dist_to<F: Fn(&Planet) -> bool>(planets: &[Planet], ox: f64, oy: f64, pred: F) -> f32 {
+        let mut best = f32::INFINITY;
+        for p in planets {
+            if !pred(p) {
+                continue;
+            }
+            let dx = (p.x - ox) as f32;
+            let dy = (p.y - oy) as f32;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d < best {
+                best = d;
+            }
+        }
+        best
+    }
+
+    /// Production-weighted centroid + RMS dispersion of a planet set.
+    fn centroid_dispersion(planets: &[&Planet]) -> (Option<(f64, f64)>, f32) {
+        if planets.is_empty() {
+            return (None, 0.0);
+        }
+        let wsum: f64 = planets.iter().map(|p| p.production as f64).sum();
+        if wsum <= 0.0 {
+            // fall back to unweighted centroid, zero dispersion
+            let (mut sx, mut sy) = (0.0, 0.0);
+            for p in planets {
+                sx += p.x;
+                sy += p.y;
+            }
+            let nrec = planets.len() as f64;
+            return (Some((sx / nrec, sy / nrec)), 0.0);
+        }
+        let (mut cx, mut cy) = (0.0, 0.0);
+        for p in planets {
+            let w = p.production as f64;
+            cx += w * p.x;
+            cy += w * p.y;
+        }
+        cx /= wsum;
+        cy /= wsum;
+        let mut num = 0.0;
+        for p in planets {
+            let w = p.production as f64;
+            num += w * ((p.x - cx).powi(2) + (p.y - cy).powi(2));
+        }
+        (Some((cx, cy)), (num / wsum).sqrt() as f32)
+    }
+
+    /// Training-only seat-invariant aux: per-player ship strength + production,
+    /// plus neutral production. Lets `train_xgb` compute the player-count-correct
+    /// decided/decisiveness signal.
+    pub fn decisiveness_aux(state: &GameState) -> [f32; AUX_DIM] {
+        let mut ship = [0.0f32; NP];
+        let mut prod = [0.0f32; NP];
+        let mut neutral_prod = 0.0f32;
+        for p in &state.planets {
+            if p.owner >= 0 && (p.owner as usize) < NP {
+                ship[p.owner as usize] += p.ships as f32;
+                prod[p.owner as usize] += p.production as f32;
+            } else if p.owner == -1 {
+                neutral_prod += p.production as f32;
+            }
+        }
+        for f in &state.fleets {
+            if f.owner >= 0 && (f.owner as usize) < NP {
+                ship[f.owner as usize] += f.ships as f32;
+            }
+        }
+        let mut out = [0.0f32; AUX_DIM];
+        out[0..NP].copy_from_slice(&ship);
+        out[NP..2 * NP].copy_from_slice(&prod);
+        out[2 * NP] = neutral_prod;
+        out
+    }
+
+    pub fn extract(state: &GameState, me: i32) -> [f32; DIM] {
+        let mut cache = crate::apollo_bridge::rollout_cache(state);
+        cache.set_current_turn(state.step);
+        extract_with_cache(state, me, &cache, None)
+    }
+
+    pub fn extract_with_aux(state: &GameState, me: i32) -> ([f32; DIM], [f32; AUX_DIM]) {
+        let mut cache = crate::apollo_bridge::rollout_cache(state);
+        cache.set_current_turn(state.step);
+        let feats = extract_with_cache(state, me, &cache, None);
+        (feats, decisiveness_aux(state))
+    }
+
+    pub fn extract_with_cache(
+        state: &GameState,
+        me: i32,
+        cache: &EntityCache,
+        l1: Option<&ShotL1>,
+    ) -> [f32; DIM] {
+        let planets = &state.planets;
+        let me_u = (me.max(0) as usize).min(NP - 1);
+        let extrap = extrapolate_fleets(state);
+
+        // ── per-player current accumulations ────────────────────────────────
+        let mut ships_on = [0.0f32; NP];
+        let mut ships_fly = [0.0f32; NP];
+        let mut n_static = [0.0f32; NP];
+        let mut n_orbit = [0.0f32; NP];
+        let mut n_comet = [0.0f32; NP];
+        let mut prod_static = [0.0f32; NP];
+        let mut prod_orbit = [0.0f32; NP];
+        let mut alive = [false; NP];
+        for p in planets {
+            if p.owner >= 0 && (p.owner as usize) < NP {
+                let o = p.owner as usize;
+                ships_on[o] += p.ships as f32;
+                alive[o] = true;
+                let pr = p.production as f32;
+                if p.is_comet {
+                    n_comet[o] += 1.0;
+                } else if p.is_orbiting {
+                    n_orbit[o] += 1.0;
+                    prod_orbit[o] += pr;
+                } else {
+                    n_static[o] += 1.0;
+                    prod_static[o] += pr;
+                }
+            }
+        }
+        for f in &state.fleets {
+            if f.owner >= 0 && (f.owner as usize) < NP {
+                ships_fly[f.owner as usize] += f.ships as f32;
+                alive[f.owner as usize] = true;
+            }
+        }
+        let strength: [f32; NP] = std::array::from_fn(|i| ships_on[i] + ships_fly[i]);
+        let production: [f32; NP] = std::array::from_fn(|i| prod_static[i] + prod_orbit[i]);
+        let total_ships: f32 = strength.iter().sum();
+        let total_prod: f32 = production.iter().sum();
+        let n_planets = planets.len() as f32;
+        let n_alive = alive.iter().filter(|&&a| a).count() as f32;
+        let np_my: f32 = n_static[me_u] + n_orbit[me_u] + n_comet[me_u];
+
+        // ── extrapolated per-player accumulations ───────────────────────────
+        let mut e_ships_on = [0.0f32; NP];
+        let mut e_n_static = [0.0f32; NP];
+        let mut e_n_orbit = [0.0f32; NP];
+        let mut e_n_comet = [0.0f32; NP];
+        let mut e_prod_static = [0.0f32; NP];
+        let mut e_prod_orbit = [0.0f32; NP];
+        for p in planets {
+            let (eo, es) = extrap.get(&p.id).copied().unwrap_or((p.owner, p.ships));
+            if eo >= 0 && (eo as usize) < NP {
+                let o = eo as usize;
+                e_ships_on[o] += es as f32;
+                let pr = p.production as f32;
+                if p.is_comet {
+                    e_n_comet[o] += 1.0;
+                } else if p.is_orbiting {
+                    e_n_orbit[o] += 1.0;
+                    e_prod_orbit[o] += pr;
+                } else {
+                    e_n_static[o] += 1.0;
+                    e_prod_static[o] += pr;
+                }
+            }
+        }
+        let extrap_owner = |id: i64| -> i32 {
+            extrap
+                .get(&id)
+                .map(|x| x.0)
+                .unwrap_or_else(|| planets.iter().find(|p| p.id == id).map(|p| p.owner).unwrap_or(-1))
+        };
+
+        // "closer" counts (current + extrapolated owners), per player.
+        let mut neutrals_closer = [0.0f32; NP];
+        let mut enemies_closer = [0.0f32; NP];
+        let mut e_neutrals_closer = [0.0f32; NP];
+        let mut e_enemies_closer = [0.0f32; NP];
+        for p in 0..NP {
+            if !alive[p] {
+                continue;
+            }
+            let pi = p as i32;
+            for o in planets {
+                // current ownership
+                if o.owner == -1 {
+                    let d_me = min_dist_to(planets, o.x, o.y, |q| q.owner == pi);
+                    let d_en = min_dist_to(planets, o.x, o.y, |q| q.owner != pi && q.owner != -1);
+                    if d_me < d_en {
+                        neutrals_closer[p] += 1.0;
+                    }
+                } else if o.owner != pi {
+                    let d_me = min_dist_to(planets, o.x, o.y, |q| q.owner == pi);
+                    let d_ot =
+                        min_dist_to(planets, o.x, o.y, |q| q.owner != pi && q.owner != -1 && q.id != o.id);
+                    if d_me < d_ot {
+                        enemies_closer[p] += 1.0;
+                    }
+                }
+                // extrapolated ownership
+                let eo = extrap_owner(o.id);
+                if eo == -1 {
+                    let d_me = min_dist_to(planets, o.x, o.y, |q| extrap_owner(q.id) == pi);
+                    let d_en =
+                        min_dist_to(planets, o.x, o.y, |q| { let qo = extrap_owner(q.id); qo != pi && qo != -1 });
+                    if d_me < d_en {
+                        e_neutrals_closer[p] += 1.0;
+                    }
+                } else if eo != pi {
+                    let d_me = min_dist_to(planets, o.x, o.y, |q| extrap_owner(q.id) == pi);
+                    let d_ot = min_dist_to(planets, o.x, o.y, |q| {
+                        let qo = extrap_owner(q.id);
+                        qo != pi && qo != -1 && q.id != o.id
+                    });
+                    if d_me < d_ot {
+                        e_enemies_closer[p] += 1.0;
+                    }
+                }
+            }
+        }
+
+        // centroids + dispersion per player
+        let mut centroids: [Option<(f64, f64)>; NP] = [None; NP];
+        let mut dispersion = [0.0f32; NP];
+        for p in 0..NP {
+            let set: Vec<&Planet> = planets.iter().filter(|q| q.owner == p as i32).collect();
+            let (c, d) = centroid_dispersion(&set);
+            centroids[p] = c;
+            dispersion[p] = d;
+        }
+
+        // ── single-pass owner-bucketed pressure: pressure_from_owner[planet][owner]
+        // (static pressure from each owner's planets + ETA-weighted inbound fleets).
+        let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::new();
+        for f in &state.fleets {
+            if let Some((pid, dt)) = cached_predict_fleet_collision(f, state) {
+                arrivals.entry(pid).or_default().push((f.owner, f.ships, dt));
+            }
+        }
+        let mut pfo: Vec<[f32; NP]> = vec![[0.0f32; NP]; planets.len()];
+        for (di, d) in planets.iter().enumerate() {
+            let mut b = [0.0f32; NP];
+            for s in planets.iter() {
+                if s.id == d.id {
+                    continue;
+                }
+                if s.owner >= 0 && (s.owner as usize) < NP {
+                    b[s.owner as usize] += pressure_from(cache, s, d.id, l1);
+                }
+            }
+            if let Some(v) = arrivals.get(&d.id) {
+                for &(o, sh, eta) in v {
+                    if o >= 0 && (o as usize) < NP {
+                        b[o as usize] += sh as f32 * rel_weight(eta);
+                    }
+                }
+            }
+            pfo[di] = b;
+        }
+
+        // planet index by owner, and helpers over pfo
+        let support_of = |di: usize| -> f32 {
+            let d = &planets[di];
+            if d.owner >= 0 && (d.owner as usize) < NP {
+                pfo[di][d.owner as usize] + d.ships as f32
+            } else {
+                0.0 // neutral: no defenders
+            }
+        };
+
+        // pairwise vulnerability production[attacker i][defender j(0..NP) or NP=neutral]
+        let mut vuln_prod = [[0.0f32; NP + 1]; NP];
+        // aggregate threats on ME
+        let mut my_threat_max = 0.0f32;
+        let mut my_pw_threat = 0.0f32;
+        let mut my_prod_at_risk = 0.0f32;
+        let mut my_n_vuln = 0.0f32;
+        // per-opponent prod-weighted pressures
+        let mut pw_my_on_k = [0.0f32; NP]; // my pressure on k's planets, prod-weighted
+        let mut pw_k_on_me = [0.0f32; NP]; // k's pressure on my planets, prod-weighted
+        for di in 0..planets.len() {
+            let d = &planets[di];
+            let support = support_of(di);
+            let jo = d.owner; // defender owner
+            let dprod = d.production as f32;
+            // vulnerability: attacker i (player) takes d if its pressure beats d's own support
+            for i in 0..NP {
+                if (jo >= 0 && i == jo as usize) || pfo[di][i] <= support {
+                    continue;
+                }
+                let jidx = if jo == -1 { NP } else { jo as usize };
+                vuln_prod[i][jidx] += dprod;
+            }
+            // aggregate enemy threat on my planets
+            if jo == me_u as i32 {
+                let enemy_threat: f32 =
+                    (0..NP).filter(|&i| i != me_u).map(|i| pfo[di][i]).sum();
+                if enemy_threat > my_threat_max {
+                    my_threat_max = enemy_threat;
+                }
+                my_pw_threat += enemy_threat * dprod;
+                if enemy_threat > support {
+                    my_prod_at_risk += dprod;
+                    my_n_vuln += 1.0;
+                }
+                for k in 0..NP {
+                    if k != me_u {
+                        pw_k_on_me[k] += pfo[di][k] * dprod;
+                    }
+                }
+            }
+            // my pressure on opponent k's planets (prod-weighted)
+            if jo >= 0 && (jo as usize) != me_u {
+                pw_my_on_k[jo as usize] += pfo[di][me_u] * dprod;
+            }
+        }
+        let my_pw_threat = sdiv(my_pw_threat, production[me_u]);
+        let my_prod_at_risk = sdiv(my_prod_at_risk, production[me_u]);
+        let my_n_vuln = sdiv(my_n_vuln, np_my);
+        let pw_my_on_k: [f32; NP] = std::array::from_fn(|k| sdiv(pw_my_on_k[k], production[k]));
+        let pw_k_on_me: [f32; NP] = std::array::from_fn(|k| sdiv(pw_k_on_me[k], production[me_u]));
+
+        // ── in-flight matrix (raw, normalized by total in-flight ships) ─────
+        // inflight[src][dst(0..NP) or NP=neutral]
+        let mut inflight = [[0.0f32; NP + 1]; NP];
+        let mut total_inflight = 0.0f32;
+        for f in &state.fleets {
+            if f.owner < 0 || (f.owner as usize) >= NP {
+                continue;
+            }
+            total_inflight += f.ships as f32;
+            if let Some((pid, _dt)) = cached_predict_fleet_collision(f, state) {
+                let towner = extrap_owner_target(planets, pid);
+                let dst = if towner >= 0 && (towner as usize) < NP {
+                    towner as usize
+                } else {
+                    NP
+                };
+                inflight[f.owner as usize][dst] += f.ships as f32;
+            }
+        }
+
+        // ── leader / spread (continuous) ────────────────────────────────────
+        let mut max_opp = 0.0f32;
+        let mut min_opp = f32::INFINITY;
+        let mut total_opp = 0.0f32;
+        let mut n_opp_alive = 0;
+        for p in 0..NP {
+            if p == me_u || !alive[p] {
+                continue;
+            }
+            n_opp_alive += 1;
+            max_opp = max_opp.max(strength[p]);
+            min_opp = min_opp.min(strength[p]);
+            total_opp += strength[p];
+        }
+        let leader_strength_ratio = strength[me_u] / max_opp.max(1.0);
+        let opponent_strength_spread = if n_opp_alive >= 2 && total_opp > 0.0 {
+            (max_opp - min_opp) / total_opp
+        } else {
+            0.0
+        };
+
+        // ── assemble ────────────────────────────────────────────────────────
+        let mut out = [0.0f32; DIM];
+        out[0] = state.step as f32;
+        out[1] = state.angular_velocity as f32;
+
+        // me_cur (2..11)
+        let me_cur = [
+            sdiv(ships_on[me_u], total_ships),
+            sdiv(ships_fly[me_u], total_ships),
+            sdiv(n_static[me_u], n_planets),
+            sdiv(n_orbit[me_u], n_planets),
+            sdiv(n_comet[me_u], n_planets),
+            sdiv(prod_static[me_u], total_prod),
+            sdiv(prod_orbit[me_u], total_prod),
+            sdiv(neutrals_closer[me_u], n_planets),
+            sdiv(enemies_closer[me_u], n_planets),
+        ];
+        out[2..11].copy_from_slice(&me_cur);
+        // me_ext (11..19)
+        let me_ext = [
+            sdiv(e_ships_on[me_u], total_ships),
+            sdiv(e_n_static[me_u], n_planets),
+            sdiv(e_n_orbit[me_u], n_planets),
+            sdiv(e_n_comet[me_u], n_planets),
+            sdiv(e_prod_static[me_u], total_prod),
+            sdiv(e_prod_orbit[me_u], total_prod),
+            sdiv(e_neutrals_closer[me_u], n_planets),
+            sdiv(e_enemies_closer[me_u], n_planets),
+        ];
+        out[11..19].copy_from_slice(&me_ext);
+        // neutral (19..26)
+        out[19..26].copy_from_slice(&neutral_block_v3(state));
+        // aggregate (26..41)
+        out[26] = sdiv(strength[me_u], total_ships); // ship_share_me_vs_all
+        out[27] = sdiv(production[me_u], total_prod); // production_share
+        out[28] = my_n_vuln;
+        out[29] = my_prod_at_risk;
+        out[30] = my_threat_max;
+        out[31] = my_pw_threat;
+        out[32] = sdiv(ships_fly[me_u], strength[me_u]); // my_fleet_fraction
+        out[33] = dispersion[me_u];
+        out[34] = sdiv(ships_on[me_u], np_my); // avg_ally_ships
+        out[35] = leader_strength_ratio;
+        out[36] = opponent_strength_spread;
+        out[37] = n_alive;
+        out[38] = total_prod; // anchor
+        out[39] = total_ships; // anchor
+        out[40] = production[me_u]; // anchor
+
+        // per-opponent blocks (41.., 24 each) in canonical order
+        let opps = ordered_opponents(me);
+        for (slot, &k) in opps.iter().enumerate() {
+            let base = 41 + slot * 24;
+            if !alive[k] {
+                continue; // dead slot: leave zeros (is_alive stays 0)
+            }
+            let np_k = n_static[k] + n_orbit[k] + n_comet[k];
+            // cur econ (9)
+            let cur = [
+                sdiv(ships_on[k], total_ships),
+                sdiv(ships_fly[k], total_ships),
+                sdiv(n_static[k], n_planets),
+                sdiv(n_orbit[k], n_planets),
+                sdiv(n_comet[k], n_planets),
+                sdiv(prod_static[k], total_prod),
+                sdiv(prod_orbit[k], total_prod),
+                sdiv(neutrals_closer[k], n_planets),
+                sdiv(enemies_closer[k], n_planets),
+            ];
+            out[base..base + 9].copy_from_slice(&cur);
+            // ext econ (8)
+            let ext = [
+                sdiv(e_ships_on[k], total_ships),
+                sdiv(e_n_static[k], n_planets),
+                sdiv(e_n_orbit[k], n_planets),
+                sdiv(e_n_comet[k], n_planets),
+                sdiv(e_prod_static[k], total_prod),
+                sdiv(e_prod_orbit[k], total_prod),
+                sdiv(e_neutrals_closer[k], n_planets),
+                sdiv(e_enemies_closer[k], n_planets),
+            ];
+            out[base + 9..base + 17].copy_from_slice(&ext);
+            let _ = np_k;
+            // rel + scale + alive (7)
+            let cdist = match (centroids[me_u], centroids[k]) {
+                (Some(a), Some(b)) => {
+                    (((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()) as f32
+                }
+                _ => 0.0,
+            };
+            out[base + 17] = pw_my_on_k[k];
+            out[base + 18] = pw_k_on_me[k];
+            out[base + 19] = cdist;
+            out[base + 20] = dispersion[k];
+            out[base + 21] = sdiv(strength[me_u], strength[me_u] + strength[k]);
+            out[base + 22] = sdiv(production[me_u], production[me_u] + production[k]);
+            out[base + 23] = 1.0; // is_alive_k
+        }
+
+        // pairwise matrices — slot order S = [me, o1, o2, o3]
+        let s_ids = [me_u, opps[0], opps[1], opps[2]];
+        // in-flight (113..129): 12 directed off-diagonal + 4 ->neutral
+        {
+            let mut idx = 113;
+            for si in 0..4 {
+                for di in 0..4 {
+                    if si == di {
+                        continue;
+                    }
+                    out[idx] = sdiv(inflight[s_ids[si]][s_ids[di]], total_inflight);
+                    idx += 1;
+                }
+            }
+            for si in 0..4 {
+                out[idx] = sdiv(inflight[s_ids[si]][NP], total_inflight);
+                idx += 1;
+            }
+            debug_assert_eq!(idx, 129);
+        }
+        // vulnerability (129..145): vuln[i->j] = vuln_prod[i][j] / total_prod[j]
+        {
+            let total_def = |j: usize| -> f32 {
+                if j == NP {
+                    // neutral defender production
+                    state
+                        .planets
+                        .iter()
+                        .filter(|p| p.owner == -1)
+                        .map(|p| p.production as f32)
+                        .sum()
+                } else {
+                    production[j]
+                }
+            };
+            let mut idx = 129;
+            for si in 0..4 {
+                for di in 0..4 {
+                    if si == di {
+                        continue;
+                    }
+                    let i = s_ids[si];
+                    let j = s_ids[di];
+                    out[idx] = sdiv(vuln_prod[i][j], total_def(j));
+                    idx += 1;
+                }
+            }
+            for si in 0..4 {
+                let i = s_ids[si];
+                out[idx] = sdiv(vuln_prod[i][NP], total_def(NP));
+                idx += 1;
+            }
+            debug_assert_eq!(idx, 145);
+        }
+
+        out
+    }
+
+    fn extrap_owner_target(planets: &[Planet], pid: i64) -> i32 {
+        planets.iter().find(|p| p.id == pid).map(|p| p.owner).unwrap_or(-1)
+    }
+
+    fn neutral_block_v3(state: &GameState) -> [f32; 7] {
+        let mut ships = 0.0f32;
+        let mut n_static = 0.0f32;
+        let mut n_orbit = 0.0f32;
+        let mut n_comet = 0.0f32;
+        let mut prod_static = 0.0f32;
+        let mut prod_orbit = 0.0f32;
+        let mut comet_time = 0.0f32;
+        for planet in &state.planets {
+            if planet.owner == -1 {
+                ships += planet.ships as f32;
+                let prod = planet.production as f32;
+                if planet.is_comet {
+                    n_comet += 1.0;
+                } else if planet.is_orbiting {
+                    n_orbit += 1.0;
+                    prod_orbit += prod;
+                } else {
+                    n_static += 1.0;
+                    prod_static += prod;
+                }
+            }
+            if planet.is_comet {
+                comet_time += state.comet_remaining(planet) as f32;
+            }
+        }
+        [ships, n_static, n_orbit, n_comet, prod_static, prod_orbit, comet_time]
     }
 }
 
