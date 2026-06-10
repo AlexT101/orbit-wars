@@ -23,7 +23,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::cache::{AimCacheVerdict, InvariantVerdict};
 use crate::constants::{
-    ENEMY_OFFSET_LOOKAHEAD, FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD,
+    ALLY_PRESSURE_RATIO, ENEMY_OFFSET_LOOKAHEAD, FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD,
     REINFORCEMENT_PRESSURE_DECAY, REINFORCEMENT_PRESSURE_TURNS, ROTATION_LOOK_AHEAD_TURNS,
 };
 use crate::engine::{MoveAction, Planet};
@@ -41,6 +41,12 @@ pub struct HellburnerModel<'a> {
     pub inbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub outbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub reinforcement_target: HashMap<i64, i64>,
+    /// Enemy-owned targets the planner skips this turn: our (ally) pressure on
+    /// the target is below `ALLY_PRESSURE_RATIO` of the enemy pressure on it,
+    /// so a capture attempt would be contesting a planet the enemy can
+    /// out-reinforce. Computed from baseline timelines only (plan-independent),
+    /// before any source selection.
+    pub pressure_gated_targets: HashSet<i64>,
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
     /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
     /// Avoids repeated traffic to the L2 `EntityCache::aim_cache` inside the
@@ -108,9 +114,11 @@ impl<'a> HellburnerModel<'a> {
             inbound_edges,
             outbound_edges,
             reinforcement_target: HashMap::default(),
+            pressure_gated_targets: HashSet::default(),
             shot_cache: RefCell::new(HashMap::default()),
         };
         model.reinforcement_target = build_reinforcement_targets(state, &model, player);
+        model.pressure_gated_targets = build_pressure_gate(state, &model);
         model
     }
 
@@ -346,35 +354,86 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
         if !model.non_comet_ids.contains(&target.id) {
             continue;
         }
-        let mut total = 0.0;
-        for enemy in &state.enemy_planets {
-            if !model.non_comet_ids.contains(&enemy.id) {
-                continue;
-            }
-            let mut best_contribution = 0.0;
-            for offset in 0..=ENEMY_OFFSET_LOOKAHEAD.min(REINFORCEMENT_PRESSURE_TURNS) {
-                let ships = enemy_available_to_launch_at(state, enemy.id, offset);
-                if ships <= 0 {
-                    continue;
-                }
-                let Some((_, travel_turns, _, _, _)) =
-                    model.plan_shot(enemy.id, target.id, ships, offset)
-                else {
-                    continue;
-                };
-                let arrival = (offset + travel_turns).max(1);
-                if arrival <= REINFORCEMENT_PRESSURE_TURNS {
-                    let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
-                    if contribution > best_contribution {
-                        best_contribution = contribution;
-                    }
-                }
-            }
-            total += best_contribution;
-        }
+        let total = pressure_from(
+            state,
+            model,
+            target.id,
+            &state.enemy_planets,
+            ENEMY_OFFSET_LOOKAHEAD,
+        );
         pressure.insert(target.id, total);
     }
     pressure
+}
+
+/// Total pressure `sources` exert on `target_id`: per source, the best
+/// time-decayed deliverable force over launch offsets `0..=max_offset`
+/// (`ships × reinforcement_pressure_weight(arrival)`), summed across sources.
+/// Availability is read from baseline timelines only, so the result is
+/// plan-independent and safe to compute once per model build.
+fn pressure_from(
+    state: &WorldState,
+    model: &HellburnerModel,
+    target_id: i64,
+    sources: &[Planet],
+    max_offset: i64,
+) -> f64 {
+    let mut total = 0.0;
+    for src in sources {
+        if src.id == target_id || !model.non_comet_ids.contains(&src.id) {
+            continue;
+        }
+        let mut best_contribution = 0.0;
+        for offset in 0..=max_offset.min(REINFORCEMENT_PRESSURE_TURNS) {
+            let ships = owner_available_to_launch_at(state, src.id, src.owner, offset);
+            if ships <= 0 {
+                continue;
+            }
+            let Some((_, travel_turns, _, _, _)) =
+                model.plan_shot(src.id, target_id, ships, offset)
+            else {
+                continue;
+            };
+            let arrival = (offset + travel_turns).max(1);
+            if arrival <= REINFORCEMENT_PRESSURE_TURNS {
+                let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
+                if contribution > best_contribution {
+                    best_contribution = contribution;
+                }
+            }
+        }
+        total += best_contribution;
+    }
+    total
+}
+
+/// Enemy-owned targets failing the ally-pressure gate. For each enemy planet,
+/// ally pressure (our planets, our `OFFSET_LOOKAHEAD`) is compared against
+/// enemy pressure (all enemy planets except the target itself,
+/// `ENEMY_OFFSET_LOOKAHEAD`) — both computed exactly like reinforcement
+/// pressure. Targets where ally < `ALLY_PRESSURE_RATIO` × enemy are gated.
+fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i64> {
+    let mut gated: HashSet<i64> = HashSet::default();
+    for target in &state.enemy_planets {
+        if !model.non_comet_ids.contains(&target.id) {
+            continue;
+        }
+        let enemy = pressure_from(
+            state,
+            model,
+            target.id,
+            &state.enemy_planets,
+            ENEMY_OFFSET_LOOKAHEAD,
+        );
+        if enemy <= 0.0 {
+            continue;
+        }
+        let ally = pressure_from(state, model, target.id, &state.my_planets, OFFSET_LOOKAHEAD);
+        if ally < ALLY_PRESSURE_RATIO * enemy {
+            gated.insert(target.id);
+        }
+    }
+    gated
 }
 
 fn reinforcement_pressure_weight(turns: i64) -> f64 {
@@ -387,16 +446,18 @@ fn reinforcement_pressure_weight(turns: i64) -> f64 {
     REINFORCEMENT_PRESSURE_DECAY.powf(exponent)
 }
 
-fn enemy_available_to_launch_at(state: &WorldState, planet_id: i64, offset: i64) -> i64 {
+fn owner_available_to_launch_at(
+    state: &WorldState,
+    planet_id: i64,
+    owner: i64,
+    offset: i64,
+) -> i64 {
     let planet = state.planet(planet_id);
-    if planet.owner == state.player || planet.owner == -1 {
+    if planet.owner != owner || owner == -1 {
         return 0;
     }
-    let enemy_owner = planet.owner;
     match state.timeline_cache.baseline(planet_id) {
-        Some(timeline) => {
-            available_at_timeline_for_owner(timeline, enemy_owner, state.player, offset)
-        }
+        Some(timeline) => available_at_timeline_for_owner(timeline, owner, state.player, offset),
         None => (planet.ships + planet.production * offset.max(0)).max(0),
     }
 }
@@ -1348,13 +1409,15 @@ fn run_strategy(
     let mut state = PlanState::default();
     let mut moves: Vec<MoveAction> = Vec::new();
 
-    // Fixed-order candidate targets (non-comet, with inbound edges). The scan
-    // order matches the original per-iteration sweep so selection tie-breaking
-    // stays deterministic and identical to the uncached path.
+    // Fixed-order candidate targets (non-comet, not pressure-gated, with
+    // inbound edges). The scan order matches the original per-iteration sweep
+    // so selection tie-breaking stays deterministic and identical to the
+    // uncached path.
     let candidate_ids: Vec<i64> = world
         .planets
         .iter()
         .filter(|p| model.non_comet_ids.contains(&p.id))
+        .filter(|p| !model.pressure_gated_targets.contains(&p.id))
         .filter(|p| {
             model
                 .inbound_edges
