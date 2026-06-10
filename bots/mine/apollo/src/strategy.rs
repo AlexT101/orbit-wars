@@ -23,8 +23,8 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::cache::{AimCacheVerdict, InvariantVerdict};
 use crate::constants::{
-    FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD, REINFORCEMENT_PRESSURE_DECAY,
-    REINFORCEMENT_PRESSURE_TURNS, ROTATION_LOOK_AHEAD_TURNS,
+    ENEMY_OFFSET_LOOKAHEAD, FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD,
+    REINFORCEMENT_PRESSURE_DECAY, REINFORCEMENT_PRESSURE_TURNS, ROTATION_LOOK_AHEAD_TURNS,
 };
 use crate::engine::{MoveAction, Planet};
 use crate::helpers::{
@@ -351,16 +351,26 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
             if !model.non_comet_ids.contains(&enemy.id) {
                 continue;
             }
-            let ships = enemy_available_to_launch(state, enemy.id);
-            if ships <= 0 {
-                continue;
+            let mut best_contribution = 0.0;
+            for offset in 0..=ENEMY_OFFSET_LOOKAHEAD.min(REINFORCEMENT_PRESSURE_TURNS) {
+                let ships = enemy_available_to_launch_at(state, enemy.id, offset);
+                if ships <= 0 {
+                    continue;
+                }
+                let Some((_, travel_turns, _, _, _)) =
+                    model.plan_shot(enemy.id, target.id, ships, offset)
+                else {
+                    continue;
+                };
+                let arrival = (offset + travel_turns).max(1);
+                if arrival <= REINFORCEMENT_PRESSURE_TURNS {
+                    let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
+                    if contribution > best_contribution {
+                        best_contribution = contribution;
+                    }
+                }
             }
-            let Some((_, turns, _, _, _)) = model.plan_shot(enemy.id, target.id, ships, 0) else {
-                continue;
-            };
-            if turns.max(1) <= REINFORCEMENT_PRESSURE_TURNS {
-                total += ships as f64 * reinforcement_pressure_weight(turns);
-            }
+            total += best_contribution;
         }
         pressure.insert(target.id, total);
     }
@@ -377,15 +387,17 @@ fn reinforcement_pressure_weight(turns: i64) -> f64 {
     REINFORCEMENT_PRESSURE_DECAY.powf(exponent)
 }
 
-fn enemy_available_to_launch(state: &WorldState, planet_id: i64) -> i64 {
+fn enemy_available_to_launch_at(state: &WorldState, planet_id: i64, offset: i64) -> i64 {
     let planet = state.planet(planet_id);
     if planet.owner == state.player || planet.owner == -1 {
         return 0;
     }
     let enemy_owner = planet.owner;
     match state.timeline_cache.baseline(planet_id) {
-        Some(timeline) => available_at_timeline_for_owner(timeline, enemy_owner, state.player, 0),
-        None => planet.ships.max(0),
+        Some(timeline) => {
+            available_at_timeline_for_owner(timeline, enemy_owner, state.player, offset)
+        }
+        None => (planet.ships + planet.production * offset.max(0)).max(0),
     }
 }
 
