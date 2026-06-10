@@ -589,13 +589,12 @@ fn evaluate_frontline_strategy(
     }
     let n = scratch.candidates.len();
 
-    // ── 2. Enumerate non-empty subsets × {uncoordinated, coordinated}. ──
-    //       Schedule A (uncoordinated): each source at `offset`. Earliest
-    //       arrivals, fights resolved serially by `simulate_planet_timeline`.
-    //       Schedule B (coordinated at A_S = max-natural-arrival): every
-    //       earlier source delays to land on the same turn as the latest
-    //       source, presenting a combined force the defender can't split.
-    //       Per-source delay search is cache-friendly (small δ scan).
+    // ── 2. Enumerate non-empty source subsets under coordinated arrivals. ──
+    //       A_S is the subset's max natural arrival. For each cluster target
+    //       A_S + k, every source picks the latest feasible delayed arrival at
+    //       or before the cluster target, presenting a combined force the
+    //       defender can't split cleanly. Per-source delay search is
+    //       cache-friendly (small δ scan).
     let mut best_score = f64::NEG_INFINITY;
     let mut best_ships = i64::MAX;
     let mut best_orders: Vec<PlannedOrder> = Vec::new();
@@ -684,8 +683,9 @@ fn evaluate_frontline_strategy(
         }
         let better = score > *best_score
             || (score == *best_score
-                && (ships_total < *best_ships
-                    || (ships_total == *best_ships && max_arrival < *best_max_arrival)));
+                && (max_arrival < *best_max_arrival
+                    || (max_arrival == *best_max_arrival && ships_total < *best_ships)));
+
         if better {
             *best_score = score;
             *best_ships = ships_total;
@@ -694,8 +694,8 @@ fn evaluate_frontline_strategy(
         }
     };
 
-    // Precompute Schedule-B per-source delay options once. For each source and
-    // delay `d`, the growth-aware fleet (`ships_max + production·d`, launched at
+    // Precompute per-source delay options once. For each source and delay `d`,
+    // the growth-aware fleet (`ships_max + production·d`, launched at
     // `offset + d`) yields a `(arrival, angle, ships)` triple that depends only
     // on the source and `offset` — not on the subset mask or coordination target
     // — so it's hoisted out of the inner subset scan into this flat row-major
@@ -729,89 +729,26 @@ fn evaluate_frontline_strategy(
     }
 
     for mask in 1u32..(1u32 << n) {
-        // ── Schedule A: uncoordinated. ──
-        scratch.plan_orders.clear();
-        scratch.trial.clear();
-        let mut ships_total: i64 = 0;
-        let mut max_arrival_a: i64 = 0;
+        if mask.count_ones() as usize > world.config.max_sources {
+            continue;
+        }
+
+        let mut a_s: i64 = 0;
         for i in 0..n {
             if mask & (1u32 << i) == 0 {
                 continue;
             }
-            let c = &scratch.candidates[i];
-            if c.arrival > max_arrival_a {
-                max_arrival_a = c.arrival;
-            }
-            let order = PlannedOrder {
-                src_id: c.id,
-                angle: c.angle,
-                ships: c.ships_max,
-                arrival: c.arrival,
-                effective_offset: offset,
-            };
-            let event = ArrivalEvent {
-                turns: c.arrival,
-                owner: world.player,
-                ships: c.ships_max,
-            };
-            ships_total += c.ships_max;
-            scratch.plan_orders.push(order);
-            scratch.trial.push(event);
-        }
-        let (final_owner_a, start_turn_a) = run_trial(
-            &scratch.trial,
-            &scratch.fixed_arrivals,
-            &mut scratch.merged_scratch,
-            &mut scratch.owner_buf,
-            &mut scratch.ships_buf,
-            &mut scratch.by_turn_buf,
-        );
-        if final_owner_a == world.player {
-            let score_a = timeline_delta_score(
-                world,
-                target,
-                prefix_baseline,
-                &scratch.owner_buf,
-                &scratch.ships_buf,
-                ships_total,
-                start_turn_a,
-            );
-            consider(
-                &scratch.plan_orders,
-                max_arrival_a,
-                ships_total,
-                score_a,
-                &mut best_score,
-                &mut best_ships,
-                &mut best_orders,
-                &mut best_max_arrival,
-            );
+            a_s = a_s.max(scratch.candidates[i].arrival);
         }
 
-        // ── Schedule B: coordinated cluster at A_S + k, k in 0..=A_S_LOOKAHEAD.
+        // ── Coordinated cluster at A_S + k, k in 0..=A_S_LOOKAHEAD.
         //   k = 0 mirrors the original "land together at the natural max
         //     arrival" coordination.
         //   k > 0 pushes the cluster further out so slow-growing sources can
         //     accumulate `production·d` extra ships before launch (growth-
-        //     aware). Score-wise this is only attractive when the heavier
-        //     fleet is what flips the trial timeline — otherwise Schedule A
-        //     or k = 0 will dominate via `consider`'s arrival-aware score.
-        let a_s = max_arrival_a;
-        let mut has_earlier = false;
-        for i in 0..n {
-            if mask & (1u32 << i) == 0 {
-                continue;
-            }
-            if scratch.candidates[i].arrival < a_s {
-                has_earlier = true;
-                break;
-            }
-        }
-        // When no source is earlier than A_S, k = 0 reduces to Schedule A
-        // exactly — skip it to avoid duplicate work. k > 0 still adds value
-        // (growth on every source).
-        let start_k: i64 = if has_earlier { 0 } else { 1 };
-        for k in start_k..=A_S_LOOKAHEAD {
+        //     aware). Score-wise this is only attractive when the heavier fleet
+        //     is what flips the trial timeline; otherwise k = 0 tends to win.
+        for k in 0..=A_S_LOOKAHEAD {
             let target_a_s = a_s + k;
             let max_delay = MAX_COORD_DELAY + k;
             scratch.plan_orders.clear();
@@ -938,11 +875,11 @@ fn collect_source_candidates(
 ) {
     out.clear();
     for &(src_id, _travel) in &ctx.origins {
-        // Cap the subset-search width: `origins` is distance-sorted (nearest
-        // first), so once we've collected `MAX_SUBSET_SOURCES` viable sources we
-        // stop — keeping the soonest-arriving candidates while bounding the
-        // `2^n` enumeration (and avoiding the `1u32 << n` overflow for large n).
-        if out.len() >= world.config.max_subset_sources {
+        // Cap the candidate-search width: `origins` is distance-sorted (nearest
+        // first), so once we've collected enough viable sources we stop —
+        // keeping the soonest-arriving candidates while bounding the `2^n`
+        // enumeration (and avoiding the `1u32 << n` overflow for large n).
+        if out.len() >= world.config.max_sources_to_consider {
             break;
         }
         let src = *world.planet(src_id);

@@ -48,20 +48,24 @@ pub struct Config {
     pub horizon: i64,
     /// Maximum distance between planets for us to consider fleet travel.
     pub max_distance: f64,
-    /// Upper bound on the number of inbound sources enumerated per target.
-    pub max_subset_sources: usize,
+    /// Upper bound on the number of inbound sources precomputed per target.
+    pub max_sources_to_consider: usize,
+    /// Upper bound on the number of sources used in a single attack plan.
+    pub max_sources: usize,
 }
 
 const CONFIG_2P: Config = Config {
     horizon: 30,
     max_distance: 38.0,
-    max_subset_sources: 16,
+    max_sources_to_consider: 16,
+    max_sources: 4,
 };
 
 const CONFIG_4P: Config = Config {
     horizon: 30,
     max_distance: 38.0,
-    max_subset_sources: 16,
+    max_sources_to_consider: 16,
+    max_sources: 4,
 };
 
 impl Config {

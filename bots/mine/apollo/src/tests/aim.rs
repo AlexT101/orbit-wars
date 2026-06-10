@@ -6,7 +6,9 @@
 use super::reference_engine::RefEngine;
 use crate::aim::{aim_with_prediction, lead_target_from, shot_blocked_exact};
 use crate::cache::{EntityCache, EntityKind};
-use crate::constants::{BOARD_SIZE, CENTER, EPISODE_STEPS, AIM_HORIZON, LAUNCH_CLEARANCE, SUN_RADIUS};
+use crate::constants::{
+    AIM_HORIZON, BOARD_SIZE, CENTER, EPISODE_STEPS, LAUNCH_CLEARANCE, SUN_RADIUS,
+};
 use crate::engine::{fleet_speed, swept_pair_hit, Configuration, MoveAction};
 
 fn cache_for(state: &RefEngine) -> EntityCache {
