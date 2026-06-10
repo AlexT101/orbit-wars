@@ -22,15 +22,16 @@ use std::cell::RefCell;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::cache::{AimCacheVerdict, InvariantVerdict};
-use crate::constants::{OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS};
+use crate::constants::{
+    FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD, REINFORCEMENT_PRESSURE_DECAY,
+    REINFORCEMENT_PRESSURE_TURNS, ROTATION_LOOK_AHEAD_TURNS,
+};
 use crate::engine::{MoveAction, Planet};
 use crate::helpers::{
     aim_ignoring_comets, aim_with_prediction, available_at_timeline, dist,
     simulate_checkpoint_into, simulate_planet_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
 use crate::world::WorldState;
-
-const REINFORCEMENT_PRESSURE_TURNS: i64 = 15;
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -233,8 +234,8 @@ fn build_reinforcement_targets(
         if !model.non_comet_ids.contains(&p.id) {
             continue;
         }
-        let sink_pressure = pressure.get(&p.id).copied().unwrap_or(0);
-        if sink_pressure <= 0 {
+        let sink_pressure = pressure.get(&p.id).copied().unwrap_or(0.0);
+        if sink_pressure <= 0.0 {
             continue;
         }
         best.insert(
@@ -282,11 +283,16 @@ fn build_reinforcement_targets(
         if !model.non_comet_ids.contains(&p.id) {
             continue;
         }
-        let own_pressure = pressure.get(&p.id).copied().unwrap_or(0);
+        let own_pressure = pressure.get(&p.id).copied().unwrap_or(0.0);
         let Some(route) = best.get(&p.id).copied() else {
             continue;
         };
-        if route.next_hop != p.id && route.sink_pressure > own_pressure {
+        // Frontier sources only drain toward a clearly higher-pressure sink.
+        // Non-frontier relay/hop planets keep the normal "higher pressure" flow.
+        let frontier_source = is_reinforcement_frontier(state, model, p.id, player);
+        let clears_frontier_ratio = !frontier_source
+            || reinforcement_pressure_clears_frontier_ratio(route.sink_pressure, own_pressure);
+        if route.next_hop != p.id && route.sink_pressure > own_pressure && clears_frontier_ratio {
             out.insert(p.id, route.next_hop);
         }
     }
@@ -295,7 +301,7 @@ fn build_reinforcement_targets(
 
 #[derive(Clone, Copy)]
 struct ReinforcementRoute {
-    sink_pressure: i64,
+    sink_pressure: f64,
     hops: i64,
     next_hop: i64,
     sink_id: i64,
@@ -313,13 +319,34 @@ fn reinforcement_route_is_better(
                         < (current.sink_id, current.next_hop))))
 }
 
-fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMap<i64, i64> {
-    let mut pressure: HashMap<i64, i64> = HashMap::default();
+fn is_reinforcement_frontier(
+    state: &WorldState,
+    model: &HellburnerModel,
+    planet_id: i64,
+    player: i64,
+) -> bool {
+    model.inbound_edges[&planet_id]
+        .iter()
+        .any(|(sid, _)| state.planet(*sid).owner != player)
+        || model.outbound_edges[&planet_id]
+            .iter()
+            .any(|(did, _)| state.planet(*did).owner != player)
+}
+
+fn reinforcement_pressure_clears_frontier_ratio(
+    target_pressure: f64,
+    source_pressure: f64,
+) -> bool {
+    target_pressure >= source_pressure * FRONTIER_PRESSURE_RATIO
+}
+
+fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMap<i64, f64> {
+    let mut pressure: HashMap<i64, f64> = HashMap::default();
     for target in &state.my_planets {
         if !model.non_comet_ids.contains(&target.id) {
             continue;
         }
-        let mut total = 0;
+        let mut total = 0.0;
         for enemy in &state.enemy_planets {
             if !model.non_comet_ids.contains(&enemy.id) {
                 continue;
@@ -332,12 +359,22 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
                 continue;
             };
             if turns.max(1) <= REINFORCEMENT_PRESSURE_TURNS {
-                total += ships;
+                total += ships as f64 * reinforcement_pressure_weight(turns);
             }
         }
         pressure.insert(target.id, total);
     }
     pressure
+}
+
+fn reinforcement_pressure_weight(turns: i64) -> f64 {
+    let turns = turns.max(1);
+    if turns <= 1 {
+        return 1.0;
+    }
+    let span = (REINFORCEMENT_PRESSURE_TURNS - 1).max(1) as f64;
+    let exponent = (turns - 1) as f64 / span;
+    REINFORCEMENT_PRESSURE_DECAY.powf(exponent)
 }
 
 fn enemy_available_to_launch(state: &WorldState, planet_id: i64) -> i64 {
@@ -347,20 +384,7 @@ fn enemy_available_to_launch(state: &WorldState, planet_id: i64) -> i64 {
     }
     let enemy_owner = planet.owner;
     match state.timeline_cache.baseline(planet_id) {
-        Some(timeline) => {
-            let mut available = i64::MAX;
-            for t in 0..=timeline.horizon as usize {
-                if timeline.owner_at[t] != enemy_owner {
-                    break;
-                }
-                available = available.min(timeline.ships_at[t].max(0));
-            }
-            if available == i64::MAX {
-                0
-            } else {
-                available.max(0)
-            }
-        }
+        Some(timeline) => available_at_timeline_for_owner(timeline, enemy_owner, state.player, 0),
         None => planet.ships.max(0),
     }
 }
@@ -375,7 +399,7 @@ struct PlanState {
 
 impl PlanState {
     fn ships_available(&self, world: &WorldState, src: &Planet) -> i64 {
-        self.ships_available_at(world, src, 0)
+        self.ships_available_at(world, src, world.player, 0)
     }
     /// Rollout-aware available ships at a future launch offset.
     ///
@@ -386,16 +410,22 @@ impl PlanState {
     /// ([`available_at_timeline`]) — not the single-turn garrison, which would
     /// over-commit whenever a future enemy arrival shrinks the planet.
     ///
-    /// O(1) in the common case — it reads the prebuilt baseline trajectory's
-    /// precomputed forward-min. Only when this source has its own planned
-    /// reinforcements queued *this* turn does it pay a single per-call planet
-    /// sim to fold those in. Conservative against `spent`: every prior
-    /// commitment from this source is subtracted regardless of when those ships
-    /// are scheduled to leave (so a commit at any offset correctly debits all
-    /// offsets, keeping the greedy planner from going negative).
-    fn ships_available_at(&self, world: &WorldState, src: &Planet, offset: i64) -> i64 {
+    /// O(1) in the common friendly-source case — it reads the prebuilt
+    /// player-specific forward-min. Enemy-owner queries scan the same
+    /// player-agnostic owner/ship timeline over the continuous run controlled by
+    /// that owner. Only when this source has planned arrivals queued *this* turn
+    /// does it pay a single per-call planet sim to fold those in. Conservative
+    /// against `spent` for our own sources: every prior commitment from this
+    /// source is subtracted regardless of when those ships are scheduled to
+    /// leave (so a commit at any offset correctly debits all offsets, keeping
+    /// the greedy planner from going negative).
+    fn ships_available_at(&self, world: &WorldState, src: &Planet, owner: i64, offset: i64) -> i64 {
         let offset = offset.max(0);
-        let spent = self.spent.get(&src.id).copied().unwrap_or(0);
+        let spent = if owner == world.player {
+            self.spent.get(&src.id).copied().unwrap_or(0)
+        } else {
+            0
+        };
         let planned: &[ArrivalEvent] = self
             .planned
             .get(&src.id)
@@ -403,11 +433,11 @@ impl PlanState {
             .unwrap_or(&[]);
         let available = if planned.is_empty() {
             match world.timeline_cache.baseline(src.id) {
-                Some(b) => available_at_timeline(b, offset),
+                Some(b) => available_at_timeline_for_owner(b, owner, world.player, offset),
                 // No cached trajectory: fall back to linear growth. A purely
                 // growing series has its minimum at `offset`, so the point
                 // value is already the forward-min.
-                None if src.owner == world.player => src.ships + src.production * offset,
+                None if src.owner == owner && owner != -1 => src.ships + src.production * offset,
                 None => 0,
             }
         } else {
@@ -415,7 +445,7 @@ impl PlanState {
             // Sim the full horizon (not just up to `offset`) so the forward-min
             // sees every later turn.
             let tl = world.projected_timeline(src.id, world.timeline_cache.horizon, planned, &[]);
-            available_at_timeline(&tl, offset)
+            available_at_timeline_for_owner(&tl, owner, world.player, offset)
         };
         (available - spent).max(0)
     }
@@ -484,6 +514,33 @@ fn target_timeline(
 
 fn final_owner(timeline: &PlanetTimeline) -> i64 {
     timeline.owner_at[timeline.horizon as usize]
+}
+
+fn available_at_timeline_for_owner(
+    timeline: &PlanetTimeline,
+    owner: i64,
+    timeline_player: i64,
+    offset: i64,
+) -> i64 {
+    if owner == timeline_player {
+        return available_at_timeline(timeline, offset);
+    }
+    let start = offset.max(0).min(timeline.horizon) as usize;
+    if timeline.owner_at[start] != owner {
+        return 0;
+    }
+    let mut available = i64::MAX;
+    for t in start..=timeline.horizon as usize {
+        if timeline.owner_at[t] != owner {
+            break;
+        }
+        available = available.min(timeline.ships_at[t].max(0));
+    }
+    if available == i64::MAX {
+        0
+    } else {
+        available.max(0)
+    }
 }
 
 fn baseline_owns(world: &WorldState, planet_id: i64) -> bool {
@@ -586,24 +643,34 @@ struct FrontlineScratch {
     owner_buf: Vec<i64>,
     ships_buf: Vec<i64>,
     by_turn_buf: Vec<Vec<ArrivalEvent>>,
+    counter: CounterScratch,
+}
+
+#[derive(Default)]
+struct CounterScratch {
+    bucket_options: Vec<SourceOption>,
+    trial: Vec<ArrivalEvent>,
+    merged_scratch: Vec<ArrivalEvent>,
+    owner_buf: Vec<i64>,
+    ships_buf: Vec<i64>,
+    by_turn_buf: Vec<Vec<ArrivalEvent>>,
 }
 
 /// Per-target inputs to the frontline subset search. Source ownership and graph
 /// edges are turn-constant within a planning turn, so they are computed once per
 /// target and shared across the exact-arrival bucket search.
 struct TargetContext {
-    /// Owned inbound sources of the target, distance-sorted (nearest first).
+    /// Inbound sources of the target, distance-sorted (nearest first).
     origins: Vec<(i64, f64)>,
 }
 
-fn target_context(world: &WorldState, model: &HellburnerModel, target: &Planet) -> TargetContext {
+fn target_context(model: &HellburnerModel, target: &Planet) -> TargetContext {
     let empty: Vec<(i64, f64)> = Vec::new();
     let mut origins: Vec<(i64, f64)> = model
         .inbound_edges
         .get(&target.id)
         .unwrap_or(&empty)
         .iter()
-        .filter(|(sid, _)| world.planet(*sid).owner == world.player)
         .copied()
         .collect();
     origins.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -631,6 +698,7 @@ fn evaluate_frontline_strategy(
         target,
         plan,
         ctx,
+        world.player,
         &mut scratch.candidates,
         &mut scratch.option_table,
     );
@@ -638,7 +706,6 @@ fn evaluate_frontline_strategy(
         return None;
     }
     let n = scratch.candidates.len();
-    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
 
     // ── 2. Enumerate exact-arrival buckets. ──
     //       Each bucket contains at most one option per source for that arrival
@@ -687,6 +754,11 @@ fn evaluate_frontline_strategy(
             .timeline_cache
             .baseline(target.id)
             .expect("target planet must be in the timeline cache"),
+    };
+    let enemy_counter_options = if target.owner == -1 {
+        collect_enemy_counter_options(world, model, target, plan, ctx)
+    } else {
+        Vec::new()
     };
 
     // Layer `trial` on the fixed prefix baseline via `simulate_checkpoint_into`,
@@ -744,33 +816,12 @@ fn evaluate_frontline_strategy(
     };
 
     for arrival in 1..=horizon {
-        scratch.bucket_options.clear();
-        for i in 0..n {
-            let row = i * option_stride;
-            let mut best_option: Option<SourceOption> = None;
-            for l in 0..option_stride {
-                let Some(option) = scratch.option_table[row + l] else {
-                    continue;
-                };
-                if option.arrival != arrival {
-                    continue;
-                }
-                let take = match best_option {
-                    None => true,
-                    Some(prev) => {
-                        option.ships > prev.ships
-                            || (option.ships == prev.ships
-                                && option.launch_offset < prev.launch_offset)
-                    }
-                };
-                if take {
-                    best_option = Some(option);
-                }
-            }
-            if let Some(option) = best_option {
-                scratch.bucket_options.push(option);
-            }
-        }
+        collect_bucket_options_for_arrival(
+            n,
+            &scratch.option_table,
+            arrival,
+            &mut scratch.bucket_options,
+        );
 
         let bucket_len = scratch.bucket_options.len();
         if bucket_len == 0 {
@@ -814,6 +865,21 @@ fn evaluate_frontline_strategy(
                 &mut scratch.by_turn_buf,
             );
             if final_owner_b == world.player {
+                if target.owner == -1
+                    && enemy_can_recapture_after(
+                        world,
+                        target,
+                        &scratch.trial,
+                        &scratch.fixed_arrivals,
+                        prefix_baseline,
+                        expiry,
+                        arrival,
+                        &enemy_counter_options,
+                        &mut scratch.counter,
+                    )
+                {
+                    continue;
+                }
                 let score_b = timeline_delta_score(
                     world,
                     target,
@@ -856,12 +922,54 @@ struct SourceOption {
     ships: i64,
 }
 
+struct OwnerSourceOptions {
+    owner: i64,
+    source_count: usize,
+    option_table: Vec<Option<SourceOption>>,
+}
+
+fn collect_bucket_options_for_arrival(
+    source_count: usize,
+    option_table: &[Option<SourceOption>],
+    arrival: i64,
+    out: &mut Vec<SourceOption>,
+) {
+    out.clear();
+    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
+    for i in 0..source_count {
+        let row = i * option_stride;
+        let mut best_option: Option<SourceOption> = None;
+        for l in 0..option_stride {
+            let Some(option) = option_table[row + l] else {
+                continue;
+            };
+            if option.arrival != arrival {
+                continue;
+            }
+            let take = match best_option {
+                None => true,
+                Some(prev) => {
+                    option.ships > prev.ships
+                        || (option.ships == prev.ships && option.launch_offset < prev.launch_offset)
+                }
+            };
+            if take {
+                best_option = Some(option);
+            }
+        }
+        if let Some(option) = best_option {
+            out.push(option);
+        }
+    }
+}
+
 fn collect_source_candidates(
     world: &WorldState,
     model: &HellburnerModel,
     target: &Planet,
     plan: &PlanState,
     ctx: &TargetContext,
+    owner: i64,
     out: &mut Vec<i64>,
     option_table: &mut Vec<Option<SourceOption>>,
 ) {
@@ -877,10 +985,13 @@ fn collect_source_candidates(
             break;
         }
         let src = *world.planet(src_id);
+        if src.owner != owner {
+            continue;
+        }
         let mut row = Vec::with_capacity(option_stride);
         let mut has_option = false;
         for launch_offset in 0..=OFFSET_LOOKAHEAD {
-            let ships = plan.ships_available_at(world, &src, launch_offset);
+            let ships = plan.ships_available_at(world, &src, owner, launch_offset);
             let option = if ships > 0 {
                 model
                     .plan_shot(src_id, target.id, ships, launch_offset)
@@ -903,6 +1014,124 @@ fn collect_source_candidates(
         out.push(src_id);
         option_table.extend(row);
     }
+}
+
+fn collect_enemy_counter_options(
+    world: &WorldState,
+    model: &HellburnerModel,
+    target: &Planet,
+    plan: &PlanState,
+    ctx: &TargetContext,
+) -> Vec<OwnerSourceOptions> {
+    let mut owners: Vec<i64> = ctx
+        .origins
+        .iter()
+        .map(|(sid, _)| world.planet(*sid).owner)
+        .filter(|&owner| owner != -1 && owner != world.player)
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+
+    let mut out = Vec::with_capacity(owners.len());
+    for owner in owners {
+        let mut candidates = Vec::new();
+        let mut option_table = Vec::new();
+        collect_source_candidates(
+            world,
+            model,
+            target,
+            plan,
+            ctx,
+            owner,
+            &mut candidates,
+            &mut option_table,
+        );
+        if !candidates.is_empty() {
+            out.push(OwnerSourceOptions {
+                owner,
+                source_count: candidates.len(),
+                option_table,
+            });
+        }
+    }
+    out
+}
+
+fn enemy_can_recapture_after(
+    world: &WorldState,
+    target: &Planet,
+    friendly_trial: &[ArrivalEvent],
+    fixed_arrivals: &[ArrivalEvent],
+    prefix_baseline: &PlanetTimeline,
+    expiry: Option<i64>,
+    our_arrival: i64,
+    enemy_options: &[OwnerSourceOptions],
+    scratch: &mut CounterScratch,
+) -> bool {
+    if enemy_options.is_empty() || our_arrival >= prefix_baseline.horizon {
+        return false;
+    }
+
+    for options in enemy_options {
+        for arrival in (our_arrival + 1)..=prefix_baseline.horizon {
+            collect_bucket_options_for_arrival(
+                options.source_count,
+                &options.option_table,
+                arrival,
+                &mut scratch.bucket_options,
+            );
+            let bucket_len = scratch.bucket_options.len();
+            if bucket_len == 0 {
+                continue;
+            }
+
+            for mask in 1u32..(1u32 << bucket_len) {
+                if mask.count_ones() as usize > world.config.max_sources {
+                    continue;
+                }
+
+                scratch.trial.clear();
+                for i in 0..bucket_len {
+                    if mask & (1u32 << i) == 0 {
+                        continue;
+                    }
+                    let option = scratch.bucket_options[i];
+                    scratch.trial.push(ArrivalEvent {
+                        turns: option.arrival,
+                        owner: options.owner,
+                        ships: option.ships,
+                    });
+                }
+
+                let start_turn = friendly_trial
+                    .iter()
+                    .chain(scratch.trial.iter())
+                    .map(|e| e.turns.max(1))
+                    .min()
+                    .unwrap_or(1);
+                scratch.merged_scratch.clear();
+                scratch.merged_scratch.extend_from_slice(fixed_arrivals);
+                scratch.merged_scratch.extend_from_slice(friendly_trial);
+                scratch.merged_scratch.extend_from_slice(&scratch.trial);
+                simulate_checkpoint_into(
+                    target,
+                    prefix_baseline,
+                    start_turn,
+                    scratch.merged_scratch.as_slice(),
+                    expiry,
+                    &mut scratch.owner_buf,
+                    &mut scratch.ships_buf,
+                    &mut scratch.by_turn_buf,
+                );
+
+                if scratch.owner_buf[arrival as usize] == options.owner {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 // ── target evaluation ────────────────────────────────────────────────────
@@ -968,7 +1197,7 @@ fn evaluate_target(
     }
 
     // Source/edge inputs shared across the exact-arrival bucket search.
-    let ctx = target_context(world, model, target);
+    let ctx = target_context(model, target);
 
     let win = evaluate_frontline_strategy(world, model, target, plan, &ctx, scratch)?;
     Some((win.score, win))

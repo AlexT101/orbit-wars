@@ -34,6 +34,9 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450]; // Game steps 
 // Turn rules
 pub const ROTATION_LOOK_AHEAD_TURNS: i64 = 10; // Number of turns to look ahead when estimating future position of planets
 pub const OFFSET_LOOKAHEAD: i64 = 15; // Max per-source launch delay considered by attack planning and reinforcement hold checks. Offset 0 emits now; delayed attack offsets become reservations so later choices cannot spend those ships.
+pub const REINFORCEMENT_PRESSURE_TURNS: i64 = 20; // Enemy planets within this many turns contribute to reinforcement pressure.
+pub const REINFORCEMENT_PRESSURE_DECAY: f64 = 0.5; // Enemy pressure multiplier at REINFORCEMENT_PRESSURE_TURNS; turns 0/1 contribute fully.
+pub const FRONTIER_PRESSURE_RATIO: f64 = 7.0 / 5.0; // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 
