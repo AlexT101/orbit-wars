@@ -33,9 +33,7 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450]; // Game steps 
 
 // Turn rules
 pub const ROTATION_LOOK_AHEAD_TURNS: i64 = 10; // Number of turns to look ahead when estimating future position of planets
-pub const OFFSET_LOOKAHEAD: i64 = 5; // Max base launch delay swept per target. Offset 0 emits now; winning delayed offsets become reservations so later choices cannot spend those ships.
-pub const MAX_COORD_DELAY: i64 = 5; // Max extra launch delay a source may add beyond the subset's base offset while trying to coordinate arrivals near the subset's natural latest arrival.
-pub const A_S_LOOKAHEAD: i64 = 3; // Max turns past the natural latest arrival that coordinated schedules may target, letting delayed sources grow extra production before launch.
+pub const OFFSET_LOOKAHEAD: i64 = 15; // Max per-source launch delay considered by attack planning and reinforcement hold checks. Offset 0 emits now; delayed attack offsets become reservations so later choices cannot spend those ships.
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 

@@ -22,9 +22,7 @@ use std::cell::RefCell;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::cache::{AimCacheVerdict, InvariantVerdict};
-use crate::constants::{
-    A_S_LOOKAHEAD, MAX_COORD_DELAY, OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS,
-};
+use crate::constants::{OFFSET_LOOKAHEAD, ROTATION_LOOK_AHEAD_TURNS};
 use crate::engine::{MoveAction, Planet};
 use crate::helpers::{
     aim_ignoring_comets, aim_with_prediction, available_at_timeline, dist,
@@ -522,7 +520,9 @@ struct FrontlineWin {
 /// `simulate_checkpoint_into`) before use.
 #[derive(Default)]
 struct FrontlineScratch {
-    candidates: Vec<SourceCandidate>,
+    candidates: Vec<i64>,
+    option_table: Vec<Option<SourceOption>>,
+    bucket_options: Vec<SourceOption>,
     plan_orders: Vec<PlannedOrder>,
     trial: Vec<ArrivalEvent>,
     fixed_arrivals: Vec<ArrivalEvent>,
@@ -530,13 +530,11 @@ struct FrontlineScratch {
     owner_buf: Vec<i64>,
     ships_buf: Vec<i64>,
     by_turn_buf: Vec<Vec<ArrivalEvent>>,
-    delay_table: Vec<Option<(i64, f64, i64)>>,
 }
 
-/// Per-target, offset-independent inputs to the frontline subset search,
-/// computed once per target and shared across the offset sweep. Both fields are
-/// turn-constant (owner assignments and the in-flight ledger don't change within
-/// a planning turn), so recomputing them per offset was pure waste.
+/// Per-target inputs to the frontline subset search. Source ownership and graph
+/// edges are turn-constant within a planning turn, so they are computed once per
+/// target and shared across the exact-arrival bucket search.
 struct TargetContext {
     /// Owned inbound sources of the target, distance-sorted (nearest first).
     origins: Vec<(i64, f64)>,
@@ -557,44 +555,39 @@ fn target_context(world: &WorldState, model: &HellburnerModel, target: &Planet) 
     TargetContext { origins }
 }
 
-/// Offset-aware frontline assembly. `offset == 0` is "launch this turn" —
-/// those orders are what `plan` actually emits. For `offset > 0`,
-/// source/target/obstacle positions are evaluated at the future launch turn
-/// via `plan_shot(..., offset)` and arrival times in the trial timeline are
-/// shifted by `offset` so the ownership check stays correct.
-///
-/// Source ship-availability is computed at the evaluated launch `offset`,
-/// while the δ-sweep keeps urgency comparisons focused on geometry shifts.
+/// Frontline assembly via exact-arrival buckets. For each candidate source we
+/// precompute absolute launch-offset options (`0..=OFFSET_LOOKAHEAD`), then only
+/// evaluate attacks whose selected sources arrive on the same turn. Orders with
+/// `effective_offset == 0` are emitted this turn; delayed orders are
+/// reservations that later greedy choices cannot spend.
 fn evaluate_frontline_strategy(
     world: &WorldState,
     model: &HellburnerModel,
     target: &Planet,
     plan: &PlanState,
-    offset: i64,
     ctx: &TargetContext,
     scratch: &mut FrontlineScratch,
 ) -> Option<FrontlineWin> {
-    // ── 1. Per-source candidate baseline (all 2^N subsets share these). ──
+    // ── 1. Per-source absolute launch options. ──
     collect_source_candidates(
         world,
         model,
         target,
         plan,
-        offset,
         ctx,
         &mut scratch.candidates,
+        &mut scratch.option_table,
     );
     if scratch.candidates.is_empty() {
         return None;
     }
     let n = scratch.candidates.len();
+    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
 
-    // ── 2. Enumerate non-empty source subsets under coordinated arrivals. ──
-    //       A_S is the subset's max natural arrival. For each cluster target
-    //       A_S + k, every source picks the latest feasible delayed arrival at
-    //       or before the cluster target, presenting a combined force the
-    //       defender can't split cleanly. Per-source delay search is
-    //       cache-friendly (small δ scan).
+    // ── 2. Enumerate exact-arrival buckets. ──
+    //       Each bucket contains at most one option per source for that arrival
+    //       turn, so every simulated attack lands as a coordinated same-turn
+    //       force.
     let mut best_score = f64::NEG_INFINITY;
     let mut best_ships = i64::MAX;
     let mut best_orders: Vec<PlannedOrder> = Vec::new();
@@ -694,119 +687,68 @@ fn evaluate_frontline_strategy(
         }
     };
 
-    // Precompute per-source delay options once. For each source and delay `d`,
-    // the growth-aware fleet (`ships_max + production·d`, launched at
-    // `offset + d`) yields a `(arrival, angle, ships)` triple that depends only
-    // on the source and `offset` — not on the subset mask or coordination target
-    // — so it's hoisted out of the inner subset scan into this flat row-major
-    // table, indexed `[i*stride + d]`.
-    //
-    // The grown fleet is capped at `ships_available_at(offset + d)`: launching
-    // later still can't field more than the source actually owns at the later
-    // turn, so an enemy arrival shrinking the garrison between `offset` and
-    // `offset + d` bounds the growth (matching the forward-min availability
-    // model rather than reintroducing the old point-read assumption).
-    let delay_stride = (MAX_COORD_DELAY + A_S_LOOKAHEAD + 1) as usize;
-    scratch.delay_table.clear();
-    for i in 0..n {
-        let (cid, c_ships_max, c_production) = {
-            let c = &scratch.candidates[i];
-            (c.id, c.ships_max, c.production)
-        };
-        let src = *world.planet(cid);
-        for d in 0..(delay_stride as i64) {
-            let cap = plan.ships_available_at(world, &src, offset + d);
-            let ships_try = (c_ships_max + c_production * d).min(cap);
-            let entry = if ships_try > 0 {
-                model
-                    .plan_shot(cid, target.id, ships_try, offset + d)
-                    .map(|(a, t, _, _, _)| ((offset + d + t).max(1), a, ships_try))
-            } else {
-                None
-            };
-            scratch.delay_table.push(entry);
+    for arrival in 1..=horizon {
+        scratch.bucket_options.clear();
+        for i in 0..n {
+            let row = i * option_stride;
+            let mut best_option: Option<SourceOption> = None;
+            for l in 0..option_stride {
+                let Some(option) = scratch.option_table[row + l] else {
+                    continue;
+                };
+                if option.arrival != arrival {
+                    continue;
+                }
+                let take = match best_option {
+                    None => true,
+                    Some(prev) => {
+                        option.ships > prev.ships
+                            || (option.ships == prev.ships
+                                && option.launch_offset < prev.launch_offset)
+                    }
+                };
+                if take {
+                    best_option = Some(option);
+                }
+            }
+            if let Some(option) = best_option {
+                scratch.bucket_options.push(option);
+            }
         }
-    }
 
-    for mask in 1u32..(1u32 << n) {
-        if mask.count_ones() as usize > world.config.max_sources {
+        let bucket_len = scratch.bucket_options.len();
+        if bucket_len == 0 {
             continue;
         }
 
-        let mut a_s: i64 = 0;
-        for i in 0..n {
-            if mask & (1u32 << i) == 0 {
+        for mask in 1u32..(1u32 << bucket_len) {
+            if mask.count_ones() as usize > world.config.max_sources {
                 continue;
             }
-            a_s = a_s.max(scratch.candidates[i].arrival);
-        }
 
-        // ── Coordinated cluster at A_S + k, k in 0..=A_S_LOOKAHEAD.
-        //   k = 0 mirrors the original "land together at the natural max
-        //     arrival" coordination.
-        //   k > 0 pushes the cluster further out so slow-growing sources can
-        //     accumulate `production·d` extra ships before launch (growth-
-        //     aware). Score-wise this is only attractive when the heavier fleet
-        //     is what flips the trial timeline; otherwise k = 0 tends to win.
-        for k in 0..=A_S_LOOKAHEAD {
-            let target_a_s = a_s + k;
-            let max_delay = MAX_COORD_DELAY + k;
             scratch.plan_orders.clear();
             scratch.trial.clear();
             let mut ships_total: i64 = 0;
-            let mut max_arrival_b: i64 = 0;
-            let mut feasible = true;
-            for i in 0..n {
+            for i in 0..bucket_len {
                 if mask & (1u32 << i) == 0 {
                     continue;
                 }
-                let (c_id, c_angle, c_ships_max) = {
-                    let c = &scratch.candidates[i];
-                    (c.id, c.angle, c.ships_max)
-                };
-                let mut sel_d: i64 = -1;
-                let mut sel_arr: i64 = -1;
-                let mut sel_ang: f64 = c_angle;
-                let mut sel_ships: i64 = c_ships_max;
-                // Pick the latest arrival ≤ target_a_s within the delay budget
-                // from the precomputed table (ties resolve to the smallest `d`,
-                // matching the original `arr > sel_arr` strict comparison).
-                let row = i * delay_stride;
-                for d in 0..=max_delay {
-                    let Some((arr, a, ships_try)) = scratch.delay_table[row + d as usize] else {
-                        continue;
-                    };
-                    if arr <= target_a_s && arr > sel_arr {
-                        sel_d = d;
-                        sel_arr = arr;
-                        sel_ang = a;
-                        sel_ships = ships_try;
-                    }
-                }
-                if sel_d < 0 {
-                    feasible = false;
-                    break;
-                }
-                if sel_arr > max_arrival_b {
-                    max_arrival_b = sel_arr;
-                }
+                let option = scratch.bucket_options[i];
                 scratch.plan_orders.push(PlannedOrder {
-                    src_id: c_id,
-                    angle: sel_ang,
-                    ships: sel_ships,
-                    arrival: sel_arr,
-                    effective_offset: offset + sel_d,
+                    src_id: option.src_id,
+                    angle: option.angle,
+                    ships: option.ships,
+                    arrival: option.arrival,
+                    effective_offset: option.launch_offset,
                 });
                 scratch.trial.push(ArrivalEvent {
-                    turns: sel_arr,
+                    turns: option.arrival,
                     owner: world.player,
-                    ships: sel_ships,
+                    ships: option.ships,
                 });
-                ships_total += sel_ships;
+                ships_total += option.ships;
             }
-            if !feasible {
-                continue;
-            }
+
             let (final_owner_b, start_turn_b) = run_trial(
                 &scratch.trial,
                 &scratch.fixed_arrivals,
@@ -827,7 +769,7 @@ fn evaluate_frontline_strategy(
                 );
                 consider(
                     &scratch.plan_orders,
-                    max_arrival_b,
+                    arrival,
                     ships_total,
                     score_b,
                     &mut best_score,
@@ -849,19 +791,13 @@ fn evaluate_frontline_strategy(
     })
 }
 
-/// Per-source baseline for the subset enumeration: the maximum ships this
-/// source is willing to commit to `target` at launch `offset`, plus the
-/// shot's angle and arrival turn. Sources unable to contribute (insufficient
-/// ships or blocked shot) are filtered out entirely so the 2^N loop only
-/// enumerates real options.
-struct SourceCandidate {
-    id: i64,
+#[derive(Clone, Copy)]
+struct SourceOption {
+    src_id: i64,
+    launch_offset: i64,
     angle: f64,
-    arrival: i64,   // turns from current step until arrival
-    ships_max: i64, // ships willing to send at base `offset`
-    /// Production rate; used by the coordinated schedule to grow `ships_max`
-    /// when this source delays beyond its natural arrival.
-    production: i64,
+    arrival: i64,
+    ships: i64,
 }
 
 fn collect_source_candidates(
@@ -869,11 +805,13 @@ fn collect_source_candidates(
     model: &HellburnerModel,
     target: &Planet,
     plan: &PlanState,
-    offset: i64,
     ctx: &TargetContext,
-    out: &mut Vec<SourceCandidate>,
+    out: &mut Vec<i64>,
+    option_table: &mut Vec<Option<SourceOption>>,
 ) {
     out.clear();
+    option_table.clear();
+    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
     for &(src_id, _travel) in &ctx.origins {
         // Cap the candidate-search width: `origins` is distance-sorted (nearest
         // first), so once we've collected enough viable sources we stop —
@@ -883,26 +821,31 @@ fn collect_source_candidates(
             break;
         }
         let src = *world.planet(src_id);
-        // Growth-aware: at launch offset the source will have accumulated
-        // `production·offset` extra ships on top of the current pool.
-        let available = plan.ships_available_at(world, &src, offset);
-        if available == 0 {
+        let mut row = Vec::with_capacity(option_stride);
+        let mut has_option = false;
+        for launch_offset in 0..=OFFSET_LOOKAHEAD {
+            let ships = plan.ships_available_at(world, &src, launch_offset);
+            let option = if ships > 0 {
+                model
+                    .plan_shot(src_id, target.id, ships, launch_offset)
+                    .map(|(angle, turns, _, _, _)| SourceOption {
+                        src_id,
+                        launch_offset,
+                        angle,
+                        arrival: (launch_offset + turns).max(1),
+                        ships,
+                    })
+            } else {
+                None
+            };
+            has_option |= option.is_some();
+            row.push(option);
+        }
+        if !has_option {
             continue;
         }
-        let ships_to_send = available;
-        let Some((angle, turns, _, _, _)) =
-            model.plan_shot(src_id, target.id, ships_to_send, offset)
-        else {
-            continue;
-        };
-        let arrival = (offset + turns).max(1);
-        out.push(SourceCandidate {
-            id: src_id,
-            angle,
-            arrival,
-            ships_max: ships_to_send,
-            production: src.production,
-        });
+        out.push(src_id);
+        option_table.extend(row);
     }
 }
 
@@ -936,12 +879,12 @@ impl SelectionStrategy {
     }
 }
 
-/// Best `(score, winning commitment)` for a single target across the launch-
-/// offset sweep, or `None` when the target is already won by baseline+planned
-/// commitments or no offset yields a capture. Strategy-independent: the
-/// selection key that ranks targets against each other is applied by the caller
-/// ([`run_strategy`]), so this result can be cached and reused across greedy
-/// iterations for any target whose plan inputs haven't changed.
+/// Best `(score, winning commitment)` for a single target, or `None` when the
+/// target is already won by baseline+planned commitments or no exact-arrival
+/// bucket yields a capture. Strategy-independent: the selection key that ranks
+/// targets against each other is applied by the caller ([`run_strategy`]), so
+/// this result can be cached and reused across greedy iterations for any target
+/// whose plan inputs haven't changed.
 fn evaluate_target(
     world: &WorldState,
     model: &HellburnerModel,
@@ -968,29 +911,11 @@ fn evaluate_target(
         return None;
     }
 
-    // Offset-independent inputs shared across the offset sweep below.
+    // Source/edge inputs shared across the exact-arrival bucket search.
     let ctx = target_context(world, model, target);
 
-    // Sweep offsets and keep the highest-scoring commitment. Acting now
-    // (offset 0) competes head-to-head against waiting (offset > 0): whichever
-    // offset yields the better timeline-delta score wins. Delayed wins return
-    // `effective_offset > 0` orders, which `run_strategy` commits as
-    // reservations (no emission this turn).
-    let mut best_for_target: Option<(f64, FrontlineWin)> = None;
-    for delta in 0..=OFFSET_LOOKAHEAD {
-        let Some(win) =
-            evaluate_frontline_strategy(world, model, target, plan, delta, &ctx, scratch)
-        else {
-            continue;
-        };
-        let s = win.score;
-        match &best_for_target {
-            None => best_for_target = Some((s, win)),
-            Some((bs, _)) if s > *bs => best_for_target = Some((s, win)),
-            _ => {}
-        }
-    }
-    best_for_target
+    let win = evaluate_frontline_strategy(world, model, target, plan, &ctx, scratch)?;
+    Some((win.score, win))
 }
 
 // ── send_reinforcements ──────────────────────────────────────────────────
