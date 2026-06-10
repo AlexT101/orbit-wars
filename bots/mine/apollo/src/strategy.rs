@@ -12,7 +12,7 @@
 //!
 //! Hellburner-specific data we build here:
 //!   * Proximity graph (`Config::max_distance`, `ROTATION_LOOK_AHEAD_TURNS=10`).
-//!   * `reinforcement_target` per owned planet (frontline BFS).
+//!   * `reinforcement_target` per owned planet (pressure-weighted BFS).
 //!   * Per-turn `PlanState` (spent ships + planned commitments).
 
 #![allow(dead_code)]
@@ -29,6 +29,8 @@ use crate::helpers::{
     simulate_checkpoint_into, simulate_planet_timeline, AimResult, ArrivalEvent, PlanetTimeline,
 };
 use crate::world::WorldState;
+
+const REINFORCEMENT_PRESSURE_TURNS: i64 = 15;
 
 pub struct HellburnerModel<'a> {
     pub state: &'a WorldState<'a>,
@@ -99,22 +101,16 @@ impl<'a> HellburnerModel<'a> {
             }
         }
 
-        let reinforcement_target = build_reinforcement_targets(
-            state,
-            &non_comet_ids,
-            &inbound_edges,
-            &outbound_edges,
-            player,
-        );
-
-        Self {
+        let mut model = Self {
             state,
             non_comet_ids,
             inbound_edges,
             outbound_edges,
-            reinforcement_target,
+            reinforcement_target: HashMap::default(),
             shot_cache: RefCell::new(HashMap::default()),
-        }
+        };
+        model.reinforcement_target = build_reinforcement_targets(state, &model, player);
+        model
     }
 
     /// Cached aim with an optional future launch offset.
@@ -224,89 +220,149 @@ impl<'a> HellburnerModel<'a> {
 
 fn build_reinforcement_targets(
     state: &WorldState,
-    non_comet_ids: &HashSet<i64>,
-    inbound: &HashMap<i64, Vec<(i64, f64)>>,
-    outbound: &HashMap<i64, Vec<(i64, f64)>>,
+    model: &HellburnerModel,
     player: i64,
 ) -> HashMap<i64, i64> {
-    let mut front_line: HashSet<i64> = HashSet::default();
+    let pressure = reinforcement_pressure(state, model);
+    let mut best: HashMap<i64, ReinforcementRoute> = HashMap::default();
+    let mut queue: Vec<i64> = Vec::new();
+
+    // High-pressure owned planets are the sinks. The BFS walks backward through
+    // owned edges, preserving the first hop each source should use.
     for p in &state.my_planets {
-        if !non_comet_ids.contains(&p.id) {
+        if !model.non_comet_ids.contains(&p.id) {
             continue;
         }
-        let pid = p.id;
-        let has_outsider = inbound[&pid]
-            .iter()
-            .any(|(sid, _)| state.planet(*sid).owner != player)
-            || outbound[&pid]
-                .iter()
-                .any(|(did, _)| state.planet(*did).owner != player);
-        if has_outsider {
-            front_line.insert(pid);
+        let sink_pressure = pressure.get(&p.id).copied().unwrap_or(0);
+        if sink_pressure <= 0 {
+            continue;
         }
+        best.insert(
+            p.id,
+            ReinforcementRoute {
+                sink_pressure,
+                hops: 0,
+                next_hop: p.id,
+                sink_id: p.id,
+            },
+        );
+        queue.push(p.id);
     }
 
-    // BFS hop-distance back through owned-planet edges; frontline are sinks.
-    let mut hops: HashMap<i64, i64> = HashMap::default();
-    let mut queue: Vec<i64> = Vec::new();
-    for &fid in &front_line {
-        hops.insert(fid, 0);
-        queue.push(fid);
-    }
     let mut head = 0;
     while head < queue.len() {
         let node = queue[head];
         head += 1;
-        let dh = hops[&node];
-        for (sid, _) in &inbound[&node] {
-            if state.planet(*sid).owner != player || hops.contains_key(sid) {
+        let Some(route) = best.get(&node).copied() else {
+            continue;
+        };
+        for (sid, _) in &model.inbound_edges[&node] {
+            if !model.non_comet_ids.contains(sid) || state.planet(*sid).owner != player {
                 continue;
             }
-            hops.insert(*sid, dh + 1);
-            queue.push(*sid);
+            let candidate = ReinforcementRoute {
+                sink_pressure: route.sink_pressure,
+                hops: route.hops + 1,
+                next_hop: node,
+                sink_id: route.sink_id,
+            };
+            if best
+                .get(sid)
+                .map(|current| reinforcement_route_is_better(candidate, *current))
+                .unwrap_or(true)
+            {
+                best.insert(*sid, candidate);
+                queue.push(*sid);
+            }
         }
     }
 
     let mut out: HashMap<i64, i64> = HashMap::default();
     for p in &state.my_planets {
-        if !non_comet_ids.contains(&p.id) || front_line.contains(&p.id) {
+        if !model.non_comet_ids.contains(&p.id) {
             continue;
         }
-        let mut direct: Vec<i64> = outbound[&p.id]
-            .iter()
-            .filter_map(|(did, _)| {
-                if front_line.contains(did) {
-                    Some(*did)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if !direct.is_empty() {
-            direct.sort_by_key(|d| state.planet(*d).ships);
-            out.insert(p.id, direct[0]);
+        let own_pressure = pressure.get(&p.id).copied().unwrap_or(0);
+        let Some(route) = best.get(&p.id).copied() else {
             continue;
+        };
+        if route.next_hop != p.id && route.sink_pressure > own_pressure {
+            out.insert(p.id, route.next_hop);
         }
-        let mut reachable: Vec<i64> = outbound[&p.id]
-            .iter()
-            .filter_map(|(did, _)| {
-                if state.planet(*did).owner == player
-                    && !front_line.contains(did)
-                    && hops.contains_key(did)
-                {
-                    Some(*did)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if reachable.is_empty() {
-            continue;
-        }
-        reachable.sort_by_key(|d| (hops[d], state.planet(*d).ships));
-        out.insert(p.id, reachable[0]);
     }
     out
+}
+
+#[derive(Clone, Copy)]
+struct ReinforcementRoute {
+    sink_pressure: i64,
+    hops: i64,
+    next_hop: i64,
+    sink_id: i64,
+}
+
+fn reinforcement_route_is_better(
+    candidate: ReinforcementRoute,
+    current: ReinforcementRoute,
+) -> bool {
+    candidate.sink_pressure > current.sink_pressure
+        || (candidate.sink_pressure == current.sink_pressure
+            && (candidate.hops < current.hops
+                || (candidate.hops == current.hops
+                    && (candidate.sink_id, candidate.next_hop)
+                        < (current.sink_id, current.next_hop))))
+}
+
+fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMap<i64, i64> {
+    let mut pressure: HashMap<i64, i64> = HashMap::default();
+    for target in &state.my_planets {
+        if !model.non_comet_ids.contains(&target.id) {
+            continue;
+        }
+        let mut total = 0;
+        for enemy in &state.enemy_planets {
+            if !model.non_comet_ids.contains(&enemy.id) {
+                continue;
+            }
+            let ships = enemy_available_to_launch(state, enemy.id);
+            if ships <= 0 {
+                continue;
+            }
+            let Some((_, turns, _, _, _)) = model.plan_shot(enemy.id, target.id, ships, 0) else {
+                continue;
+            };
+            if turns.max(1) <= REINFORCEMENT_PRESSURE_TURNS {
+                total += ships;
+            }
+        }
+        pressure.insert(target.id, total);
+    }
+    pressure
+}
+
+fn enemy_available_to_launch(state: &WorldState, planet_id: i64) -> i64 {
+    let planet = state.planet(planet_id);
+    if planet.owner == state.player || planet.owner == -1 {
+        return 0;
+    }
+    let enemy_owner = planet.owner;
+    match state.timeline_cache.baseline(planet_id) {
+        Some(timeline) => {
+            let mut available = i64::MAX;
+            for t in 0..=timeline.horizon as usize {
+                if timeline.owner_at[t] != enemy_owner {
+                    break;
+                }
+                available = available.min(timeline.ships_at[t].max(0));
+            }
+            if available == i64::MAX {
+                0
+            } else {
+                available.max(0)
+            }
+        }
+        None => planet.ships.max(0),
+    }
 }
 
 // ── PlanState: turn-local commitments ────────────────────────────────────
@@ -930,9 +986,9 @@ fn send_reinforcements(
         if !model.non_comet_ids.contains(&p.id) {
             continue;
         }
-        // Only non-frontline planets get a reinforcement target (frontline
-        // planets — those with a non-player neighbor — are excluded when the
-        // target map is built), so a source here never has enemy graph edges.
+        // The pressure-BFS target map points to the next owned hop on a route
+        // toward a strictly higher-pressure planet. Frontier planets can appear
+        // here when they are not themselves the highest-pressure local need.
         let Some(target_id) = model.reinforcement_target.get(&p.id).copied() else {
             continue;
         };
