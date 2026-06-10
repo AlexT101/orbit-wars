@@ -38,6 +38,8 @@ SEND_FRACTIONS = (0.50, 1.00)
 DISCRETE_ACTION_DIM = 1 + PLANET_SLOTS * PLANET_SLOTS * len(SEND_FRACTIONS)
 ACTION_DIM = DISCRETE_ACTION_DIM
 
+LEGACY_TOKEN_DIM = 11
+
 
 @dataclass(frozen=True)
 class EncodedObs:
@@ -91,30 +93,83 @@ def policy_action_mask(feat: dict[str, Any]) -> np.ndarray:
     return out
 
 
+def _shape_from_feat(feat: dict[str, Any], key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    raw = feat.get(f"{key}_shape")
+    if raw is None:
+        return default
+    return tuple(int(x) for x in raw)
+
+
+def _production_onehot(obs: dict[str, Any], feat: dict[str, Any], frames: int) -> np.ndarray:
+    by_id: dict[int, int] = {}
+    for planet in obs.get("planets", []) or []:
+        if len(planet) >= 7:
+            by_id[int(planet[0])] = int(planet[6])
+    planet_ids = [int(x) for x in feat.get("planet_ids", [])]
+    out = np.zeros((frames, PLANET_SLOTS, 5), dtype=np.float32)
+    for slot, planet_id in enumerate(planet_ids[:PLANET_SLOTS]):
+        prod = by_id.get(planet_id)
+        if prod is None:
+            continue
+        idx = max(0, min(4, prod - 1))
+        out[:, slot, idx] = 1.0
+    return out
+
+
+def _tokens_from_feat(obs: dict[str, Any], feat: dict[str, Any]) -> np.ndarray:
+    raw_shape = _shape_from_feat(feat, "tokens", TOKEN_SHAPE)
+    tokens = feat["tokens"].reshape(raw_shape).astype(np.float32)
+    if raw_shape == TOKEN_SHAPE:
+        return tokens
+    if raw_shape == (TOKEN_SHAPE[0], TOKEN_SHAPE[1], LEGACY_TOKEN_DIM):
+        upgraded = np.zeros(TOKEN_SHAPE, dtype=np.float32)
+        upgraded[..., :5] = tokens[..., :5]
+        upgraded[..., 5:10] = _production_onehot(obs, feat, raw_shape[0])
+        upgraded[..., 10:] = tokens[..., 5:10]
+        return upgraded
+    raise ValueError(f"unexpected token shape {raw_shape}, expected {TOKEN_SHAPE}")
+
+
+def _array_from_feat(feat: dict[str, Any], key: str, shape: tuple[int, ...], dtype) -> np.ndarray:
+    if key not in feat or feat[key] is None:
+        return np.zeros(shape, dtype=dtype)
+    raw_shape = _shape_from_feat(feat, key, shape)
+    value = feat[key].reshape(raw_shape).astype(dtype)
+    if raw_shape == shape:
+        return value
+    raise ValueError(f"unexpected {key} shape {raw_shape}, expected {shape}")
+
+
 def encode_features(obs: dict[str, Any], player: int) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     feat = _rust_encode_obs(obs, player)
+    tokens = _tokens_from_feat(obs, feat)
     model_obs = {
         "globals": feat["globals"].astype(np.float32),
-        "tokens": feat["tokens"].reshape(TOKEN_SHAPE).astype(np.float32),
-        "presence": feat["presence"].reshape(PRESENCE_SHAPE).astype(np.float32),
-        "turns": feat["turns"].reshape(TURN_SHAPE).astype(np.float32),
-        "reachable_mask": feat["reachable_mask"].reshape(TURN_SHAPE).astype(np.uint8),
-        "pair_outcome_features": feat["pair_outcome_features"].reshape(PAIR_OUTCOME_SHAPE).astype(np.float32),
-        "planet_timeline_features": feat["planet_timeline_features"]
-        .reshape(PLANET_TIMELINE_SHAPE)
-        .astype(np.float32),
+        "tokens": tokens,
+        "presence": _array_from_feat(feat, "presence", PRESENCE_SHAPE, np.float32),
+        "turns": _array_from_feat(feat, "turns", TURN_SHAPE, np.float32),
+        "reachable_mask": _array_from_feat(feat, "reachable_mask", TURN_SHAPE, np.uint8),
+        "pair_outcome_features": _array_from_feat(
+            feat, "pair_outcome_features", PAIR_OUTCOME_SHAPE, np.float32
+        ),
+        "planet_timeline_features": _array_from_feat(
+            feat, "planet_timeline_features", PLANET_TIMELINE_SHAPE, np.float32
+        ),
         "valid_actions_mask": policy_action_mask(feat),
     }
     return model_obs, feat
 
 
-def encoded_from_feat(feat: dict[str, Any]) -> EncodedObs:
-    tokens = feat["tokens"].reshape(TOKEN_SHAPE).astype(np.float32)
-    presence = feat["presence"].reshape(PRESENCE_SHAPE).astype(np.float32)
-    turns = feat["turns"].reshape(TURN_SHAPE).astype(np.float32)
-    reachable = feat["reachable_mask"].reshape(TURN_SHAPE).astype(np.uint8)
-    pair_outcome = feat["pair_outcome_features"].reshape(PAIR_OUTCOME_SHAPE).astype(np.float32)
-    timeline = feat["planet_timeline_features"].reshape(PLANET_TIMELINE_SHAPE).astype(np.float32)
+def encoded_from_feat(feat: dict[str, Any], obs: dict[str, Any] | None = None) -> EncodedObs:
+    if obs is None:
+        tokens = feat["tokens"].reshape(TOKEN_SHAPE).astype(np.float32)
+    else:
+        tokens = _tokens_from_feat(obs, feat)
+    presence = _array_from_feat(feat, "presence", PRESENCE_SHAPE, np.float32)
+    turns = _array_from_feat(feat, "turns", TURN_SHAPE, np.float32)
+    reachable = _array_from_feat(feat, "reachable_mask", TURN_SHAPE, np.uint8)
+    pair_outcome = _array_from_feat(feat, "pair_outcome_features", PAIR_OUTCOME_SHAPE, np.float32)
+    timeline = _array_from_feat(feat, "planet_timeline_features", PLANET_TIMELINE_SHAPE, np.float32)
     return EncodedObs(
         planets=tokens[0],
         planet_mask=presence[0],
@@ -132,8 +187,8 @@ def encoded_from_feat(feat: dict[str, Any]) -> EncodedObs:
 def encode_obs(obs: dict[str, Any], player: int | None = None) -> EncodedObs:
     if player is None:
         player = int(obs.get("player", 0))
-    _model_obs, feat = encode_features(obs, player=player)
-    return encoded_from_feat(feat)
+    feat = _rust_encode_obs(obs, player)
+    return encoded_from_feat(feat, obs=obs)
 
 
 def flat_action_mask(feat: dict[str, Any]) -> np.ndarray:

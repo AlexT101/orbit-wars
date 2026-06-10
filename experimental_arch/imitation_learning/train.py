@@ -6,7 +6,7 @@ import random
 import sys
 import time
 from bisect import bisect_right
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import asdict, dataclass
 from multiprocessing.connection import Listener
 from pathlib import Path
@@ -34,7 +34,7 @@ from model import build_policy  # noqa: E402
 
 
 DATASET_FORMAT_VERSION = 2
-OSTEO_DATA_DIR = Path("/home/ubuntu/osteo_data")
+OSTEO_DATA_DIR = Path("/home/ubuntu/osteo_data/osteo_data")
 DATASET_PATH = Path(os.environ.get("IL_DATASET_PATH", str(OSTEO_DATA_DIR / "manifest.json"))).expanduser()
 OUT_DIR = Path(os.environ.get("IL_OUT_DIR", str(IL_DIR / "checkpoints" / "osteo_bc_transformer"))).expanduser()
 LATEST_CHECKPOINT = OUT_DIR / "latest.pt"
@@ -44,7 +44,7 @@ DATASET_STATS_JSON = OUT_DIR / "dataset_stats.json"
 
 SEED = 123
 DEVICE = "cuda"
-MODEL = "entity_transformer_temporal"
+MODEL = "entity_transformer_ngpt_action_features"
 HIDDEN = 128
 TRANSFORMER_LAYERS = 3
 TRANSFORMER_HEADS = 4
@@ -59,13 +59,13 @@ CHECKPOINT_TARGET_SECONDS = 15 * 60
 CHECKPOINT_ASSUMED_ROWS_PER_SEC = 3000
 CHECKPOINT_EVERY_STEPS = max(1, round(CHECKPOINT_TARGET_SECONDS * CHECKPOINT_ASSUMED_ROWS_PER_SEC / BATCH_SIZE))
 CHECKPOINT_EVERY_EPOCHS = 1
-LEARNING_RATE = 3.0e-4
+LEARNING_RATE = 1.0e-3
 LR_PLATEAU_FACTOR = 0.5
 LR_PLATEAU_PATIENCE = 2
 MIN_LEARNING_RATE = 1.0e-6
 WEIGHT_DECAY = 1.0e-4
 MAX_GRAD_NORM = 1.0
-VAL_FRACTION = 0.02
+VAL_FRACTION = 0.05
 USE_WANDB = os.environ.get("IL_USE_WANDB", "1").lower() in {"1", "true", "yes", "on"}
 WANDB_PROJECT = "orbit-wars"
 WANDB_RUN_NAME = "osteo-bc-transformer"
@@ -78,6 +78,10 @@ if "IL_EPOCHS" in os.environ:
     EPOCHS = int(os.environ["IL_EPOCHS"])
 if "IL_BATCH_SIZE" in os.environ:
     BATCH_SIZE = int(os.environ["IL_BATCH_SIZE"])
+if "IL_LEARNING_RATE" in os.environ:
+    LEARNING_RATE = float(os.environ["IL_LEARNING_RATE"])
+if "IL_VAL_FRACTION" in os.environ:
+    VAL_FRACTION = float(os.environ["IL_VAL_FRACTION"])
 CHECKPOINT_EVERY_STEPS = max(1, round(CHECKPOINT_TARGET_SECONDS * CHECKPOINT_ASSUMED_ROWS_PER_SEC / BATCH_SIZE))
 if "IL_CHECKPOINT_EVERY_STEPS" in os.environ:
     CHECKPOINT_EVERY_STEPS = int(os.environ["IL_CHECKPOINT_EVERY_STEPS"])
@@ -322,8 +326,43 @@ def resolve_resume_path(cfg: ILConfig) -> Path | None:
             resume_path = IL_DIR / resume_path
         return resume_path
     if cfg.auto_resume and LATEST_CHECKPOINT.exists():
+        if not checkpoint_matches_config(LATEST_CHECKPOINT, cfg):
+            print(f"auto_resume skipped incompatible checkpoint: {LATEST_CHECKPOINT}", flush=True)
+            return None
         return LATEST_CHECKPOINT
     return None
+
+
+def checkpoint_matches_config(path: Path, cfg: ILConfig) -> bool:
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        print(f"auto_resume skipped unreadable checkpoint {path}: {exc}", flush=True)
+        return False
+    old_cfg = ckpt.get("config") or {}
+    old_dataset = Path(str(old_cfg.get("dataset_path", ""))).expanduser()
+    new_dataset = Path(cfg.dataset_path).expanduser()
+    try:
+        old_dataset = old_dataset.resolve()
+    except OSError:
+        pass
+    try:
+        new_dataset = new_dataset.resolve()
+    except OSError:
+        pass
+    comparable = {
+        "dataset_path": str(old_dataset) == str(new_dataset),
+        "action_dim": int(old_cfg.get("action_dim", -1)) == int(cfg.action_dim),
+        "model": old_cfg.get("model") == cfg.model,
+        "hidden": int(old_cfg.get("hidden", -1)) == int(cfg.hidden),
+        "transformer_layers": int(old_cfg.get("transformer_layers", -1)) == int(cfg.transformer_layers),
+        "transformer_heads": int(old_cfg.get("transformer_heads", -1)) == int(cfg.transformer_heads),
+    }
+    if all(comparable.values()):
+        return True
+    mismatch = ", ".join(key for key, ok in comparable.items() if not ok)
+    print(f"auto_resume compatibility mismatch: {mismatch}", flush=True)
+    return False
 
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
@@ -397,7 +436,11 @@ def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
     }
     path = dataset.paths[0]
     with np.load(path, allow_pickle=False) as payload:
-        missing = [key for key in (*expected.keys(), "labels", "player_rank", "our_ship_fraction") if key not in payload]
+        missing = [
+            key
+            for key in (*expected.keys(), "labels", "player_rank", "our_ship_fraction", "send_fractions")
+            if key not in payload
+        ]
         if missing:
             raise ValueError(f"dataset chunk {path} is missing {missing}")
         chunk_version = int(payload["format_version"][0]) if "format_version" in payload else None
@@ -410,6 +453,23 @@ def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
             got = tuple(payload[key].shape[1:])
             if got != tuple(shape):
                 raise ValueError(f"dataset tensor {key!r} has shape tail {got}, expected {shape}")
+        send_fractions = tuple(float(x) for x in payload["send_fractions"])
+        if send_fractions != (0.5, 1.0):
+            raise ValueError(f"dataset send_fractions={send_fractions!r}, expected (0.5, 1.0)")
+        tokens = payload["tokens"]
+        presence = payload["presence"].astype(bool)
+        production_onehot = tokens[..., 5:10]
+        present_prod_sum = production_onehot[presence].sum(axis=-1)
+        if present_prod_sum.size and not np.allclose(present_prod_sum, 1.0):
+            raise ValueError("dataset production features are not one-hot over token columns 5:10")
+        outcome = payload["pair_outcome_features"]
+        half_nonzero = bool(np.any(outcome[:, :, :, 1, :]))
+        all_nonzero = bool(np.any(outcome[:, :, :, 2, :]))
+        if not half_nonzero or not all_nonzero:
+            raise ValueError(
+                "dataset pair_outcome_features must contain nonzero 50% and 100% action slices; "
+                f"got half={half_nonzero} all={all_nonzero}"
+            )
 
 
 def split_chunks(dataset: ChunkedILDataset, val_fraction: float, seed: int) -> tuple[list[int], list[int]]:
@@ -423,6 +483,29 @@ def split_chunks(dataset: ChunkedILDataset, val_fraction: float, seed: int) -> t
     train_chunks = [i for i in range(len(dataset.chunks)) if i not in val_chunks]
     val_chunks = [i for i in range(len(dataset.chunks)) if i in val_chunks]
     return train_chunks, val_chunks
+
+
+def chunk_day_rows(dataset: ChunkedILDataset, chunk_indices: list[int]) -> Counter[str]:
+    days: Counter[str] = Counter()
+    for chunk_index in chunk_indices:
+        path = dataset.paths[chunk_index]
+        with np.load(path, allow_pickle=False) as payload:
+            if "games_json" not in payload:
+                continue
+            for game in json.loads(str(payload["games_json"])):
+                days[str(game.get("day", "unknown"))] += int(game.get("rows", 0))
+    return days
+
+
+def split_day_stats(dataset: ChunkedILDataset, train_chunks: list[int], val_chunks: list[int]) -> dict[str, object]:
+    train_days = chunk_day_rows(dataset, train_chunks)
+    val_days = chunk_day_rows(dataset, val_chunks)
+    return {
+        "train_days": len(train_days),
+        "val_days": len(val_days),
+        "train_day_rows": dict(sorted(train_days.items())),
+        "val_day_rows": dict(sorted(val_days.items())),
+    }
 
 
 def make_loaders(
@@ -467,6 +550,7 @@ def make_loaders(
         "train_fraction": train_rows / max(1, train_rows + val_rows),
         "val_fraction": val_rows / max(1, train_rows + val_rows),
     }
+    split_stats.update(split_day_stats(dataset, train_chunks, val_chunks))
     return train_loader, val_loader, split_stats
 
 
@@ -656,8 +740,10 @@ def main() -> int:
     print(
         f"split train_rows={split_stats['train_rows']} val_rows={split_stats['val_rows']} "
         f"train_chunks={split_stats['train_chunks']} val_chunks={split_stats['val_chunks']} "
-        f"val_fraction={split_stats['val_fraction']:.3f}"
+        f"val_fraction={split_stats['val_fraction']:.3f} "
+        f"train_days={split_stats['train_days']} val_days={split_stats['val_days']}"
     )
+    print(f"val_day_rows={json.dumps(split_stats['val_day_rows'], sort_keys=True)}")
 
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and amp_dtype == torch.float16)
     model = build_policy(cfg.model, cfg.hidden, cfg.transformer_layers, cfg.transformer_heads).to(device)
@@ -820,7 +906,7 @@ def main() -> int:
                     checkpoint_metrics,
                     run,
                 )
-            if cfg.max_train_steps > 0 and epoch_train_steps >= cfg.max_train_steps:
+            if cfg.max_train_steps > 0 and global_step >= cfg.max_train_steps:
                 break
 
         val = evaluate(model, val_loader, device, amp_enabled, amp_dtype, cfg.max_val_batches)
@@ -880,6 +966,8 @@ def main() -> int:
                     "split/val_chunks": row["split_val_chunks"],
                     "split/train_fraction": row["split_train_fraction"],
                     "split/val_fraction": row["split_val_fraction"],
+                    "split/train_days": int(split_stats["train_days"]),
+                    "split/val_days": int(split_stats["val_days"]),
                     "train/rows_per_sec_epoch": row["train_rows_per_sec"],
                     "train/lr_epoch": row["learning_rate"],
                     "train/lr_before_scheduler": row["learning_rate_before_scheduler"],
@@ -924,6 +1012,8 @@ def main() -> int:
                 row,
                 run,
             )
+        if cfg.max_train_steps > 0 and global_step >= cfg.max_train_steps:
+            break
 
     print(f"wrote {LATEST_CHECKPOINT}")
     print(f"best {BEST_CHECKPOINT}")

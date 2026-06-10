@@ -5,9 +5,11 @@ import contextlib
 import importlib.util
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,7 @@ REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train_transformer"
 BOTS_DIR = REPO_ROOT / "bots"
 DEFAULT_CHECKPOINT = IL_DIR / "checkpoints" / "osteo_bc_transformer" / "latest.pt"
+LATEST_CHECKPOINT_ALIASES = {"latest", "latest.pt", "latest-training", "training-latest"}
 
 PLAYERS = 2
 MAX_STEPS = 500
@@ -32,6 +35,7 @@ if str(TRAIN_DIR) not in sys.path:
 
 from features import decode_move, encode_obs  # noqa: E402
 from model import build_policy  # noqa: E402
+from orbit_wars_model import encode_obs as raw_encode_obs  # noqa: E402
 from orbit_wars_engine import OrbitWarsEngine  # noqa: E402
 
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -64,7 +68,7 @@ class CheckpointAgent:
         self.deterministic = deterministic
         self.device = torch.device(device)
 
-        ckpt = torch.load(checkpoint, map_location=self.device, weights_only=False)
+        ckpt = load_checkpoint_with_retry(checkpoint, map_location=self.device)
         config = ckpt.get("config", {})
         self.model_type = config.get("model", "entity_transformer_temporal")
         self.model = build_policy(
@@ -114,6 +118,21 @@ class CheckpointAgent:
         return decode_move(obs, int(action.item()))
 
 
+def validate_live_feature_schema() -> None:
+    engine = OrbitWarsEngine(num_players=PLAYERS)
+    obs = engine.reset(seed=1)["observations"][0]
+    feat = raw_encode_obs(obs, 0)
+    tokens_shape = tuple(int(x) for x in feat.get("tokens_shape", ()))
+    pair_shape = tuple(int(x) for x in feat.get("pair_outcome_features_shape", ()))
+    if tokens_shape != (4, 44, 15) or pair_shape != (44, 44, 3, 4):
+        raise RuntimeError(
+            "live orbit_wars_model feature schema is stale; expected tokens_shape=(4, 44, 15) "
+            "and pair_outcome_features_shape=(44, 44, 3, 4), got "
+            f"tokens_shape={tokens_shape} pair_outcome_features_shape={pair_shape}. "
+            "Rebuild/reinstall experimental_arch/env_model before playing current IL checkpoints."
+        )
+
+
 class PythonAgent:
     def __init__(self, path: Path):
         self.path = path
@@ -149,6 +168,26 @@ def resolve_ref(ref: str | Path) -> Path:
         if candidate.exists():
             return candidate
     return IL_DIR / path
+
+
+def resolve_checkpoint_ref(ref: str | Path) -> Path:
+    if str(ref) in LATEST_CHECKPOINT_ALIASES:
+        return DEFAULT_CHECKPOINT
+    return resolve_ref(ref)
+
+
+def load_checkpoint_with_retry(path: Path, *, map_location: torch.device | str, attempts: int = 5) -> dict:
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return torch.load(path, map_location=map_location, weights_only=False)
+        except Exception as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(0.5 * (attempt + 1))
+    assert last_exc is not None
+    raise RuntimeError(f"failed to load checkpoint after {attempts} attempts: {path}") from last_exc
 
 
 def bot_main(name: str) -> Path:
@@ -193,6 +232,8 @@ def play_game(
     seed: int,
     max_steps: int,
     render_out: Path | None,
+    replay_index: int,
+    replay_total: int,
 ) -> GameResult:
     hero.reset()
     opponent.reset()
@@ -231,9 +272,38 @@ def play_game(
     if render_out is not None:
         assert kenv is not None
         render_out.parent.mkdir(parents=True, exist_ok=True)
-        render_out.write_text(kenv.render(mode="html"), encoding="utf-8")
+        render_out.write_text(
+            add_replay_links(kenv.render(mode="html"), index=replay_index, total=replay_total),
+            encoding="utf-8",
+        )
 
     return GameResult(seed=seed, steps=steps, scores=scores, winner=winner, reward=reward)
+
+
+def add_replay_links(html: str, *, index: int, total: int) -> str:
+    links = []
+    if index > 1:
+        links.append(f'<a href="{index - 1}.html">Previous</a>')
+    links.append(f"<span>Game {index} / {total}</span>")
+    if index < total:
+        links.append(f'<a href="{index + 1}.html">Next</a>')
+    nav = (
+        '<div style="position:fixed;top:12px;right:12px;z-index:999999;'
+        'display:flex;gap:10px;align-items:center;padding:8px 10px;'
+        'background:rgba(0,0,0,0.72);color:#fff;border-radius:6px;'
+        'font:14px system-ui,-apple-system,Segoe UI,sans-serif">'
+        + "".join(
+            item
+            if item.startswith("<span")
+            else item.replace("<a ", '<a style="color:#8fd3ff;text-decoration:none" ')
+            for item in links
+        )
+        + "</div>"
+    )
+    marker = "</body>"
+    if marker in html:
+        return html.replace(marker, nav + marker, 1)
+    return html + nav
 
 
 def windows_link(path: Path) -> str | None:
@@ -271,42 +341,46 @@ def detect_remote_host() -> str:
     return "YOUR_SERVER_HOST"
 
 
-def print_wsl_scp_command(remote_path: Path) -> None:
+def print_wsl_scp_command(remote_paths: list[Path]) -> None:
+    if not remote_paths:
+        return
     remote = f"{os.environ.get('IL_SCP_USER', os.environ.get('USER', 'ubuntu'))}@{detect_remote_host()}"
-    name = remote_path.name
+    dest = remote_paths[0].parent.name or "replays"
+    remote_args = " ".join(f"{remote}:{shlex.quote(str(path))}" for path in remote_paths)
     print("copy_from_pc_wsl:")
     print(
-        f"  scp {remote}:{remote_path} \"$PWD/{name}\" && "
+        f"  mkdir -p \"$PWD/{dest}\" && scp {remote_args} \"$PWD/{dest}/\" && "
         "python3 - <<'PY'\n"
+        "import os\n"
+        "from urllib.parse import quote\n"
         "from pathlib import Path\n"
-        f"p = Path({name!r}).resolve()\n"
+        f"p = Path({str(Path(dest) / remote_paths[0].name)!r}).resolve()\n"
+        "distro = os.environ.get('WSL_DISTRO_NAME') or 'Ubuntu-22.04'\n"
+        "path_part = quote(p.as_posix(), safe='/:')\n"
+        "distro_part = quote(distro, safe='')\n"
         "print('saved:', p)\n"
-        "print('open:', p.as_uri())\n"
+        "print('open:', f'file://wsl.localhost/{distro_part}{path_part}')\n"
         "PY"
     )
 
 
-def safe_name(value: str) -> str:
-    chars = []
-    for ch in value:
-        if ch.isalnum() or ch in ("-", "_", "."):
-            chars.append(ch)
-        else:
-            chars.append("_")
-    name = "".join(chars).strip("._")
-    return name or "opponent"
-
-
-def default_replay_path(checkpoint: Path, opponent: str) -> Path:
-    ckpt_name = "latest" if checkpoint == DEFAULT_CHECKPOINT else checkpoint.stem
-    return IL_DIR / "replays" / f"{safe_name(ckpt_name)}_vs_{safe_name(opponent)}.html"
+def replay_path(out: Path, game_index: int, games: int) -> Path:
+    if out.suffix.lower() == ".html":
+        if games != 1:
+            raise ValueError("--out may be an .html file only when running one game")
+        return out
+    return out / f"{game_index}.html"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play an osteo imitation-learning checkpoint.")
-    parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT), help="IL .pt checkpoint; defaults to latest.pt")
+    parser.add_argument(
+        "--checkpoint",
+        default="latest",
+        help="IL .pt checkpoint, or 'latest' for the latest training checkpoint; defaults to latest",
+    )
     parser.add_argument("--opponent", default="hellburner", help="'self', a bot name like hellburner, a .py agent, or a .pt checkpoint")
-    parser.add_argument("--games", type=int, default=1)
+    parser.add_argument("-n", "--num-games", "--games", dest="games", type=int, default=1, help="number of games to run serially")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
@@ -325,18 +399,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--opponent-deterministic", action="store_true", help="argmax for checkpoint opponents")
     parser.set_defaults(render=True)
-    parser.add_argument("--render", dest="render", action="store_true", help="write an HTML replay for the first game")
+    parser.add_argument("--render", dest="render", action="store_true", help="write numbered HTML replays for all games")
     parser.add_argument("--no-render", dest="render", action="store_false", help="skip HTML replay output")
-    parser.add_argument("--out", type=Path, default=None, help="HTML replay path; defaults to replays/<checkpoint>_vs_<opponent>.html")
+    parser.add_argument("--out", type=Path, default=None, help="replay output directory; defaults to replays/ with 1.html, 2.html, ...")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    checkpoint = resolve_ref(args.checkpoint)
+    if args.games < 1:
+        raise ValueError("--num-games/-n must be at least 1")
+    validate_live_feature_schema()
+    checkpoint = resolve_checkpoint_ref(args.checkpoint)
     if not checkpoint.exists():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
-    out_path = args.out if args.out is not None else default_replay_path(checkpoint, args.opponent)
+    out_path = args.out if args.out is not None else IL_DIR / "replays"
 
     hero = CheckpointAgent(checkpoint, deterministic=args.deterministic, device=args.device)
     opponent = make_agent(
@@ -349,19 +426,22 @@ def main() -> int:
     wins = ties = losses = 0
     total_steps = 0
     score_diffs: list[int] = []
+    rendered_paths: list[Path] = []
     print(f"checkpoint: {checkpoint}")
     print(f"checkpoint_step: {hero.global_step} epoch: {hero.epoch}")
     print(f"opponent: {args.opponent} ({opponent.name})")
     print(f"device: {args.device}")
     print(f"hero_policy: {'argmax' if args.deterministic else 'sample'}")
     for i in range(args.games):
-        render_out = out_path if args.render and i == 0 else None
+        render_out = replay_path(out_path, i + 1, args.games) if args.render else None
         result = play_game(
             hero=hero,
             opponent=opponent,
             seed=args.seed + i,
             max_steps=args.max_steps,
             render_out=render_out,
+            replay_index=i + 1,
+            replay_total=args.games,
         )
         diff = result.scores[0] - result.scores[1]
         score_diffs.append(diff)
@@ -378,8 +458,8 @@ def main() -> int:
             f"result={'win' if result.winner == 0 else 'loss' if result.winner == 1 else 'tie'}"
         )
         if render_out is not None:
+            rendered_paths.append(render_out.resolve())
             print(f"html: {render_out}")
-            print_wsl_scp_command(render_out.resolve())
             link = windows_link(render_out)
             if link:
                 print(f"windows: {link}")
@@ -391,6 +471,8 @@ def main() -> int:
         f"score={(wins + 0.5 * ties) / games:.3f} mean_diff={mean_diff:.2f} "
         f"mean_steps={total_steps / games:.1f}"
     )
+    if rendered_paths:
+        print_wsl_scp_command(rendered_paths)
     return 0
 
 

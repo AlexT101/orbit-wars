@@ -49,6 +49,8 @@ if str(TRAIN_TRANSFORMER) not in sys.path:
 
 from features import decode_move, encode_obs  # noqa: E402
 from model import build_policy  # noqa: E402
+from orbit_wars_engine import OrbitWarsEngine  # noqa: E402
+from orbit_wars_model import encode_obs as raw_encode_obs  # noqa: E402
 
 warnings.filterwarnings("ignore", message="enable_nested_tensor is True.*")
 
@@ -77,8 +79,23 @@ def _load_checkpoint(path: Path, device: torch.device) -> dict:
     raise RuntimeError(f"failed to load IL checkpoint {path}: {last_error}")
 
 
+def _validate_live_feature_schema() -> None:
+    engine = OrbitWarsEngine(num_players=2)
+    obs = engine.reset(seed=1)["observations"][0]
+    feat = raw_encode_obs(obs, 0)
+    tokens_shape = tuple(int(x) for x in feat.get("tokens_shape", ()))
+    pair_shape = tuple(int(x) for x in feat.get("pair_outcome_features_shape", ()))
+    if tokens_shape != (4, 44, 15) or pair_shape != (44, 44, 3, 4):
+        raise RuntimeError(
+            "stale orbit_wars_model feature schema; expected tokens_shape=(4, 44, 15) "
+            "and pair_outcome_features_shape=(44, 44, 3, 4), got "
+            f"tokens_shape={tokens_shape} pair_outcome_features_shape={pair_shape}"
+        )
+
+
 class OsteoILAgent:
     def __init__(self) -> None:
+        _validate_live_feature_schema()
         self.checkpoint_path = _checkpoint_path()
         self.device = _device()
         self.deterministic = _deterministic()

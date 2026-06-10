@@ -1,6 +1,6 @@
 {
   "action_dim": 3873,
-  "created_at": "2026-06-08T03:08:29.501250+00:00",
+  "created_at": "2026-06-09T03:12:53.339916+00:00",
   "db_path": "/home/ec2-user/osteo_data/osteo_dataset.sqlite",
   "feature_shapes_verified": {
     "ACTION_TENSOR_SHAPE": [
@@ -8,21 +8,29 @@
       44,
       3
     ],
+    "PAIR_OUTCOME_SHAPE": [
+      44,
+      44,
+      3,
+      4
+    ],
     "PAIR_TURN_SHAPE": [
       44,
       44,
       3
     ]
   },
-  "format_version": 1,
-  "launch_rows": 8817479,
+  "format_version": 2,
+  "hero_top_n": 20,
+  "launch_rows": 8343257,
   "leaderboard_csv": "/home/ec2-user/osteo_data/orbit-wars-publicleaderboard-2026-06-07T21:58:01.csv",
-  "noop_rows": 3029721,
+  "noop_rows": 2252201,
   "notes_path": "/home/ec2-user/osteo_data/NOTES.md",
-  "processed_replays": 35842,
-  "rows": 11847200,
+  "processed_replays": 34486,
+  "rows": 10595458,
   "send_fractions": [
     0.5,
     1.0
-  ]
+  ],
+  "villain_top_n": 100
 }
