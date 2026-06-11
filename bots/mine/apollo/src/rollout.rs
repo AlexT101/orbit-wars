@@ -32,6 +32,11 @@ pub fn pick_plan_by_rollout(
     if candidates.is_empty() {
         return Vec::new();
     }
+    if candidates.len() == 1 {
+        // Best-of-one is itself — skip the opponent-variant build and the
+        // rollouts entirely.
+        return candidates.into_iter().next().unwrap();
+    }
 
     let opp_variants = opponent_turn0_variants(
         initial_state,
@@ -125,6 +130,7 @@ pub fn rollout_score(
             let mut ws = WorldState::from_simulator_with_ledger(pid, &sim, ledger, cache);
             ws.remaining_overage_time = remaining_overage_time;
             ws.shot_l1 = shot_l1;
+            ws.rollout_internal = true;
             actions[p] = reply_plan_fn(&ws);
         }
         let action_slices: Vec<&[MoveAction]> = actions.iter().map(|v| v.as_slice()).collect();
@@ -182,6 +188,7 @@ pub fn opponent_turn0_actions(
         let mut ws = WorldState::from_simulator_with_ledger(pid, &sim, ledger, cache);
         ws.remaining_overage_time = remaining_overage_time;
         ws.shot_l1 = shot_l1;
+        ws.rollout_internal = true;
         actions[p] = reply_plan_fn(&ws);
     }
     cache.set_current_turn(saved_turn);
@@ -244,6 +251,7 @@ pub fn opponent_turn0_variants(
     let mut opp_ws = WorldState::from_simulator_with_ledger(opp_player, &sim, ledger, cache);
     opp_ws.remaining_overage_time = remaining_overage_time;
     opp_ws.shot_l1 = shot_l1;
+    opp_ws.rollout_internal = true;
 
     if opp_ws.my_planets.is_empty() {
         cache.set_current_turn(saved_turn);

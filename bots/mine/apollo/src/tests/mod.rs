@@ -1,6 +1,7 @@
 mod aim;
 mod cache;
 mod combat;
+mod early_game;
 mod engine;
 mod reference_engine;
 mod rollout_bench;

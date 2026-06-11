@@ -26,6 +26,7 @@ use crate::constants::{
     ALLY_PRESSURE_RATIO, ENEMY_OFFSET_LOOKAHEAD, FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD,
     REINFORCEMENT_PRESSURE_DECAY, REINFORCEMENT_PRESSURE_TURNS, ROTATION_LOOK_AHEAD_TURNS,
 };
+use crate::early_game::OpeningEvent;
 use crate::engine::{MoveAction, Planet};
 use crate::helpers::{
     aim_ignoring_comets, aim_with_prediction, available_at_timeline, dist,
@@ -465,7 +466,7 @@ fn owner_available_to_launch_at(
 // ── PlanState: turn-local commitments ────────────────────────────────────
 
 #[derive(Default)]
-struct PlanState {
+pub(crate) struct PlanState {
     spent: HashMap<i64, i64>,
     planned: HashMap<i64, Vec<ArrivalEvent>>,
 }
@@ -522,7 +523,14 @@ impl PlanState {
         };
         (available - spent).max(0)
     }
-    fn commit(&mut self, src_id: i64, target_id: i64, ships: i64, arrival_turn: i64, owner: i64) {
+    pub(crate) fn commit(
+        &mut self,
+        src_id: i64,
+        target_id: i64,
+        ships: i64,
+        arrival_turn: i64,
+        owner: i64,
+    ) {
         *self.spent.entry(src_id).or_insert(0) += ships;
         self.planned
             .entry(target_id)
@@ -532,6 +540,89 @@ impl PlanState {
                 owner,
                 ships,
             });
+    }
+
+    /// Reverse a prior [`Self::commit`] — used by the early-game DFS to
+    /// backtrack. Refunds the spent ledger and removes one matching planned
+    /// arrival.
+    pub(crate) fn uncommit(
+        &mut self,
+        src_id: i64,
+        target_id: i64,
+        ships: i64,
+        arrival_turn: i64,
+        owner: i64,
+    ) {
+        if let Some(spent) = self.spent.get_mut(&src_id) {
+            *spent -= ships;
+            if *spent <= 0 {
+                self.spent.remove(&src_id);
+            }
+        }
+        if let Some(events) = self.planned.get_mut(&target_id) {
+            let want = arrival_turn.max(1);
+            if let Some(pos) = events
+                .iter()
+                .position(|e| e.turns == want && e.ships == ships && e.owner == owner)
+            {
+                events.swap_remove(pos);
+            }
+            if events.is_empty() {
+                self.planned.remove(&target_id);
+            }
+        }
+    }
+
+    /// Vectorized [`Self::ships_available_at`]: available ships at every
+    /// launch offset `0..=max_offset` for this source, paying the
+    /// planned-arrival timeline sim once instead of once per offset. Used by
+    /// the early-game DFS, which reads every offset in its window per node.
+    pub(crate) fn available_vector(
+        &self,
+        world: &WorldState,
+        src: &Planet,
+        owner: i64,
+        max_offset: i64,
+    ) -> Vec<i64> {
+        let max_offset = max_offset.max(0);
+        let spent = if owner == world.player {
+            self.spent.get(&src.id).copied().unwrap_or(0)
+        } else {
+            0
+        };
+        let planned: &[ArrivalEvent] = self
+            .planned
+            .get(&src.id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let mut out = Vec::with_capacity(max_offset as usize + 1);
+        if planned.is_empty() {
+            match world.timeline_cache.baseline(src.id) {
+                Some(b) => {
+                    for offset in 0..=max_offset {
+                        let a = available_at_timeline_for_owner(b, owner, world.player, offset);
+                        out.push((a - spent).max(0));
+                    }
+                }
+                None => {
+                    for offset in 0..=max_offset {
+                        let a = if src.owner == owner && owner != -1 {
+                            src.ships + src.production * offset
+                        } else {
+                            0
+                        };
+                        out.push((a - spent).max(0));
+                    }
+                }
+            }
+        } else {
+            let tl = world.projected_timeline(src.id, world.timeline_cache.horizon, planned, &[]);
+            for offset in 0..=max_offset {
+                let a = available_at_timeline_for_owner(&tl, owner, world.player, offset);
+                out.push((a - spent).max(0));
+            }
+        }
+        out
     }
 
     /// Move a previously-committed friendly arrival from one target to another.
@@ -1399,15 +1490,43 @@ fn select_best_uncached(
     best.map(|(_, _, _, tid, orders)| (tid, orders))
 }
 
-/// One full pipeline run under a fixed target-selection strategy. Returns
-/// the emitted moves and the resulting PlanState (used by `rollout_score`).
+/// One full pipeline run under a fixed target-selection strategy, seeded
+/// with the opening pre-pass events (empty outside the opening phase).
+/// Returns the emitted moves and the resulting PlanState (used by
+/// `rollout_score`).
 fn run_strategy(
     world: &WorldState,
     model: &HellburnerModel,
     strategy: SelectionStrategy,
+    opening: &[OpeningEvent],
 ) -> (Vec<MoveAction>, PlanState) {
     let mut state = PlanState::default();
     let mut moves: Vec<MoveAction> = Vec::new();
+
+    // Opening pre-pass: commit every DFS capture event before the greedy
+    // iterations, exactly like greedy's own orders — offset-0 events are
+    // emitted as fleet moves, future offsets stay reservations (spent ships
+    // later iterations cannot poach, targets they see as already won),
+    // re-planned next turn. Greedy combat, defense, and reinforcement then
+    // run on whatever the opening leaves over.
+    for ev in opening {
+        state.commit(ev.src, ev.target, ev.ships, ev.arrival, world.player);
+        if ev.offset != 0 {
+            continue;
+        }
+        // Re-derive the angle (L1-cached: this exact shot was solved during
+        // the opening search).
+        let Some((angle, _, _, _, _)) = model.plan_shot(ev.src, ev.target, ev.ships, 0) else {
+            debug_assert!(false, "opening shot not re-derivable at emission");
+            continue;
+        };
+        moves.push(MoveAction {
+            from_id: ev.src,
+            angle,
+            ships: ev.ships,
+            target: ev.target,
+        });
+    }
 
     // Fixed-order candidate targets (non-comet, not pressure-gated, with
     // inbound edges). The scan order matches the original per-iteration sweep
@@ -1559,12 +1678,17 @@ pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     }
     let model = HellburnerModel::build(world);
 
+    // Opening expansion pre-pass (empty past the phase, inside rollouts, or
+    // when no positive-value capture plan exists), committed ahead of the
+    // greedy iterations inside `run_strategy`.
+    let opening = crate::early_game::plan_opening(&model);
+
     // Single greedy run under the default strategy. This is the policy hook
     // the rollout layer (see `crate::rollout`) invokes for opponent replies
     // *and* our own replanning during the reactive phase, so it must stay
     // cheap and deterministic. Multi-strategy search happens one level up,
     // in `search_candidates`.
-    let (moves, _) = run_strategy(world, &model, STRATEGIES[0]);
+    let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &opening);
     moves
 }
 
@@ -1682,6 +1806,9 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
         return vec![Vec::new()];
     }
     let model = HellburnerModel::build(world);
+    // Opening pre-pass, computed once and shared by every strategy run so
+    // the greedy plan (`STRATEGIES[0]` + opening) is always candidate 0.
+    let opening = crate::early_game::plan_opening(&model);
 
     // Stress test: probe `plan_shot` for every ordered pair of planets
     // (both directions) with fleet sizes up to 50. Results are discarded —
@@ -1699,10 +1826,18 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     //     }
     // }
 
-    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len());
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len() + 1);
 
     for &strat in &STRATEGIES {
-        let (moves, _) = run_strategy(world, &model, strat);
+        let (moves, _) = run_strategy(world, &model, strat, &opening);
+        if !out.iter().any(|prev| prev == &moves) {
+            out.push(moves);
+        }
+    }
+    // The opening was planned with no enemy model; offer the rollout minimax
+    // a no-opening alternative so a bad opening can be rejected wholesale.
+    if !opening.is_empty() {
+        let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &[]);
         if !out.iter().any(|prev| prev == &moves) {
             out.push(moves);
         }
