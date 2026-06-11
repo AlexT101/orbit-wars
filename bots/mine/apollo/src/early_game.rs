@@ -64,7 +64,8 @@ use crate::constants::{
     EARLY_GAME_END, EARLY_GAME_FERRY_PROBES, EARLY_GAME_MAX_CANDIDATES, EARLY_GAME_MAX_CHILD_FUND,
     EARLY_GAME_NODE_BUDGET, EARLY_GAME_PROBE_SHIPS, EARLY_GAME_VALUE_PICKS,
 };
-use crate::helpers::{dist, ArrivalEvent};
+use crate::engine::ArrivalEvent;
+use crate::helpers::dist;
 use crate::strategy::{available_at_timeline_for_owner, HellburnerModel};
 use crate::world::WorldState;
 
