@@ -174,6 +174,90 @@ fn early_game_reservations_block_greedy() {
     );
 }
 
+/// Opening-search cost/quality profile across self-played opening turns on
+/// real maps. Informs the EARLY_GAME_* constants: node-budget exhaustion
+/// rate, wall time per turn, and whether late opening turns still produce
+/// plans. Run with:
+/// `cargo test --release early_game_search_profile -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn early_game_search_profile() {
+    use std::time::Instant;
+
+    use super::reference_engine::RefEngine;
+    use crate::constants::EARLY_GAME_NODE_BUDGET;
+    use crate::engine::{Configuration, MoveAction};
+
+    let seeds: &[u64] = &[42, 7, 99, 314, 271];
+    for &num_players in &[2usize, 4] {
+        // Per turn: runs, plans found, total/max nodes, exhausted count,
+        // total/max ms, total events.
+        let mut per_turn = vec![(0u64, 0u64, 0u64, 0u64, 0u64, 0.0f64, 0.0f64, 0u64); EARLY_GAME_END as usize];
+        for &seed in seeds {
+            let mut state = RefEngine::new(seed, num_players, Configuration::default());
+            let mut cache = EntityCache::build(
+                &state.initial_planets,
+                &state.comets,
+                &state.comet_planet_ids,
+                state.angular_velocity,
+                state.step,
+            );
+            for turn in 0..EARLY_GAME_END {
+                cache.set_current_turn(state.step);
+                let snap = state.snapshot();
+                for p in 0..num_players {
+                    let ws = WorldState::from_engine(p as i64, &snap, &cache);
+                    let model = HellburnerModel::build(&ws);
+                    let t = Instant::now();
+                    let stats = crate::early_game::opening_search_stats(&model);
+                    let ms = t.elapsed().as_secs_f64() * 1e3;
+                    let e = &mut per_turn[turn as usize];
+                    e.0 += 1;
+                    e.5 += ms;
+                    e.6 = e.6.max(ms);
+                    if let Some((nodes, events, _value)) = stats {
+                        e.2 += nodes;
+                        e.3 = e.3.max(nodes);
+                        if nodes >= EARLY_GAME_NODE_BUDGET {
+                            e.4 += 1;
+                        }
+                        if events > 0 {
+                            e.1 += 1;
+                            e.7 += events as u64;
+                        }
+                    }
+                }
+                // Self-play one engine step (every player runs the full plan).
+                let mut actions: Vec<Vec<MoveAction>> = vec![Vec::new(); num_players];
+                for (p, slot) in actions.iter_mut().enumerate() {
+                    let ws = WorldState::from_engine(p as i64, &snap, &cache);
+                    *slot = crate::strategy::plan(&ws);
+                }
+                if state.step_with_actions(&actions).is_err() {
+                    break;
+                }
+            }
+        }
+        println!("--- {num_players}p, {} seeds ---", seeds.len());
+        for (turn, e) in per_turn.iter().enumerate() {
+            if e.0 == 0 {
+                continue;
+            }
+            println!(
+                "turn {turn:>2}: runs {:>2}  plans {:>2}  nodes avg {:>7.0} max {:>7}  exhausted {:>2}  ms avg {:>7.2} max {:>8.2}  events avg {:.1}",
+                e.0,
+                e.1,
+                e.2 as f64 / e.0 as f64,
+                e.3,
+                e.4,
+                e.5 / e.0 as f64,
+                e.6,
+                e.7 as f64 / e.1.max(1) as f64,
+            );
+        }
+    }
+}
+
 /// The pre-pass composes with the greedy pipeline: the opening capture and a
 /// greedy combat strike both happen on the same turn, funded from disjoint
 /// ship pools (home ferries the opening; F attacks the enemy).

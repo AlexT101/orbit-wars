@@ -64,8 +64,8 @@ use crate::constants::{
     EARLY_GAME_END, EARLY_GAME_FERRY_PROBES, EARLY_GAME_MAX_CANDIDATES, EARLY_GAME_MAX_CHILD_FUND,
     EARLY_GAME_NODE_BUDGET, EARLY_GAME_PROBE_SHIPS, EARLY_GAME_VALUE_PICKS,
 };
-use crate::helpers::dist;
-use crate::strategy::{HellburnerModel, PlanState};
+use crate::helpers::{dist, ArrivalEvent};
+use crate::strategy::{available_at_timeline_for_owner, HellburnerModel};
 use crate::world::WorldState;
 
 /// One planned capture in the vocabulary the strategy layer commits: launch
@@ -143,6 +143,72 @@ pub(crate) fn plan_opening(model: &HellburnerModel) -> Vec<OpeningEvent> {
 /// garrison, then produce until the horizon).
 fn capture_value(production: i64, garrison: i64, window: i64, arrival: i64) -> i64 {
     production * (window - arrival) - garrison
+}
+
+/// Bench hook: run the opening search and report
+/// `(nodes used, best-plan events, best-plan value)`. `None` when the phase
+/// gate is closed or there is nothing to search.
+#[cfg(test)]
+pub(crate) fn opening_search_stats(model: &HellburnerModel) -> Option<(u64, usize, i64)> {
+    let world = model.state;
+    if world.rollout_internal || world.cache.current_turn >= EARLY_GAME_END {
+        return None;
+    }
+    run_search(world, model).map(|s| (s.nodes, s.best_events.len(), s.best_value))
+}
+
+/// Per-source launch-availability state threaded through the DFS. `raw[o]`
+/// is the source's base availability at launch offset `o` minus every ship
+/// already committed from it on the current branch — kept *unclamped* so a
+/// commit and its undo are exact flat additions. Consumers only ever compare
+/// availability against amounts ≥ 1, where negative values behave
+/// identically to a zero clamp.
+struct SrcState {
+    id: i64,
+    /// Earliest admissible launch offset (turn after a pending or in-branch
+    /// capture lands; 0 for planets owned now).
+    min_launch: i64,
+    raw: Vec<i64>,
+}
+
+/// Base availability vector (launch offsets `0..window`) for `id`: the
+/// forward-min launchable ships per offset, read from the baseline timeline —
+/// or, for a candidate captured on the current branch, from one planet sim
+/// folding our capture arrival into the baseline (paid once per commit
+/// instead of once per node).
+fn avail_vector(
+    world: &WorldState,
+    id: i64,
+    capture: Option<ArrivalEvent>,
+    window: i64,
+) -> Vec<i64> {
+    let player = world.player;
+    if let Some(ev) = capture {
+        let tl = world.projected_timeline(id, world.timeline_cache.horizon, &[ev], &[]);
+        return (0..window)
+            .map(|o| available_at_timeline_for_owner(&tl, player, player, o))
+            .collect();
+    }
+    match world.timeline_cache.baseline(id) {
+        Some(b) => (0..window)
+            .map(|o| available_at_timeline_for_owner(b, player, player, o))
+            .collect(),
+        // No cached trajectory: fall back to linear growth for planets we
+        // own now, else nothing (a purely growing series has its forward-min
+        // at the read offset).
+        None => {
+            let p = world.planet(id);
+            (0..window)
+                .map(|o| {
+                    if p.owner == player {
+                        p.ships + p.production * o
+                    } else {
+                        0
+                    }
+                })
+                .collect()
+        }
+    }
 }
 
 fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
@@ -368,35 +434,39 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     let mut search = Search {
         window,
         candidates,
-        sources,
         rows: HashMap::default(),
         nodes: 0,
         best_value: 0,
         best_prod: 0,
         best_events: Vec::new(),
     };
-    let mut plan = PlanState::default();
+    // Per-source availability vectors, maintained incrementally across the
+    // DFS (commits apply flat debits; captured targets pay one planet sim
+    // when they join) instead of being re-derived at every node.
+    let mut srcs: Vec<SrcState> = sources
+        .iter()
+        .map(|&(id, min_launch)| SrcState {
+            id,
+            min_launch,
+            raw: avail_vector(world, id, None, window),
+        })
+        .collect();
     let mut events: Vec<Event> = Vec::new();
     let mut remaining = vec![true; search.candidates.len()];
     search.dfs(
-        world, model, &mut plan, &mut events, &mut remaining, 0, 0, total_value,
+        world, model, &mut srcs, &mut events, &mut remaining, 0, 0, total_value,
     );
-    if search.best_events.is_empty() {
-        return None;
-    }
+    // `best_events` may be empty (no positive-value plan); the caller's map
+    // over it yields the empty schedule naturally.
     Some(search)
 }
 
 struct Search {
     window: i64,
     candidates: Vec<Candidate>,
-    /// Launch sources available regardless of plan: (planet id, earliest
-    /// launch offset). Candidates captured during a branch are added on top,
-    /// launching from their arrival turn + 1.
-    sources: Vec<(i64, i64)>,
     /// `(src, target, ships) → arrival per launch offset` (`None` = blocked
     /// or lands past the window). Geometry only — affordability is checked
-    /// per node against the plan ledger.
+    /// per node against the maintained per-source availability vectors.
     rows: HashMap<(i64, i64, i64), Vec<Option<i64>>>,
     nodes: u64,
     /// Best plan value so far: Σ `production·(window − arrival) − garrison`.
@@ -435,7 +505,7 @@ impl Search {
         &mut self,
         world: &WorldState,
         model: &HellburnerModel,
-        plan: &mut PlanState,
+        srcs: &mut Vec<SrcState>,
         events: &mut Vec<Event>,
         remaining: &mut Vec<bool>,
         cur_value: i64,
@@ -472,20 +542,15 @@ impl Search {
             .last()
             .map(|e| (e.offset, e.src, self.candidates[e.target_idx].id));
 
-        let mut srcs: Vec<(i64, i64)> = self.sources.clone();
-        for e in events.iter() {
-            srcs.push((self.candidates[e.target_idx].id, e.arrival + 1));
-        }
-
         let mut options: Vec<Event> = Vec::new();
-        for &(src, min_launch) in &srcs {
+        for si in 0..srcs.len() {
+            let src = srcs[si].id;
             // Canonical floor: only offsets that can still exceed `last_key`
             // are admissible. Folding the floor into the frontier (instead of
             // generating from the raw earliest launch and filtering after)
-            // skips the availability read for sources with no admissible
-            // offset, and keeps the frontier honest — an inadmissible earlier
-            // offset must not suppress an admissible later one that reaches
-            // the same arrival.
+            // skips sources with no admissible offset, and keeps the frontier
+            // honest — an inadmissible earlier offset must not suppress an
+            // admissible later one that reaches the same arrival.
             let floor = match last_key {
                 None => 0,
                 Some((lo, ls, _)) => {
@@ -496,19 +561,15 @@ impl Search {
                     }
                 }
             };
-            let min_launch = min_launch.max(floor);
+            let min_launch = srcs[si].min_launch.max(floor);
             if min_launch >= self.window {
                 continue;
             }
-            // One availability read per source per node (the planned-arrival
-            // sim inside is the expensive part for captured sources).
-            let avail =
-                plan.available_vector(world, world.planet(src), world.player, self.window - 1);
             for ti in 0..self.candidates.len() {
                 if !remaining[ti] {
                     continue;
                 }
-                self.options_for(model, src, min_launch, &avail, ti, remaining, &mut options);
+                self.options_for(model, src, min_launch, &srcs[si].raw, ti, remaining, &mut options);
             }
         }
 
@@ -547,13 +608,37 @@ impl Search {
             let prod = self.candidates[ev.target_idx].production;
             let garrison = self.candidates[ev.target_idx].garrison;
             let bound = self.candidates[ev.target_idx].value_bound;
-            plan.commit(ev.src, target_id, ev.ships, ev.arrival, world.player);
+            // Commit: flat-debit the launching source (`raw` is unclamped,
+            // so the debit and its undo below are exact), and add the
+            // captured target as a new launch source — the one planet sim
+            // folding our capture arrival into its baseline.
+            let si = srcs
+                .iter()
+                .position(|s| s.id == ev.src)
+                .expect("option source must be a live launch source");
+            for r in &mut srcs[si].raw {
+                *r -= ev.ships;
+            }
+            srcs.push(SrcState {
+                id: target_id,
+                min_launch: ev.arrival + 1,
+                raw: avail_vector(
+                    world,
+                    target_id,
+                    Some(ArrivalEvent {
+                        turns: ev.arrival.max(1),
+                        owner: world.player,
+                        ships: ev.ships,
+                    }),
+                    self.window,
+                ),
+            });
             events.push(ev);
             remaining[ev.target_idx] = false;
             self.dfs(
                 world,
                 model,
-                plan,
+                srcs,
                 events,
                 remaining,
                 cur_value + capture_value(prod, garrison, self.window, ev.arrival),
@@ -562,7 +647,10 @@ impl Search {
             );
             remaining[ev.target_idx] = true;
             events.pop();
-            plan.uncommit(ev.src, target_id, ev.ships, ev.arrival, world.player);
+            srcs.pop();
+            for r in &mut srcs[si].raw {
+                *r += ev.ships;
+            }
             if self.nodes >= EARLY_GAME_NODE_BUDGET {
                 return;
             }
@@ -571,7 +659,10 @@ impl Search {
 
     /// All launch options from `src` against one candidate target: the three
     /// ship-amount variants, each reduced to its strictly-improving arrival
-    /// frontier over the affordable offsets.
+    /// frontier over the affordable offsets. `avail` is the source's
+    /// unclamped [`SrcState::raw`] vector — every comparison here is against
+    /// an amount ≥ 1, so negative entries read as unaffordable, exactly like
+    /// a zero clamp.
     #[allow(clippy::too_many_arguments)]
     fn options_for(
         &mut self,

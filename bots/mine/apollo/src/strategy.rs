@@ -466,7 +466,7 @@ fn owner_available_to_launch_at(
 // ── PlanState: turn-local commitments ────────────────────────────────────
 
 #[derive(Default)]
-pub(crate) struct PlanState {
+struct PlanState {
     spent: HashMap<i64, i64>,
     planned: HashMap<i64, Vec<ArrivalEvent>>,
 }
@@ -523,14 +523,7 @@ impl PlanState {
         };
         (available - spent).max(0)
     }
-    pub(crate) fn commit(
-        &mut self,
-        src_id: i64,
-        target_id: i64,
-        ships: i64,
-        arrival_turn: i64,
-        owner: i64,
-    ) {
+    fn commit(&mut self, src_id: i64, target_id: i64, ships: i64, arrival_turn: i64, owner: i64) {
         *self.spent.entry(src_id).or_insert(0) += ships;
         self.planned
             .entry(target_id)
@@ -540,89 +533,6 @@ impl PlanState {
                 owner,
                 ships,
             });
-    }
-
-    /// Reverse a prior [`Self::commit`] — used by the early-game DFS to
-    /// backtrack. Refunds the spent ledger and removes one matching planned
-    /// arrival.
-    pub(crate) fn uncommit(
-        &mut self,
-        src_id: i64,
-        target_id: i64,
-        ships: i64,
-        arrival_turn: i64,
-        owner: i64,
-    ) {
-        if let Some(spent) = self.spent.get_mut(&src_id) {
-            *spent -= ships;
-            if *spent <= 0 {
-                self.spent.remove(&src_id);
-            }
-        }
-        if let Some(events) = self.planned.get_mut(&target_id) {
-            let want = arrival_turn.max(1);
-            if let Some(pos) = events
-                .iter()
-                .position(|e| e.turns == want && e.ships == ships && e.owner == owner)
-            {
-                events.swap_remove(pos);
-            }
-            if events.is_empty() {
-                self.planned.remove(&target_id);
-            }
-        }
-    }
-
-    /// Vectorized [`Self::ships_available_at`]: available ships at every
-    /// launch offset `0..=max_offset` for this source, paying the
-    /// planned-arrival timeline sim once instead of once per offset. Used by
-    /// the early-game DFS, which reads every offset in its window per node.
-    pub(crate) fn available_vector(
-        &self,
-        world: &WorldState,
-        src: &Planet,
-        owner: i64,
-        max_offset: i64,
-    ) -> Vec<i64> {
-        let max_offset = max_offset.max(0);
-        let spent = if owner == world.player {
-            self.spent.get(&src.id).copied().unwrap_or(0)
-        } else {
-            0
-        };
-        let planned: &[ArrivalEvent] = self
-            .planned
-            .get(&src.id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let mut out = Vec::with_capacity(max_offset as usize + 1);
-        if planned.is_empty() {
-            match world.timeline_cache.baseline(src.id) {
-                Some(b) => {
-                    for offset in 0..=max_offset {
-                        let a = available_at_timeline_for_owner(b, owner, world.player, offset);
-                        out.push((a - spent).max(0));
-                    }
-                }
-                None => {
-                    for offset in 0..=max_offset {
-                        let a = if src.owner == owner && owner != -1 {
-                            src.ships + src.production * offset
-                        } else {
-                            0
-                        };
-                        out.push((a - spent).max(0));
-                    }
-                }
-            }
-        } else {
-            let tl = world.projected_timeline(src.id, world.timeline_cache.horizon, planned, &[]);
-            for offset in 0..=max_offset {
-                let a = available_at_timeline_for_owner(&tl, owner, world.player, offset);
-                out.push((a - spent).max(0));
-            }
-        }
-        out
     }
 
     /// Move a previously-committed friendly arrival from one target to another.
@@ -680,7 +590,7 @@ fn final_owner(timeline: &PlanetTimeline) -> i64 {
     timeline.owner_at[timeline.horizon as usize]
 }
 
-fn available_at_timeline_for_owner(
+pub(crate) fn available_at_timeline_for_owner(
     timeline: &PlanetTimeline,
     owner: i64,
     timeline_player: i64,
