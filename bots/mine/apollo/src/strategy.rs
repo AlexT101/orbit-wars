@@ -506,14 +506,7 @@ impl PlanState {
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         let available = if planned.is_empty() {
-            match world.timeline_cache.baseline(src.id) {
-                Some(b) => available_at_timeline_for_owner(b, owner, world.player, offset),
-                // No cached trajectory: fall back to linear growth. A purely
-                // growing series has its minimum at `offset`, so the point
-                // value is already the forward-min.
-                None if src.owner == owner && owner != -1 => src.ships + src.production * offset,
-                None => 0,
-            }
+            baseline_available_at_for_owner(world, src.id, owner, offset)
         } else {
             // This source also has reinforcements we've planned this turn.
             // Sim the full horizon (not just up to `offset`) so the forward-min
@@ -614,6 +607,31 @@ pub(crate) fn available_at_timeline_for_owner(
         0
     } else {
         available.max(0)
+    }
+}
+
+/// Baseline (plan-free) launchable ships for `owner` at launch `offset` from
+/// planet `id`: the forward-min over `owner`'s owned run from `offset`, read
+/// from the cached baseline timeline, or linear growth when no trajectory is
+/// cached (a purely growing series has its forward-min at the read offset).
+/// Callers that track turn-local commitments subtract their own `spent`/
+/// `planned` on top.
+pub(crate) fn baseline_available_at_for_owner(
+    world: &WorldState,
+    id: i64,
+    owner: i64,
+    offset: i64,
+) -> i64 {
+    match world.timeline_cache.baseline(id) {
+        Some(b) => available_at_timeline_for_owner(b, owner, world.player, offset),
+        None => {
+            let p = world.planet(id);
+            if p.owner == owner && owner != -1 {
+                p.ships + p.production * offset.max(0)
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -1420,22 +1438,23 @@ fn run_strategy(
     // re-planned next turn. Greedy combat, defense, and reinforcement then
     // run on whatever the opening leaves over.
     for ev in opening {
-        state.commit(ev.src, ev.target, ev.ships, ev.arrival, world.player);
-        if ev.offset != 0 {
-            continue;
+        if ev.offset == 0 {
+            // Re-derive the angle (L1-cached: this exact shot was solved during
+            // the opening search) *before* committing, so a re-derivation that
+            // unexpectedly fails leaves no orphaned reservation (ships reserved
+            // but never launched).
+            let Some((angle, _, _, _, _)) = model.plan_shot(ev.src, ev.target, ev.ships, 0) else {
+                debug_assert!(false, "opening shot not re-derivable at emission");
+                continue;
+            };
+            moves.push(MoveAction {
+                from_id: ev.src,
+                angle,
+                ships: ev.ships,
+                target: ev.target,
+            });
         }
-        // Re-derive the angle (L1-cached: this exact shot was solved during
-        // the opening search).
-        let Some((angle, _, _, _, _)) = model.plan_shot(ev.src, ev.target, ev.ships, 0) else {
-            debug_assert!(false, "opening shot not re-derivable at emission");
-            continue;
-        };
-        moves.push(MoveAction {
-            from_id: ev.src,
-            angle,
-            ships: ev.ships,
-            target: ev.target,
-        });
+        state.commit(ev.src, ev.target, ev.ships, ev.arrival, world.player);
     }
 
     // Fixed-order candidate targets (non-comet, not pressure-gated, with

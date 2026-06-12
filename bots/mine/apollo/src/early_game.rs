@@ -17,6 +17,16 @@
 //! no-opening candidate so the rollout minimax can reject a bad opening
 //! wholesale.
 //!
+//! The phase gate ([`EARLY_GAME_END`]) is a hard stop on *running* the DFS, not
+//! a valuation cliff: the objective extends to the full horizon and greedy runs
+//! on top, so there is no scoring discontinuity. There is, however, a behavioral
+//! limitation at the boundary — only offset-0 hops are emitted each turn, and
+//! once the gate closes the DFS no longer re-derives the chain, so a chain whose
+//! later hops would launch at/after [`EARLY_GAME_END`] is handed to the greedy
+//! planner (which does not model chains) for its tail. In practice first hops
+//! launch early and per-turn re-planning keeps this rare, but a chain set up
+//! late in the window can lose its continuation.
+//!
 //! Objective — the same quantity the greedy scorer prices
 //! (`timeline_delta_score`), restricted to uncontested neutral captures where
 //! it has a closed form: Σ `production·(window − arrival) − garrison` is our
@@ -66,8 +76,54 @@ use crate::constants::{
 };
 use crate::engine::ArrivalEvent;
 use crate::helpers::dist;
-use crate::strategy::{available_at_timeline_for_owner, HellburnerModel};
+use crate::strategy::{
+    available_at_timeline_for_owner, baseline_available_at_for_owner, HellburnerModel,
+};
 use crate::world::WorldState;
+
+/// Travel-only arrival turn of a `ships`-fleet launched from `src` toward
+/// `target` at launch `offset`, or `None` when the shot is blocked or lands
+/// past `window`. Centralizes the `(offset + turns).max(1)` / `≤ window`
+/// invariant shared by the reachability probe, the geometry row cache, and the
+/// ferry frontier.
+fn arrival_within(
+    model: &HellburnerModel,
+    src: i64,
+    target: i64,
+    ships: i64,
+    offset: i64,
+    window: i64,
+) -> Option<i64> {
+    model
+        .plan_shot(src, target, ships, offset)
+        .map(|(_, turns, _, _, _)| (offset + turns).max(1))
+        .filter(|&arrival| arrival <= window)
+}
+
+/// Lower `best` by the earliest in-window arrival of a `ships`-fleet from `src`
+/// to `target` launched at any offset in `[min_launch, window)`. Used by the
+/// reachability fixpoint; the `offset ≥ best` short-circuit holds because an
+/// arrival is always `≥` its launch offset.
+fn relax_arrival(
+    model: &HellburnerModel,
+    src: i64,
+    target: i64,
+    ships: i64,
+    min_launch: i64,
+    window: i64,
+    best: i64,
+) -> i64 {
+    let mut best = best;
+    for o in min_launch.max(0)..window {
+        if o >= best {
+            break;
+        }
+        if let Some(arrival) = arrival_within(model, src, target, ships, o, window) {
+            best = best.min(arrival);
+        }
+    }
+    best
+}
 
 /// One planned capture in the vocabulary the strategy layer commits: launch
 /// `ships` from `src` at `offset` turns from now, arriving at planet `target`
@@ -82,10 +138,14 @@ pub(crate) struct OpeningEvent {
 }
 
 /// Internal search event — like [`OpeningEvent`] but indexing into the
-/// candidate set.
+/// candidate set. `src_idx` is the launching source's position in the DFS
+/// node's `srcs` vector at the moment the option was generated (stable across
+/// the node's sibling options, since `srcs` is restored between them), so the
+/// commit step debits the right source without an id scan.
 #[derive(Clone, Copy, Debug)]
 struct Event {
     src: i64,
+    src_idx: usize,
     target_idx: usize,
     ships: i64,
     offset: i64,
@@ -190,26 +250,12 @@ fn avail_vector(
             .map(|o| available_at_timeline_for_owner(&tl, player, player, o))
             .collect();
     }
-    match world.timeline_cache.baseline(id) {
-        Some(b) => (0..window)
-            .map(|o| available_at_timeline_for_owner(b, player, player, o))
-            .collect(),
-        // No cached trajectory: fall back to linear growth for planets we
-        // own now, else nothing (a purely growing series has its forward-min
-        // at the read offset).
-        None => {
-            let p = world.planet(id);
-            (0..window)
-                .map(|o| {
-                    if p.owner == player {
-                        p.ships + p.production * o
-                    } else {
-                        0
-                    }
-                })
-                .collect()
-        }
-    }
+    // Plan-free baseline availability (forward-min from the cached timeline, or
+    // linear growth when no trajectory is cached) — shared with the greedy
+    // planner's `ships_available_at`.
+    (0..window)
+        .map(|o| baseline_available_at_for_owner(world, id, player, o))
+        .collect()
 }
 
 fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
@@ -265,6 +311,21 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
             }
         }
         if contested {
+            continue;
+        }
+        // Skip neutrals an enemy fleet is already inbound to within the window.
+        // The objective assumes pure post-capture production, but a baseline
+        // enemy arrival — which hits the *neutral* in the baseline, yet would
+        // hit *us* once our capture lands — is not in that closed form. Racing
+        // a landed capture is the mid-game planner's job; modelling it here
+        // would make the score optimistic for exactly the targets most likely
+        // to be retaken.
+        let enemy_inbound = world
+            .timeline_cache
+            .arrivals(p.id)
+            .iter()
+            .any(|a| a.turns <= window && a.owner != -1 && a.owner != player);
+        if enemy_inbound {
             continue;
         }
         raw.push(RawCandidate {
@@ -326,43 +387,51 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     }
     let probe_ships = achievable.clamp(1, EARLY_GAME_PROBE_SHIPS);
 
-    // Reachability probe + earliest possible arrival per candidate, from any
-    // source or any other pool candidate (relays make chain-only-reachable
-    // planets visible). Unreachable candidates must be dropped so the
-    // branch-and-bound stays an upper bound.
-    let mut reachable: Vec<(i64, RawCandidate)> = Vec::new();
-    for c in &pool {
-        let mut earliest = i64::MAX;
-        for s in sources
-            .iter()
-            .map(|&(sid, _)| sid)
-            .chain(pool.iter().map(|x| x.id))
-        {
-            if s == c.id {
-                continue;
-            }
-            for o in 0..window {
-                // Arrival from offset `o` is ≥ o, so offsets at or past the
-                // best arrival so far cannot improve it.
-                if o >= earliest {
-                    break;
-                }
-                let Some((_, turns, _, _, _)) = model.plan_shot(s, c.id, probe_ships, o) else {
+    // Reachability probe + earliest possible arrival per candidate, computed as
+    // a fixpoint relaxation: a candidate is reachable from a base source, or as
+    // a relay from another candidate that is *itself* reachable, launching no
+    // earlier than that relay's own arrival. Sources seed the relaxation at
+    // their launch offsets. Probing with a fixed achievable-fleet size keeps it
+    // optimistic (ignores ship cost / relay-launch-the-turn-after) so the value
+    // bounds derived from these arrivals stay valid upper bounds for the
+    // branch-and-bound, while no longer routing through candidates that are
+    // themselves unreachable (which would spend candidate slots on planets no
+    // feasible plan can take). The probe geometry is L1-cached, so the repeated
+    // relaxations are cheap re-reads after the first sweep.
+    let n = pool.len();
+    let mut earliest = vec![i64::MAX; n];
+    loop {
+        let mut changed = false;
+        for ci in 0..n {
+            let cid = pool[ci].id;
+            let mut best = earliest[ci];
+            for &(sid, min_launch) in &sources {
+                if sid == cid {
                     continue;
-                };
-                let arrival = (o + turns).max(1);
-                if arrival <= window {
-                    earliest = earliest.min(arrival);
                 }
+                best = relax_arrival(model, sid, cid, probe_ships, min_launch, window, best);
             }
-            if earliest <= 1 {
-                break;
+            for oi in 0..n {
+                if oi == ci || earliest[oi] >= window {
+                    continue;
+                }
+                best = relax_arrival(model, pool[oi].id, cid, probe_ships, earliest[oi], window, best);
+            }
+            if best < earliest[ci] {
+                earliest[ci] = best;
+                changed = true;
             }
         }
-        if earliest <= window {
-            reachable.push((earliest, *c));
+        if !changed {
+            break;
         }
     }
+    let reachable: Vec<(i64, RawCandidate)> = pool
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| earliest[i] <= window)
+        .map(|(i, c)| (earliest[i], *c))
+        .collect();
     if reachable.is_empty() {
         return None;
     }
@@ -440,6 +509,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
         best_value: 0,
         best_prod: 0,
         best_events: Vec::new(),
+        option_pool: Vec::new(),
     };
     // Per-source availability vectors, maintained incrementally across the
     // DFS (commits apply flat debits; captured targets pay one planet sim
@@ -475,6 +545,9 @@ struct Search {
     /// Production tie-break of the best plan (value beyond the horizon).
     best_prod: i64,
     best_events: Vec<Event>,
+    /// Reusable per-node option buffers, recycled across DFS nodes to avoid a
+    /// fresh allocation per node.
+    option_pool: Vec<Vec<Event>>,
 }
 
 /// Arrival row for one `(src, target, ships)` edge, lazily built and cached
@@ -490,12 +563,7 @@ fn row_for<'r>(
 ) -> &'r [Option<i64>] {
     rows.entry((src, target, ships)).or_insert_with(|| {
         (0..window)
-            .map(|o| {
-                model
-                    .plan_shot(src, target, ships, o)
-                    .map(|(_, turns, _, _, _)| (o + turns).max(1))
-                    .filter(|&arrival| arrival <= window)
-            })
+            .map(|o| arrival_within(model, src, target, ships, o, window))
             .collect()
     })
 }
@@ -543,7 +611,8 @@ impl Search {
             .last()
             .map(|e| (e.offset, e.src, self.candidates[e.target_idx].id));
 
-        let mut options: Vec<Event> = Vec::new();
+        let mut options = self.option_pool.pop().unwrap_or_default();
+        options.clear();
         for si in 0..srcs.len() {
             let src = srcs[si].id;
             // Canonical floor: only offsets that can still exceed `last_key`
@@ -570,7 +639,16 @@ impl Search {
                 if !remaining[ti] {
                     continue;
                 }
-                self.options_for(model, src, min_launch, &srcs[si].raw, ti, remaining, &mut options);
+                self.options_for(
+                    model,
+                    src,
+                    si,
+                    min_launch,
+                    &srcs[si].raw,
+                    ti,
+                    remaining,
+                    &mut options,
+                );
             }
         }
 
@@ -604,19 +682,20 @@ impl Search {
                 .then(a.ships.cmp(&b.ships))
         });
 
-        for ev in options {
+        for idx in 0..options.len() {
+            let ev = options[idx];
             let target_id = self.candidates[ev.target_idx].id;
             let prod = self.candidates[ev.target_idx].production;
             let garrison = self.candidates[ev.target_idx].garrison;
             let bound = self.candidates[ev.target_idx].value_bound;
-            // Commit: flat-debit the launching source (`raw` is unclamped,
-            // so the debit and its undo below are exact), and add the
-            // captured target as a new launch source — the one planet sim
-            // folding our capture arrival into its baseline.
-            let si = srcs
-                .iter()
-                .position(|s| s.id == ev.src)
-                .expect("option source must be a live launch source");
+            // Commit: flat-debit the launching source (`raw` is unclamped, so
+            // the debit and its undo below are exact). `src_idx` was recorded
+            // when the option was generated this node; `srcs` is restored to the
+            // node's base state between sibling options, so it still indexes the
+            // launching source. Add the captured target as a new launch source —
+            // the one planet sim folding our capture arrival into its baseline.
+            let si = ev.src_idx;
+            debug_assert_eq!(srcs[si].id, ev.src, "src_idx no longer indexes ev.src");
             for r in &mut srcs[si].raw {
                 *r -= ev.ships;
             }
@@ -653,9 +732,11 @@ impl Search {
                 *r += ev.ships;
             }
             if self.nodes >= EARLY_GAME_NODE_BUDGET {
-                return;
+                break;
             }
         }
+        options.clear();
+        self.option_pool.push(options);
     }
 
     /// All launch options from `src` against one candidate target: the three
@@ -669,6 +750,7 @@ impl Search {
         &mut self,
         model: &HellburnerModel,
         src: i64,
+        src_idx: usize,
         min_launch: i64,
         avail: &[i64],
         target_idx: usize,
@@ -714,6 +796,7 @@ impl Search {
                     best_arrival = arrival;
                     out.push(Event {
                         src,
+                        src_idx,
                         target_idx,
                         ships: amount,
                         offset: o,
@@ -740,18 +823,24 @@ impl Search {
         }
         let mut best_arrival = i64::MAX;
         for o in afford {
+            // `afford` is ascending and an arrival is ≥ its launch offset, so
+            // once an offset reaches the best arrival so far no later one in the
+            // (already subsampled) list can improve the frontier.
+            if o >= best_arrival {
+                break;
+            }
             let ferry = avail[o as usize];
             if amounts.contains(&ferry) {
                 continue;
             }
-            let Some((_, turns, _, _, _)) = model.plan_shot(src, target, ferry, o) else {
+            let Some(arrival) = arrival_within(model, src, target, ferry, o, window) else {
                 continue;
             };
-            let arrival = (o + turns).max(1);
-            if arrival <= window && arrival < best_arrival {
+            if arrival < best_arrival {
                 best_arrival = arrival;
                 out.push(Event {
                     src,
+                    src_idx,
                     target_idx,
                     ships: ferry,
                     offset: o,

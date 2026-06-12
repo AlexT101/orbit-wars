@@ -41,7 +41,7 @@ pub const FRONTIER_PRESSURE_RATIO: f64 = 7.0 / 5.0; // Frontier planets only rei
 pub const ALLY_PRESSURE_RATIO: f64 = 0.8; // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
 
 // Early-game expansion pre-pass (see early_game.rs)
-pub const EARLY_GAME_END: i64 = 7; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). Gate only: each plan's objective extends to the full timeline horizon, and the greedy pipeline always runs on top of the pre-pass, so the phase boundary is not a behavior cliff.
+pub const EARLY_GAME_END: i64 = 10; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.
 pub const EARLY_GAME_MAX_CANDIDATES: usize = 10; // Capture targets kept by earliest probe arrival; EARLY_GAME_VALUE_PICKS more are unioned in by value bound.
 pub const EARLY_GAME_VALUE_PICKS: usize = 5; // Reachable neutrals with the highest value bound (production·(window − earliest arrival) − garrison) unioned into the candidate set regardless of arrival rank.
 pub const EARLY_GAME_MAX_CHILD_FUND: usize = 4; // Per target, highest-production remaining neutrals considered for the min+child funding variant.
