@@ -325,10 +325,15 @@ fn enumerate_alternatives_strong(state: &GameState, player: i32, k: usize) -> Ve
     out
 }
 
-fn enumerate_alternatives(state: &GameState, player: i32, k: usize) -> Vec<Vec<Action>> {
+fn enumerate_alternatives(
+    state: &GameState,
+    player: i32,
+    k: usize,
+    rollout_internal: bool,
+) -> Vec<Vec<Action>> {
     let __apollo_t0 = std::time::Instant::now();
     let mut alts = with_cache_at(state.step, |cache| {
-        crate::apollo_bridge::apollo_candidates(state, player, cache)
+        crate::apollo_bridge::apollo_candidates(state, player, cache, rollout_internal)
     });
     crate::profiling::add(&crate::profiling::APOLLO_CANDIDATES_NS, __apollo_t0);
     crate::profiling::inc(&crate::profiling::APOLLO_CANDIDATES_CALLS);
@@ -346,14 +351,19 @@ fn enumerate_alternatives(state: &GameState, player: i32, k: usize) -> Vec<Vec<A
 /// `HORIZON`-turn ledger walk is paid once instead of per player. Falls back to
 /// the per-player [`enumerate_alternatives`] when focused candidates are enabled
 /// or apollo yields nothing for a side.
+///
+/// `rollout_internal` is forwarded to apollo so the early-game opening DFS only
+/// runs at the genuine root node and stands down at every non-root expansion
+/// (the DUCT analog of apollo suppressing it inside rollouts).
 fn enumerate_pair(
     state: &GameState,
     me: i32,
     opp: i32,
     k: usize,
+    rollout_internal: bool,
 ) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
     let (mut my, mut op) = with_cache_at(state.step, |cache| {
-        crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache)
+        crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache, rollout_internal)
     });
     if !my.is_empty() && !op.is_empty() {
         my.truncate(k);
@@ -363,8 +373,8 @@ fn enumerate_pair(
     // One side empty: fall back to per-player generation so the ow2 fallback can
     // fill the missing side.
     (
-        enumerate_alternatives(state, me, k),
-        enumerate_alternatives(state, opp, k),
+        enumerate_alternatives(state, me, k, rollout_internal),
+        enumerate_alternatives(state, opp, k, rollout_internal),
     )
 }
 
@@ -479,7 +489,10 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
         K_NON_ROOT_DEFAULT
     };
     let opp = dominant_enemy(&node.state, me).unwrap_or(1 - me);
-    let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k);
+    // Only the genuine root expansion runs apollo's early-game opening DFS;
+    // every non-root node suppresses it (rollout_internal), mirroring apollo's
+    // in-rollout reply policy.
+    let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k, !root);
     // Fix each minor player's reply to their single apollo greedy plan, computed
     // once here from the node state (empty in 2p). Replayed at every expansion.
     node.other_launches = {

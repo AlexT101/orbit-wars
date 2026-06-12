@@ -23,10 +23,11 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::apollo::cache::{AimCacheVerdict, EntityCache, InvariantVerdict};
 use crate::apollo::constants::{
-    ENEMY_OFFSET_LOOKAHEAD, FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD,
+    ALLY_PRESSURE_RATIO, ENEMY_OFFSET_LOOKAHEAD, FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD,
     REINFORCEMENT_PRESSURE_DECAY, REINFORCEMENT_PRESSURE_TURNS, ROTATION_LOOK_AHEAD_TURNS,
     SUBSET_TOP_TARGETS,
 };
+use crate::apollo::early_game::OpeningEvent;
 use crate::apollo::engine::{MoveAction, Planet};
 use crate::apollo::helpers::{
     aim_ignoring_comets, aim_with_prediction, available_at_timeline, dist,
@@ -42,6 +43,12 @@ pub struct HellburnerModel<'a> {
     pub inbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub outbound_edges: HashMap<i64, Vec<(i64, f64)>>,
     pub reinforcement_target: HashMap<i64, i64>,
+    /// Enemy-owned targets the planner skips this turn: our (ally) pressure on
+    /// the target is below `ALLY_PRESSURE_RATIO` of the enemy pressure on it,
+    /// so a capture attempt would be contesting a planet the enemy can
+    /// out-reinforce. Computed from baseline timelines only (plan-independent),
+    /// before any source selection.
+    pub pressure_gated_targets: HashSet<i64>,
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
     /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
     /// Avoids repeated traffic to the L2 `EntityCache::aim_cache` inside the
@@ -109,9 +116,11 @@ impl<'a> HellburnerModel<'a> {
             inbound_edges,
             outbound_edges,
             reinforcement_target: HashMap::default(),
+            pressure_gated_targets: HashSet::default(),
             shot_cache: RefCell::new(HashMap::default()),
         };
         model.reinforcement_target = build_reinforcement_targets(state, &model, player);
+        model.pressure_gated_targets = build_pressure_gate(state, &model);
         model
     }
 
@@ -347,35 +356,86 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
         if !model.non_comet_ids.contains(&target.id) {
             continue;
         }
-        let mut total = 0.0;
-        for enemy in &state.enemy_planets {
-            if !model.non_comet_ids.contains(&enemy.id) {
-                continue;
-            }
-            let mut best_contribution = 0.0;
-            for offset in 0..=ENEMY_OFFSET_LOOKAHEAD.min(REINFORCEMENT_PRESSURE_TURNS) {
-                let ships = enemy_available_to_launch_at(state, enemy.id, offset);
-                if ships <= 0 {
-                    continue;
-                }
-                let Some((_, travel_turns, _, _, _)) =
-                    model.plan_shot(enemy.id, target.id, ships, offset)
-                else {
-                    continue;
-                };
-                let arrival = (offset + travel_turns).max(1);
-                if arrival <= REINFORCEMENT_PRESSURE_TURNS {
-                    let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
-                    if contribution > best_contribution {
-                        best_contribution = contribution;
-                    }
-                }
-            }
-            total += best_contribution;
-        }
+        let total = pressure_from(
+            state,
+            model,
+            target.id,
+            &state.enemy_planets,
+            ENEMY_OFFSET_LOOKAHEAD,
+        );
         pressure.insert(target.id, total);
     }
     pressure
+}
+
+/// Total pressure `sources` exert on `target_id`: per source, the best
+/// time-decayed deliverable force over launch offsets `0..=max_offset`
+/// (`ships × reinforcement_pressure_weight(arrival)`), summed across sources.
+/// Availability is read from baseline timelines only, so the result is
+/// plan-independent and safe to compute once per model build.
+fn pressure_from(
+    state: &WorldState,
+    model: &HellburnerModel,
+    target_id: i64,
+    sources: &[Planet],
+    max_offset: i64,
+) -> f64 {
+    let mut total = 0.0;
+    for src in sources {
+        if src.id == target_id || !model.non_comet_ids.contains(&src.id) {
+            continue;
+        }
+        let mut best_contribution = 0.0;
+        for offset in 0..=max_offset.min(REINFORCEMENT_PRESSURE_TURNS) {
+            let ships = owner_available_to_launch_at(state, src.id, src.owner, offset);
+            if ships <= 0 {
+                continue;
+            }
+            let Some((_, travel_turns, _, _, _)) =
+                model.plan_shot(src.id, target_id, ships, offset)
+            else {
+                continue;
+            };
+            let arrival = (offset + travel_turns).max(1);
+            if arrival <= REINFORCEMENT_PRESSURE_TURNS {
+                let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
+                if contribution > best_contribution {
+                    best_contribution = contribution;
+                }
+            }
+        }
+        total += best_contribution;
+    }
+    total
+}
+
+/// Enemy-owned targets failing the ally-pressure gate. For each enemy planet,
+/// ally pressure (our planets, our `OFFSET_LOOKAHEAD`) is compared against
+/// enemy pressure (all enemy planets except the target itself,
+/// `ENEMY_OFFSET_LOOKAHEAD`) — both computed exactly like reinforcement
+/// pressure. Targets where ally < `ALLY_PRESSURE_RATIO` × enemy are gated.
+fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i64> {
+    let mut gated: HashSet<i64> = HashSet::default();
+    for target in &state.enemy_planets {
+        if !model.non_comet_ids.contains(&target.id) {
+            continue;
+        }
+        let enemy = pressure_from(
+            state,
+            model,
+            target.id,
+            &state.enemy_planets,
+            ENEMY_OFFSET_LOOKAHEAD,
+        );
+        if enemy <= 0.0 {
+            continue;
+        }
+        let ally = pressure_from(state, model, target.id, &state.my_planets, OFFSET_LOOKAHEAD);
+        if ally < ALLY_PRESSURE_RATIO * enemy {
+            gated.insert(target.id);
+        }
+    }
+    gated
 }
 
 fn reinforcement_pressure_weight(turns: i64) -> f64 {
@@ -388,16 +448,18 @@ fn reinforcement_pressure_weight(turns: i64) -> f64 {
     REINFORCEMENT_PRESSURE_DECAY.powf(exponent)
 }
 
-fn enemy_available_to_launch_at(state: &WorldState, planet_id: i64, offset: i64) -> i64 {
+fn owner_available_to_launch_at(
+    state: &WorldState,
+    planet_id: i64,
+    owner: i64,
+    offset: i64,
+) -> i64 {
     let planet = state.planet(planet_id);
-    if planet.owner == state.player || planet.owner == -1 {
+    if planet.owner != owner || owner == -1 {
         return 0;
     }
-    let enemy_owner = planet.owner;
     match state.timeline_cache.baseline(planet_id) {
-        Some(timeline) => {
-            available_at_timeline_for_owner(timeline, enemy_owner, state.player, offset)
-        }
+        Some(timeline) => available_at_timeline_for_owner(timeline, owner, state.player, offset),
         None => (planet.ships + planet.production * offset.max(0)).max(0),
     }
 }
@@ -445,14 +507,7 @@ impl PlanState {
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         let available = if planned.is_empty() {
-            match world.timeline_cache.baseline(src.id) {
-                Some(b) => available_at_timeline_for_owner(b, owner, world.player, offset),
-                // No cached trajectory: fall back to linear growth. A purely
-                // growing series has its minimum at `offset`, so the point
-                // value is already the forward-min.
-                None if src.owner == owner && owner != -1 => src.ships + src.production * offset,
-                None => 0,
-            }
+            baseline_available_at_for_owner(world, src.id, owner, offset)
         } else {
             // This source also has reinforcements we've planned this turn.
             // Sim the full horizon (not just up to `offset`) so the forward-min
@@ -529,7 +584,7 @@ fn final_owner(timeline: &PlanetTimeline) -> i64 {
     timeline.owner_at[timeline.horizon as usize]
 }
 
-fn available_at_timeline_for_owner(
+pub(crate) fn available_at_timeline_for_owner(
     timeline: &PlanetTimeline,
     owner: i64,
     timeline_player: i64,
@@ -553,6 +608,31 @@ fn available_at_timeline_for_owner(
         0
     } else {
         available.max(0)
+    }
+}
+
+/// Baseline (plan-free) launchable ships for `owner` at launch `offset` from
+/// planet `id`: the forward-min over `owner`'s owned run from `offset`, read
+/// from the cached baseline timeline, or linear growth when no trajectory is
+/// cached (a purely growing series has its forward-min at the read offset).
+/// Callers that track turn-local commitments subtract their own `spent`/
+/// `planned` on top.
+pub(crate) fn baseline_available_at_for_owner(
+    world: &WorldState,
+    id: i64,
+    owner: i64,
+    offset: i64,
+) -> i64 {
+    match world.timeline_cache.baseline(id) {
+        Some(b) => available_at_timeline_for_owner(b, owner, world.player, offset),
+        None => {
+            let p = world.planet(id);
+            if p.owner == owner && owner != -1 {
+                p.ships + p.production * offset.max(0)
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -1366,6 +1446,7 @@ fn greedy_commit(
     model: &HellburnerModel,
     strategy: SelectionStrategy,
     candidate_ids: &[i64],
+    opening: &[OpeningEvent],
     cache: &mut HashMap<i64, Option<(f64, FrontlineWin)>>,
     dirty: &mut HashSet<i64>,
     scratch: &mut FrontlineScratch,
@@ -1373,6 +1454,32 @@ fn greedy_commit(
     let mut state = PlanState::default();
     let mut moves: Vec<MoveAction> = Vec::new();
     let candidate_set: HashSet<i64> = candidate_ids.iter().copied().collect();
+
+    // Opening pre-pass: commit every DFS capture event before the greedy
+    // iterations, exactly like greedy's own orders — offset-0 events are
+    // emitted as fleet moves, future offsets stay reservations (spent ships
+    // later iterations cannot poach, targets they see as already won),
+    // re-planned next turn. Greedy combat, defense, and reinforcement then
+    // run on whatever the opening leaves over.
+    for ev in opening {
+        if ev.offset == 0 {
+            // Re-derive the angle (L1-cached: this exact shot was solved during
+            // the opening search) *before* committing, so a re-derivation that
+            // unexpectedly fails leaves no orphaned reservation (ships reserved
+            // but never launched).
+            let Some((angle, _, _, _, _)) = model.plan_shot(ev.src, ev.target, ev.ships, 0) else {
+                debug_assert!(false, "opening shot not re-derivable at emission");
+                continue;
+            };
+            moves.push(MoveAction {
+                from_id: ev.src,
+                angle,
+                ships: ev.ships,
+                target: ev.target,
+            });
+        }
+        state.commit(ev.src, ev.target, ev.ships, ev.arrival, world.player);
+    }
 
     // Each iteration commits ≥1 ship from at least one source, so the loop is
     // bounded by the total source pool. A fixed safety cap protects against any
@@ -1475,14 +1582,15 @@ fn greedy_commit(
     (moves, state)
 }
 
-/// Fixed-order candidate targets (non-comet, with inbound edges). The scan order
-/// matches the original per-iteration sweep so selection tie-breaking stays
-/// deterministic and identical to the uncached path.
+/// Fixed-order candidate targets (non-comet, not pressure-gated, with inbound
+/// edges). The scan order matches the original per-iteration sweep so selection
+/// tie-breaking stays deterministic and identical to the uncached path.
 fn candidate_target_ids(world: &WorldState, model: &HellburnerModel) -> Vec<i64> {
     world
         .planets
         .iter()
         .filter(|p| model.non_comet_ids.contains(&p.id))
+        .filter(|p| !model.pressure_gated_targets.contains(&p.id))
         .filter(|p| {
             model
                 .inbound_edges
@@ -1494,17 +1602,20 @@ fn candidate_target_ids(world: &WorldState, model: &HellburnerModel) -> Vec<i64>
         .collect()
 }
 
-/// One full pipeline run under a fixed target-selection strategy. Returns
-/// the emitted moves and the resulting PlanState (used by `rollout_score`).
+/// One full pipeline run under a fixed target-selection strategy, seeded
+/// with the opening pre-pass events (empty outside the opening phase).
+/// Returns the emitted moves and the resulting PlanState (used by
+/// `rollout_score`).
 fn run_strategy(
     world: &WorldState,
     model: &HellburnerModel,
     strategy: SelectionStrategy,
+    opening: &[OpeningEvent],
 ) -> (Vec<MoveAction>, PlanState) {
     let candidate_ids = candidate_target_ids(world, model);
 
     // Empty cache + every candidate dirty ⇒ the first iteration evaluates them
-    // all from scratch against the empty plan, exactly as before.
+    // all from scratch against the opening-seeded plan, exactly as before.
     let mut cache: HashMap<i64, Option<(f64, FrontlineWin)>> =
         HashMap::with_capacity_and_hasher(candidate_ids.len(), Default::default());
     let mut dirty: HashSet<i64> = candidate_ids.iter().copied().collect();
@@ -1515,6 +1626,7 @@ fn run_strategy(
         model,
         strategy,
         &candidate_ids,
+        opening,
         &mut cache,
         &mut dirty,
         &mut scratch,
@@ -1540,12 +1652,17 @@ pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     }
     let model = HellburnerModel::build(world);
 
+    // Opening expansion pre-pass (empty past the phase, inside rollouts, or
+    // when no positive-value capture plan exists), committed ahead of the
+    // greedy iterations inside `run_strategy`.
+    let opening = crate::apollo::early_game::plan_opening(&model);
+
     // Single greedy run under the default strategy. This is the policy hook
     // the rollout layer (see `crate::apollo::rollout`) invokes for opponent replies
     // *and* our own replanning during the reactive phase, so it must stay
     // cheap and deterministic. Multi-strategy search happens one level up,
     // in `search_candidates`.
-    let (moves, _) = run_strategy(world, &model, STRATEGIES[0]);
+    let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &opening);
     moves
 }
 
@@ -1696,6 +1813,9 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
         return vec![Vec::new()];
     }
     let model = HellburnerModel::build(world);
+    // Opening pre-pass, computed once and shared by every strategy run so
+    // the greedy plan (`STRATEGIES[0]` + opening) is always candidate 0.
+    let opening = crate::apollo::early_game::plan_opening(&model);
 
     // Stress test: probe `plan_shot` for every ordered pair of planets
     // (both directions) with fleet sizes up to 50. Results are discarded —
@@ -1713,10 +1833,18 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     //     }
     // }
 
-    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len());
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len() + 1);
 
     for &strat in &STRATEGIES {
-        let (moves, _) = run_strategy(world, &model, strat);
+        let (moves, _) = run_strategy(world, &model, strat, &opening);
+        if !out.iter().any(|prev| prev == &moves) {
+            out.push(moves);
+        }
+    }
+    // The opening was planned with no enemy model; offer the rollout minimax
+    // a no-opening alternative so a bad opening can be rejected wholesale.
+    if !opening.is_empty() {
+        let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &[]);
         if !out.iter().any(|prev| prev == &moves) {
             out.push(moves);
         }
@@ -1753,9 +1881,12 @@ pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
 
     let mut out: Vec<Vec<MoveAction>> = Vec::new();
 
+    // Opening pre-pass, shared by the baseline so it stays identical to `plan()`.
+    let opening = crate::apollo::early_game::plan_opening(&model);
+
     // Baseline first: the unrestricted greedy (== `plan()`), capturing every
     // winnable target. Mirrors the old `search_candidates` first-entry contract.
-    let (full_moves, _) = run_strategy(world, &model, strategy);
+    let (full_moves, _) = run_strategy(world, &model, strategy, &opening);
     out.push(full_moves);
 
     // Seed: evaluate every candidate target once against the empty plan. Every
@@ -1812,6 +1943,7 @@ pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
             &model,
             strategy,
             &subset_ids,
+            &[],
             &mut cache,
             &mut dirty,
             &mut scratch,

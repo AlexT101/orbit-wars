@@ -157,8 +157,10 @@ fn candidates_from_ledger(
     ledger: &ArrivalLedger,
     player: i32,
     cache: &EntityCache,
+    rollout_internal: bool,
 ) -> Vec<Vec<Action>> {
-    let world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
+    let mut world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
+    world.rollout_internal = rollout_internal;
     strategy::search_candidates_subsets(&world)
         .into_iter()
         .map(|orders| {
@@ -172,20 +174,23 @@ fn candidates_from_ledger(
 
 /// Hellburner child candidates for `me` and `opp` from a single shared
 /// `Simulator` + `ArrivalLedger` (one `HORIZON`-turn walk for both players).
-/// Caller must `cache.set_current_turn(state.step)` first.
+/// Caller must `cache.set_current_turn(state.step)` first. `rollout_internal`
+/// is forwarded onto both `WorldState`s so the early-game opening DFS stands
+/// down at non-root nodes (see `early_game::plan_opening`).
 pub fn apollo_candidates_pair(
     state: &GameState,
     me: i32,
     opp: i32,
     cache: &EntityCache,
+    rollout_internal: bool,
 ) -> (Vec<Vec<Action>>, Vec<Vec<Action>>) {
     let engine = build_engine(state);
     let sim = Simulator::new(&engine);
     let horizon = Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
     let ledger = ArrivalLedger::build(&sim, horizon, cache);
     (
-        candidates_from_ledger(&sim, &ledger, me, cache),
-        candidates_from_ledger(&sim, &ledger, opp, cache),
+        candidates_from_ledger(&sim, &ledger, me, cache, rollout_internal),
+        candidates_from_ledger(&sim, &ledger, opp, cache, rollout_internal),
     )
 }
 
@@ -195,13 +200,18 @@ pub fn apollo_candidates_pair(
 /// Reuses a prebuilt, shared `cache` (the obstacle/aim geometry is owner-agnostic
 /// and game-static, so one cache serves every node of every turn). Caller must
 /// `cache.set_current_turn(state.step)` (and refresh comets if needed) first.
-pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) -> Vec<Vec<Action>> {
+pub fn apollo_candidates(
+    state: &GameState,
+    player: i32,
+    cache: &EntityCache,
+    rollout_internal: bool,
+) -> Vec<Vec<Action>> {
     let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
     let initial_planets: Vec<APlanet> =
         state.planets.iter().map(to_apollo_planet_initial).collect();
     let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
     let (comets, comet_planet_ids) = to_apollo_comets(state);
-    let world = WorldState::build(
+    let mut world = WorldState::build(
         player as i64,
         state.step,
         planets,
@@ -212,6 +222,7 @@ pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) ->
         state.angular_velocity,
         cache,
     );
+    world.rollout_internal = rollout_internal;
 
     strategy::search_candidates_subsets(&world)
         .into_iter()
@@ -231,13 +242,17 @@ pub fn apollo_candidates(state: &GameState, player: i32, cache: &EntityCache) ->
 /// state, so a minor player's launches are a pure function of `state` and can be
 /// computed once per node. Reuses the shared owner-agnostic `cache`; caller must
 /// `cache.set_current_turn(state.step)` first.
+///
+/// This is apollo's cheap in-rollout reply policy, so it always runs with
+/// `rollout_internal = true`: the early-game opening DFS stands down (a
+/// per-minor-player DFS at every node would blow the turn budget).
 pub fn apollo_greedy(state: &GameState, player: i32, cache: &EntityCache) -> Vec<Action> {
     let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
     let initial_planets: Vec<APlanet> =
         state.planets.iter().map(to_apollo_planet_initial).collect();
     let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
     let (comets, comet_planet_ids) = to_apollo_comets(state);
-    let world = WorldState::build(
+    let mut world = WorldState::build(
         player as i64,
         state.step,
         planets,
@@ -248,6 +263,7 @@ pub fn apollo_greedy(state: &GameState, player: i32, cache: &EntityCache) -> Vec
         state.angular_velocity,
         cache,
     );
+    world.rollout_internal = true;
     strategy::plan(&world)
         .into_iter()
         .map(|m| (m.from_id, m.angle, m.ships, player))

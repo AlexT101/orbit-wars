@@ -38,6 +38,16 @@ pub const ENEMY_OFFSET_LOOKAHEAD: i64 = 5; // Max enemy launch delay considered 
 pub const REINFORCEMENT_PRESSURE_TURNS: i64 = 20; // Enemy planets within this many turns contribute to reinforcement pressure.
 pub const REINFORCEMENT_PRESSURE_DECAY: f64 = 0.5; // Enemy pressure multiplier at REINFORCEMENT_PRESSURE_TURNS; turns 0/1 contribute fully.
 pub const FRONTIER_PRESSURE_RATIO: f64 = 7.0 / 5.0; // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
+pub const ALLY_PRESSURE_RATIO: f64 = 0.8; // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
+
+// Early-game expansion pre-pass (see early_game.rs)
+pub const EARLY_GAME_END: i64 = 10; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.
+pub const EARLY_GAME_MAX_CANDIDATES: usize = 10; // Capture targets kept by earliest probe arrival; EARLY_GAME_VALUE_PICKS more are unioned in by value bound.
+pub const EARLY_GAME_VALUE_PICKS: usize = 5; // Reachable neutrals with the highest value bound (production·(window − earliest arrival) − garrison) unioned into the candidate set regardless of arrival rank.
+pub const EARLY_GAME_MAX_CHILD_FUND: usize = 4; // Per target, highest-production remaining neutrals considered for the min+child funding variant.
+pub const EARLY_GAME_NODE_BUDGET: u64 = 50_000; // Hard cap on early-game DFS nodes; best plan found so far is kept on exhaustion.
+pub const EARLY_GAME_PROBE_SHIPS: i64 = 1000; // Upper clamp on the reachability probe fleet — fleet speed saturates at 1000 ships, so a larger probe can't arrive earlier. The probe itself is sized from exact achievable ships (owned + producible over the window).
+pub const EARLY_GAME_FERRY_PROBES: usize = 8; // Max launch offsets probed per (source, target) for the ferry variant each node (plan-dependent ship counts bypass the geometry row cache).
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 
