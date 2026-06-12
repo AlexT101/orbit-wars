@@ -125,9 +125,11 @@ With `--keep-temp`, the final train is one command over the kept
 `combined.npz` — cheap to repeat with different knobs:
 
 ```bash
-./venv/Scripts/python.exe bots/mine/aphrodite/train/filter_top10_and_train_xgb.py \
+./venv/Scripts/python.exe bots/mine/aphrodite/train/train_xgb.py \
   --data bots/mine/aphrodite/train/data/2p/_ladder_work/combined.npz \
-  --no-filter --recency-halflife 7 --quality-weight --quality-floor 0.25 \
+  --no-filter --quality-weight --quality-floor 0.25 \
+  --decisiveness-weight --drop-decided \
+  --zero-cols 4,8,13,17,21,25,29,33,37,40,41,61,63,64 \
   --rounds 2000 --early-stopping 50 \
   --model-out bots/mine/aphrodite/train/weights/xgb_2p_try.json
 ```
@@ -236,8 +238,9 @@ Pipeline (used by `build_ladder.py`):
 - `build_ladder.py` — end-to-end driver (zips -> model).
 - `build_from_zip.py` — stream replay JSONs out of zips through the `extract_v2`
   Rust binary into a SummaryV2 NPZ (`--players` selects 2p/4p games).
-- `filter_top10_and_train_xgb.py` — quality gate (`--filter-only`) and the
-  weighted XGBoost train (`--no-filter`, recency + quality + rounds).
+- `train_xgb.py` — the canonical trainer: optional win-rate gate
+  (`--filter-only` / `--no-filter`), sample weighting (recency + quality +
+  `--decisiveness-weight`), `--drop-decided`, `--zero-cols`, and the XGBoost train.
 - `combine_npz.py` — concatenate per-day NPZs with safe game-id offsets; writes
   the `source` day-rank column that recency weighting reads.
 
@@ -246,13 +249,11 @@ Eval & data:
 - `eval.py` — threaded 2p/4p match eval vs an opponent set.
 - `collect.py` — self-play / cross-bot data collection and the per-process
   aphrodite daemon driver (`eval.py` imports it).
-- `train_xgb.py` — simple no-gate trainer for an already-combined NPZ (e.g.
-  replay + self-play mixes).
 
 Checks / utilities:
 
-- `validate_extract.py` — independent pure-Python re-implementation of the
-  extractor, cross-checked against the Rust output (guards against drift).
+- `feature_importance.py` — print XGBoost gain/weight/cover per feature, with
+  the slots mapped to human-readable names in `extract()` order.
 - `xgb_tune.py` — XGBoost hyperparameter sweep (offline metric only).
 - `view_replay.py` — render a Kaggle episode JSON to a standalone HTML player.
 

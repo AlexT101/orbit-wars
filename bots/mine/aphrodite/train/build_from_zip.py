@@ -7,7 +7,7 @@ games are read one at a time via zipfile.read() and never unpacked to disk.
 
 Single parse pass:
   * keep games matching --players (2 by default, or 4 for FFA),
-  * extract all player observations -> 46-d summary_v2 features,
+  * extract all player observations -> 41-d summary_v2 features,
   * collect each game's agent names + rewards so the "strong player"
     gate (both players above the median win rate) can be computed in
     memory afterward and stored as a per-sample is_strong flag.
@@ -37,9 +37,13 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 APHRODITE_DIR = REPO / "bots" / "mine" / "aphrodite"
 BIN = APHRODITE_DIR / "target" / "release" / "extract_v2"
+BIN_V3 = APHRODITE_DIR / "target" / "release" / "extract_v3"
 
-SUMMARY_V2_DIM = 46
-RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM  # 196
+SUMMARY_V2_DIM = 65
+SUMMARY_V3_DIM = 145          # 4p FFA feature vector (see FEATURE_SPEC_V3_4P.md)
+AUX_DIM = 9                   # v3 decisiveness aux: ship[4]+prod[4]+neutral_prod
+RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM  # 272 (v2: step+player+feat)
+RECORD_BYTES_V3 = 8 + 4 + 4 * (SUMMARY_V3_DIM + AUX_DIM)  # 628 (v3: step+player+feat+aux)
 
 MIN_GAMES = 3   # min games a player needs before their win rate counts
 SEED = 0
@@ -77,27 +81,36 @@ def _agent_names(d: dict) -> list:
 def process_chunk(args):
     """One worker: open its own zip handle + one extract_v2 subprocess,
     stream all assigned games through it."""
-    zip_path, names, worker_id, zip_tag, n_players = args
+    zip_path, names, worker_id, zip_tag, n_players, keep_set, feat_mode = args
+    is_v3 = feat_mode == "v3"
+    bin_path = BIN_V3 if is_v3 else BIN
+    rec_bytes = RECORD_BYTES_V3 if is_v3 else RECORD_BYTES
     zf = zipfile.ZipFile(zip_path)
     proc = subprocess.Popen(
-        [str(BIN)],
+        [str(bin_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
 
-    records = []  # (step, player, v2) in send order
+    records = []  # (step, player, feat, aux_or_None) in send order
 
     def reader():
         out = proc.stdout
+        fend = 12 + 4 * SUMMARY_V3_DIM
         while True:
-            raw = out.read(RECORD_BYTES)
-            if not raw or len(raw) < RECORD_BYTES:
+            raw = out.read(rec_bytes)
+            if not raw or len(raw) < rec_bytes:
                 break
             step = int.from_bytes(raw[:8], "little", signed=True)
             player = int.from_bytes(raw[8:12], "little", signed=True)
-            v2 = np.frombuffer(raw[12:], dtype=np.float32).copy()
-            records.append((step, player, v2))
+            if is_v3:
+                feat = np.frombuffer(raw[12:fend], dtype=np.float32).copy()
+                aux = np.frombuffer(raw[fend:fend + 4 * AUX_DIM], dtype=np.float32).copy()
+            else:
+                feat = np.frombuffer(raw[12:], dtype=np.float32).copy()
+                aux = None
+            records.append((step, player, feat, aux))
 
     rt = threading.Thread(target=reader, daemon=True)
     rt.start()
@@ -140,6 +153,8 @@ def process_chunk(args):
             if not isinstance(step, list) or len(step) < n_players:
                 continue
             for slot in range(n_players):
+                if keep_set is not None and str(agents[slot]) not in keep_set:
+                    continue  # Elo gate: skip rows for players not in the keep set
                 entry_obj = step[slot]
                 if not isinstance(entry_obj, dict):
                     continue
@@ -181,25 +196,37 @@ def process_chunk(args):
     if n < len(sent_meta):
         print(f"  [w{worker_id}] WARN got {len(records)} records for {len(sent_meta)} sent", flush=True)
     if n == 0:
-        return ([], [], [], game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
+        return ([], [], [], None, game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
 
-    feats = np.empty((n, SUMMARY_V2_DIM), dtype=np.float32)
+    dim = SUMMARY_V3_DIM if is_v3 else SUMMARY_V2_DIM
+    feats = np.empty((n, dim), dtype=np.float32)
+    aux_arr = np.empty((n, AUX_DIM), dtype=np.float32) if is_v3 else None
     labels = np.empty(n, dtype=np.float32)
     meta = np.empty((n, 4), dtype=np.int32)
     for i in range(n):
-        step, player, v2 = records[i]
+        step, player, feat, aux = records[i]
         local_gid, slot, reward = sent_meta[i]
-        feats[i] = v2
+        feats[i] = feat
+        if aux_arr is not None:
+            aux_arr[i] = aux
         labels[i] = reward
         meta[i] = (local_gid, step, player, n_players)
 
-    return (feats, labels, meta, game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
+    return (feats, labels, meta, aux_arr, game_names, game_rewards, game_files, gid + 1, skip_format, skip_other)
 
 
-def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 2):
+def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 2,
+          keep_players=None, feat_mode: str = "v2"):
+    is_v3 = feat_mode == "v3"
     if isinstance(zip_paths, str):
         zip_paths = [zip_paths]
-    feats_all, labels_all, meta_all = [], [], []
+    # Elo gate (Phase 2): when given, extract feature rows ONLY for these players,
+    # so the expensive Rust extraction never touches rows the gate would discard.
+    keep_set = None
+    if keep_players is not None:
+        keep_set = set(json.loads(Path(keep_players).read_text(encoding="utf-8")))
+        print(f"keep-players gate: {len(keep_set)} players; other players' rows skipped")
+    feats_all, labels_all, meta_all, aux_all = [], [], [], []
     game_names_all = []  # global_gid -> tuple(names)
     game_rewards_all = [] # global_gid -> tuple(rewards)
     game_files_all = [] # global_gid -> "tag:entry"
@@ -218,18 +245,20 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 
         chunks = [names[i::n_workers] for i in range(n_workers)]
         t0 = time.time()
         with mp.Pool(n_workers) as pool:
-            results = pool.map(process_chunk, [(zip_path, c, i, tag, n_players) for i, c in enumerate(chunks)])
+            results = pool.map(process_chunk, [(zip_path, c, i, tag, n_players, keep_set, feat_mode) for i, c in enumerate(chunks)])
         elapsed += time.time() - t0
         for res in results:
             if res is None:
                 continue
-            f, lbl, m, gnames, grewards, gfiles, n_games, sfmt, soth = res
+            f, lbl, m, aux, gnames, grewards, gfiles, n_games, sfmt, soth = res
             if len(f):
                 m = m.copy()
                 m[:, 0] += total_games  # offset local gids -> global
                 feats_all.append(f)
                 labels_all.append(lbl)
                 meta_all.append(m)
+                if is_v3 and aux is not None:
+                    aux_all.append(aux)
             game_names_all.extend(gnames)
             game_rewards_all.extend(grewards)
             game_files_all.extend(gfiles)
@@ -245,26 +274,32 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 
     meta = np.concatenate(meta_all)
 
     # --- strong-player gate (computed in memory, stored as a flag) ---
-    pg, pw = defaultdict(int), defaultdict(int)
-    for names, rewards in zip(game_names_all, game_rewards_all):
-        for name in names:
-            pg[name] += 1
-        best = max(rewards)
-        winners = [i for i, reward in enumerate(rewards) if reward == best]
-        if len(winners) == 1:
-            pw[names[winners[0]]] += 1
-    rates = {pl: pw[pl] / pg[pl] for pl in pg if pg[pl] >= MIN_GAMES}
-    sr = sorted(rates.values())
-    median = sr[len(sr) // 2] if sr else 0.0
-    above = {pl for pl, r in rates.items() if r > median}
-    strong_gids = {
-        gid for gid, names in enumerate(game_names_all)
-        if all(name in above for name in names)
-    }
-    is_strong = np.fromiter(
-        (1 if g in strong_gids else 0 for g in meta[:, 0]),
-        dtype=np.uint8, count=meta.shape[0],
-    )
+    # Skipped under the Elo keep-players gate: every extracted row is already a
+    # kept (top-rated) player, so is_strong is uniformly 1.
+    if keep_set is not None:
+        rates, median = {}, 0.0
+        is_strong = np.ones(meta.shape[0], dtype=np.uint8)
+    else:
+        pg, pw = defaultdict(int), defaultdict(int)
+        for names, rewards in zip(game_names_all, game_rewards_all):
+            for name in names:
+                pg[name] += 1
+            best = max(rewards)
+            winners = [i for i, reward in enumerate(rewards) if reward == best]
+            if len(winners) == 1:
+                pw[names[winners[0]]] += 1
+        rates = {pl: pw[pl] / pg[pl] for pl in pg if pg[pl] >= MIN_GAMES}
+        sr = sorted(rates.values())
+        median = sr[len(sr) // 2] if sr else 0.0
+        above = {pl for pl, r in rates.items() if r > median}
+        strong_gids = {
+            gid for gid, names in enumerate(game_names_all)
+            if all(name in above for name in names)
+        }
+        is_strong = np.fromiter(
+            (1 if g in strong_gids else 0 for g in meta[:, 0]),
+            dtype=np.uint8, count=meta.shape[0],
+        )
 
     slots = sorted(np.unique(meta[:, 2]).tolist())
     print(f"\n=== build summary ===")
@@ -273,9 +308,12 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 
     print(f"other/invalid skipped    : {total_other}")
     print(f"observations             : {feats.shape[0]}")
     print(f"player slots present     : {slots}   (expected {list(range(n_players))})")
-    print(f"unique players (>= {MIN_GAMES} games): {len(rates)}   median win rate: {median:.3f}")
-    print(f"strong games             : {len(strong_gids)} / {total_games}")
-    print(f"strong observations      : {int(is_strong.sum())} / {is_strong.shape[0]}")
+    if keep_set is not None:
+        print(f"elo keep-players gate    : {len(keep_set)} players; {is_strong.shape[0]} rows kept")
+    else:
+        print(f"unique players (>= {MIN_GAMES} games): {len(rates)}   median win rate: {median:.3f}")
+        print(f"strong games             : {len(strong_gids)} / {total_games}")
+        print(f"strong observations      : {int(is_strong.sum())} / {is_strong.shape[0]}")
     print(f"NaN/Inf in features      : {int(np.sum(~np.isfinite(feats)))}")
     print(f"label values             : {sorted(np.unique(labels).tolist())[:6]}...")
     print(f"extraction time          : {elapsed:.1f}s")
@@ -287,11 +325,20 @@ def build(zip_paths, out_npz: str, n_workers: int, limit=None, n_players: int = 
 
     out = Path(out_npz)
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out,
-        summary_v2=feats, labels=labels, meta=meta, is_strong=is_strong,
-        game_names=name_arr, game_rewards=reward_arr, game_files=file_arr,
-    )
+    if is_v3:
+        aux = np.concatenate(aux_all) if aux_all else np.zeros((feats.shape[0], AUX_DIM), np.float32)
+        assert aux.shape[0] == feats.shape[0], (aux.shape, feats.shape)
+        np.savez_compressed(
+            out,
+            summary_v3=feats, labels=labels, meta=meta, decisiveness_aux=aux,
+            game_names=name_arr, game_rewards=reward_arr, game_files=file_arr,
+        )
+    else:
+        np.savez_compressed(
+            out,
+            summary_v2=feats, labels=labels, meta=meta, is_strong=is_strong,
+            game_names=name_arr, game_rewards=reward_arr, game_files=file_arr,
+        )
     print(f"wrote {out}  ({out.stat().st_size / 1e6:.1f} MB)")
 
 
@@ -302,8 +349,16 @@ def main():
     p.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 1))
     p.add_argument("--limit", type=int, default=None, help="cap entries per zip (debug)")
     p.add_argument("--players", type=int, choices=(2, 4), default=2)
+    p.add_argument("--keep-players", type=Path, default=None,
+                   help="JSON list of player names (from elo_topn.py); extract ONLY these players' "
+                        "rows. The Elo gate, applied during extraction so skipped rows cost nothing.")
+    p.add_argument("--features", choices=("v2", "v3"), default="v2",
+                   help="v2 = 65-d summary_v2 (default, 2p/4p); v3 = 145-d 4p summary_v3 + "
+                        "decisiveness_aux (extract_v3 binary). Use v3 only with --players 4.")
     args = p.parse_args()
-    build(args.zip, args.out, args.workers, args.limit, args.players)
+    if args.features == "v3" and args.players != 4:
+        raise SystemExit("--features v3 is the 4p redesign; pass --players 4")
+    build(args.zip, args.out, args.workers, args.limit, args.players, args.keep_players, args.features)
 
 
 if __name__ == "__main__":

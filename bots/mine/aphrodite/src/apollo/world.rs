@@ -58,6 +58,12 @@ pub struct WorldState<'a> {
     /// defaults to 0.0 for rollout-internal and test-built worlds so they take the cheap
     /// path through cost-gated logic.
     pub remaining_overage_time: f64,
+
+    /// True for WorldStates built inside the rollout's forward simulation
+    /// (opponent replies and reactive replans). The early-game planner checks
+    /// this and stands down: running a DFS per simulated reply would blow the
+    /// turn budget, and the rollout's reply policy is meant to stay cheap.
+    pub rollout_internal: bool,
 }
 
 impl<'a> WorldState<'a> {
@@ -154,6 +160,7 @@ impl<'a> WorldState<'a> {
             enemy_planets,
             config,
             remaining_overage_time: 0.0,
+            rollout_internal: false,
         }
     }
 

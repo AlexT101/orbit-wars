@@ -352,6 +352,66 @@ def eval_pair_metrics(logits, pair_src, pair_tgt, mask, ks=(1, 3, 5, 8, 10)):
     return metrics
 
 
+@torch.no_grad()
+def eval_policy_metrics(model, pf_n, gl_n, mk, pair_src, pair_tgt, device, val_kwargs, batch=256):
+    """Per-source softmax policy CE + top-K accuracy on launch samples only.
+
+    Vectorized: gather (row, src, target) tuples from sparse pair_src/pair_tgt,
+    then index into policy[r, s] in one shot.
+    """
+    R, N = mk.shape
+    # Collect all sparse (row, src_idx, tgt_idx) triples
+    valid = pair_src >= 0  # (R, K) bool
+    rs, ks = np.where(valid)
+    if len(rs) == 0:
+        return {"policy_ce": 0.0, "policy_top1": 0.0, "policy_top3": 0.0}
+    sources = pair_src[rs, ks]  # (M,) source idx
+    targets = pair_tgt[rs, ks]  # (M,) target idx
+    # Run forward in batches and gather policy logits at (r, s) for each triple.
+    ce_total = 0.0; ce_n = 0; top1 = 0; top3 = 0
+    for start in range(0, R, batch):
+        end = min(R, start + batch)
+        kwargs = dict(return_value=False, return_noop=True)
+        if "raw_xy" in val_kwargs:
+            kwargs["raw_xy"] = torch.from_numpy(val_kwargs["raw_xy"][start:end]).to(device)
+            kwargs["raw_ships"] = torch.from_numpy(val_kwargs["raw_ships"][start:end]).to(device)
+            kwargs["raw_prod"] = torch.from_numpy(val_kwargs["raw_prod"][start:end]).to(device)
+        pair_logits, noop_logits = model(
+            torch.from_numpy(pf_n[start:end]).to(device),
+            torch.from_numpy(gl_n[start:end]).to(device),
+            torch.from_numpy(mk[start:end]).to(device),
+            **kwargs,
+        )
+        policy = torch.cat([noop_logits.unsqueeze(-1), pair_logits], dim=-1)  # (B, N, N+1)
+        # Select triples whose row falls in this batch
+        in_batch = (rs >= start) & (rs < end)
+        if not in_batch.any():
+            continue
+        local_rs = rs[in_batch] - start
+        local_srcs = sources[in_batch]
+        local_tgts = targets[in_batch]
+        logits_at = policy[local_rs, local_srcs].cpu().numpy()  # (M_batch, N+1)
+        # Mask self-launch (src+1) and noop options? Keep noop allowed; only mask self.
+        for i in range(logits_at.shape[0]):
+            ssi = int(local_srcs[i])
+            if ssi + 1 < logits_at.shape[1]:
+                logits_at[i, ssi + 1] = -1e9
+        # top-K
+        sorted_idx = np.argsort(-logits_at, axis=1)
+        gold = local_tgts + 1  # action label = target_idx + 1 (0 reserved for noop)
+        top1 += int((sorted_idx[:, 0] == gold).sum())
+        top3 += int(np.any(sorted_idx[:, :3] == gold[:, None], axis=1).sum())
+        # CE
+        lse = np.log(np.exp(logits_at - logits_at.max(axis=1, keepdims=True)).sum(axis=1)) + logits_at.max(axis=1)
+        ce_total += float((-logits_at[np.arange(len(gold)), gold] + lse).sum())
+        ce_n += len(gold)
+    return {
+        "policy_ce": ce_total / max(ce_n, 1),
+        "policy_top1": top1 / max(ce_n, 1),
+        "policy_top3": top3 / max(ce_n, 1),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -376,17 +436,43 @@ def main():
     ap.add_argument("--val-frac", type=float, default=0.12)
     ap.add_argument("--max-step", type=int, default=200)
     ap.add_argument("--max-ship-ratio", type=float, default=None)
+    ap.add_argument("--max-rows", type=int, default=None,
+                    help="randomly subsample at most this many training rows. "
+                         "Use to fit memory on smaller machines.")
     ap.add_argument("--opening-weight", choices=["off", "smooth", "linear", "step"],
                     default="smooth")
-    ap.add_argument("--value-loss-weight", type=float, default=0.5,
+    ap.add_argument("--value-loss-weight", type=float, default=1.0,
                     help="multiplier on the value-head MSE loss in multi-task training. "
                          "0.0 = disable value training entirely.")
-    ap.add_argument("--noop-loss-weight", type=float, default=0.1,
-                    help="multiplier on the per-source noop BCE in multi-task training.")
-    ap.add_argument("--select-by", default="pair_logloss",
-                    help="metric to pick best epoch by. Lower is better for *logloss; "
+    ap.add_argument("--noop-loss-weight", type=float, default=0.0,
+                    help="multiplier on the per-source noop BCE in multi-task training. "
+                         "Default 0 (the policy CE head supersedes the standalone noop BCE).")
+    ap.add_argument("--pair-loss-weight", type=float, default=0.0,
+                    help="multiplier on the BCE pair loss (legacy). The policy CE is the "
+                         "primary head; keep this small or zero unless you want calibrated "
+                         "marginal pair probs.")
+    ap.add_argument("--policy-loss-weight", type=float, default=1.0,
+                    help="multiplier on the per-source softmax policy CE. This is the "
+                         "primary head used by alphaduck MCTS: gives a proper distribution "
+                         "over [noop, t0, t1, ...] per source.")
+    ap.add_argument("--policy-action-upweight", type=float, default=1.0,
+                    help="weight multiplier on the CE loss for samples where the true "
+                         "action is a launch (label > 0). Default 1.0 = no upweight. "
+                         "Higher values force the model to attend more to launch decisions "
+                         "and not just predict noop (since ~95%% of (planet, turn) labels "
+                         "are noop).")
+    ap.add_argument("--policy-conditional", action="store_true",
+                    help="train the policy head only on samples where a launch occurred "
+                         "(conditional P(target | launch)). The noop class is dropped from "
+                         "the softmax. Pair with a separate sigmoid noop head (see "
+                         "--noop-loss-weight) for the marginal launch probability.")
+    ap.add_argument("--drop-turn-features", action="store_true",
+                    help="zero out the turn_num/turn_norm/phase_* globals at training time "
+                         "so the model can't learn to panic outside its training range.")
+    ap.add_argument("--select-by", default="policy_ce",
+                    help="metric to pick best epoch by. Lower is better for *ce/logloss; "
                          "higher is better for *recall* / *top*. "
-                         "Common choices: pair_logloss, pair_recall8, pair_top1.")
+                         "Common choices: policy_ce, policy_top1, pair_logloss, pair_recall8.")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parent / "weights" / "transformer_pair.pt")
     ap.add_argument("--device", default="cpu")
@@ -439,6 +525,14 @@ def main():
         keep = (hi / lo) <= args.max_ship_ratio
         _apply_keep(keep)
         print(f"  ship-ratio filter ≤{args.max_ship_ratio}: kept {keep.sum()} rows")
+    if args.max_rows is not None and len(pf) > args.max_rows:
+        rng = np.random.default_rng(args.seed)
+        idx = rng.choice(len(pf), args.max_rows, replace=False)
+        keep = np.zeros(len(pf), dtype=bool)
+        keep[idx] = True
+        _apply_keep(keep)
+        print(f"  max-rows subsample: kept {args.max_rows} rows")
+        import gc; gc.collect()
 
     train_mask, val_mask = game_level_split(meta, seed=args.seed, val_frac=args.val_frac)
     p_mean, p_std, g_mean, g_std = fit_norm(pf, gl, train_mask, mk)
@@ -486,14 +580,31 @@ def main():
     N = pf.shape[1]
 
     # selection direction
-    higher_better = not args.select_by.endswith("logloss")
+    lower_better_suffixes = ("logloss", "_ce", "_mse")
+    higher_better = not any(args.select_by.endswith(s) for s in lower_better_suffixes)
     best = -math.inf if higher_better else math.inf
 
     VALUE_LOSS_W = args.value_loss_weight if value_labels is not None else 0.0
     NOOP_LOSS_W = args.noop_loss_weight if noop_labels is not None else 0.0
+    PAIR_LOSS_W = args.pair_loss_weight
+    POLICY_LOSS_W = args.policy_loss_weight if noop_labels is not None else 0.0
     use_pair_feats = raw_xy is not None
-    print(f"  loss weights: value={VALUE_LOSS_W}  noop={NOOP_LOSS_W}  "
+    print(f"  loss weights: pair_bce={PAIR_LOSS_W}  policy_ce={POLICY_LOSS_W}  "
+          f"value={VALUE_LOSS_W}  noop_bce={NOOP_LOSS_W}  "
           f"pair-feat-head={'on' if use_pair_feats else 'off'}")
+
+    # Optional: zero out turn-related globals so the model can't learn to "panic"
+    # outside its training horizon. We do this AFTER fit_norm so normalization
+    # statistics aren't affected; downstream input becomes constant 0 for those cols.
+    turn_global_idx = []
+    if args.drop_turn_features and _global_names_cache is not None:
+        names = list(_global_names_cache)
+        for j, name in enumerate(names):
+            if name.startswith("turn_") or name.startswith("phase_"):
+                turn_global_idx.append(j)
+        if turn_global_idx:
+            gl_n[:, turn_global_idx] = 0.0
+            print(f"  zeroed turn-related globals: {[names[j] for j in turn_global_idx]}")
 
     # Used to mask noop loss to my planets only (label is set to 0 for non-mine, but
     # mining real planets is the natural restriction). Use planet-feats column for
@@ -505,7 +616,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
         model.train()
         t0 = time.time()
-        losses_p = []; losses_v = []; losses_n = []
+        losses_p = []; losses_v = []; losses_n = []; losses_pol = []
         for pf_b, gl_b, mk_b, ps_b, pt_b, w_b, v_b, rxy_b, rsh_b, rpd_b, nlb_b in tr_loader:
             pf_b = pf_b.to(device); gl_b = gl_b.to(device); mk_b = mk_b.to(device)
             ps_b = ps_b.to(device); pt_b = pt_b.to(device); w_b = w_b.to(device); v_b = v_b.to(device)
@@ -517,28 +628,86 @@ def main():
                 raw_prod=rpd_b if use_pair_feats else None,
                 return_value=True, return_noop=True,
             )
+            B_, N_ = noop_logits.shape
             dense = dense_pair_labels(ps_b, pt_b, N)
             pm = pair_mask(mk_b)
-            loss_p = masked_pair_bce(pair_logits, dense, pm, w_b, pos_weight=pos_w_t)
+            loss_p = (masked_pair_bce(pair_logits, dense, pm, w_b, pos_weight=pos_w_t)
+                      if PAIR_LOSS_W > 0 else torch.tensor(0.0, device=device))
             loss_v = nn.functional.mse_loss(value_pred, v_b) if VALUE_LOSS_W > 0 else torch.tensor(0.0, device=device)
+            # is_mine derived from planet feature col 0 (after fit_norm, mine > 0).
+            is_mine_mask = pf_b[..., 0] > 0
+            mine_planet_mask = mk_b & is_mine_mask  # (B, N) bool
             if NOOP_LOSS_W > 0:
                 noop_bce = nn.functional.binary_cross_entropy_with_logits(noop_logits, nlb_b, reduction="none")
-                # Mask noop loss to MY planets only. After fit_norm the is_mine
-                # column (planet_feats index 0) has two distinct values; the
-                # > 0 threshold cleanly separates raw is_mine == 1 from == 0.
-                is_mine_mask = pf_b[..., 0] > 0
-                noop_mask = mk_b & is_mine_mask
-                loss_n = (noop_bce * noop_mask.float()).sum() / noop_mask.float().sum().clamp_min(1.0)
+                loss_n = (noop_bce * mine_planet_mask.float()).sum() / mine_planet_mask.float().sum().clamp_min(1.0)
             else:
                 loss_n = torch.tensor(0.0, device=device)
-            loss = loss_p + VALUE_LOSS_W * loss_v + NOOP_LOSS_W * loss_n
+            # Per-source softmax policy CE: for each MY planet, predict the
+            # action it took in {0=noop, 1..N=target_index+1}.
+            # In --policy-conditional mode: drop the noop class; only train on
+            # planets that actually launched, label = target_idx in [0, N).
+            if POLICY_LOSS_W > 0:
+                if args.policy_conditional:
+                    # Pure-target softmax over N classes (no noop class).
+                    policy_logits = pair_logits  # (B, N, N)
+                    policy_labels = torch.full((B_, N_), -100, dtype=torch.long, device=device)
+                    valid = ps_b >= 0
+                    b_idx = torch.arange(B_, device=device).unsqueeze(1).expand_as(ps_b)
+                    if valid.any():
+                        b_sel = b_idx[valid]
+                        s_sel = ps_b[valid].long()
+                        t_sel = pt_b[valid].long()
+                        policy_labels[b_sel, s_sel] = t_sel
+                    n_classes = N_
+                else:
+                    policy_logits = torch.cat([noop_logits.unsqueeze(-1), pair_logits], dim=-1)  # (B, N, N+1)
+                    policy_labels = torch.full((B_, N_), -100, dtype=torch.long, device=device)
+                    # default for my-planets = noop (label 0); will be overwritten by
+                    # any recorded launch from that source.
+                    policy_labels[mine_planet_mask] = 0
+                    valid = ps_b >= 0  # (B, K)
+                    b_idx = torch.arange(B_, device=device).unsqueeze(1).expand_as(ps_b)
+                    if valid.any():
+                        b_sel = b_idx[valid]
+                        s_sel = ps_b[valid].long()
+                        t_sel = pt_b[valid].long()
+                        policy_labels[b_sel, s_sel] = t_sel + 1
+                    n_classes = N_ + 1
+                if args.policy_action_upweight != 1.0:
+                    ce_per = nn.functional.cross_entropy(
+                        policy_logits.reshape(B_ * N_, n_classes),
+                        policy_labels.reshape(B_ * N_),
+                        ignore_index=-100,
+                        reduction="none",
+                    ).view(B_, N_)
+                    valid = policy_labels >= 0
+                    upweight = torch.where(
+                        policy_labels > 0,
+                        torch.tensor(args.policy_action_upweight, device=device),
+                        torch.tensor(1.0, device=device),
+                    )
+                    upweight = upweight * valid.float()
+                    loss_pol = (ce_per * upweight).sum() / upweight.sum().clamp_min(1.0)
+                else:
+                    loss_pol = nn.functional.cross_entropy(
+                        policy_logits.reshape(B_ * N_, n_classes),
+                        policy_labels.reshape(B_ * N_),
+                        ignore_index=-100,
+                        reduction="mean",
+                    )
+            else:
+                loss_pol = torch.tensor(0.0, device=device)
+            loss = (PAIR_LOSS_W * loss_p + VALUE_LOSS_W * loss_v
+                    + NOOP_LOSS_W * loss_n + POLICY_LOSS_W * loss_pol)
             opt.zero_grad(); loss.backward(); opt.step()
-            losses_p.append(loss_p.item())
+            losses_p.append(loss_p.item() if PAIR_LOSS_W > 0 else 0.0)
             losses_v.append(loss_v.item() if VALUE_LOSS_W > 0 else 0.0)
             losses_n.append(loss_n.item() if NOOP_LOSS_W > 0 else 0.0)
+            losses_pol.append(loss_pol.item() if POLICY_LOSS_W > 0 else 0.0)
         tr_loss_p = float(np.mean(losses_p))
         tr_loss_v = float(np.mean(losses_v))
         tr_loss_n = float(np.mean(losses_n))
+        tr_loss_pol = float(np.mean(losses_pol))
 
         # val
         model.eval()
@@ -552,15 +721,25 @@ def main():
             v_true = value_labels[val_mask]
             m["value_mse"] = float(((v_pred - v_true) ** 2).mean())
             m["value_signacc"] = float(((np.sign(v_pred) == np.sign(v_true)) & (v_true != 0)).sum() / max((v_true != 0).sum(), 1))
+        # policy CE and top-K accuracy on val set (vectorized via the pair logits + noop logits)
+        if POLICY_LOSS_W > 0 and noop_labels is not None:
+            m.update(eval_policy_metrics(
+                model, pf_n[val_mask], gl_n[val_mask], mk[val_mask], pair_src[val_mask],
+                pair_tgt[val_mask], device, val_kwargs,
+            ))
         dt = time.time() - t0
         sel = m[args.select_by]
         v_suffix = (f"  v_mse={m.get('value_mse', 0.0):.3f}  v_signacc={m.get('value_signacc', 0.0):.3f}"
                     if value_labels is not None else "")
-        print(f"  epoch {epoch:2d} | tr_p={tr_loss_p:.4f} tr_v={tr_loss_v:.4f} tr_n={tr_loss_n:.4f} | "
+        pol_suffix = (f"  pol_ce={m.get('policy_ce', 0.0):.3f}  "
+                      f"pol_top1={m.get('policy_top1', 0.0):.3f}  "
+                      f"pol_top3={m.get('policy_top3', 0.0):.3f}"
+                      if POLICY_LOSS_W > 0 else "")
+        print(f"  epoch {epoch:2d} | tr_p={tr_loss_p:.4f} tr_v={tr_loss_v:.4f} tr_n={tr_loss_n:.4f} tr_pol={tr_loss_pol:.4f} | "
               f"acc={m['pair_acc']:.4f} ll={m['pair_logloss']:.4f} "
               f"r1={m['pair_recall1']:.3f} r3={m['pair_recall3']:.3f} "
               f"r5={m['pair_recall5']:.3f} r8={m['pair_recall8']:.3f} "
-              f"r10={m['pair_recall10']:.3f}{v_suffix}  ({dt:.1f}s)")
+              f"r10={m['pair_recall10']:.3f}{v_suffix}{pol_suffix}  ({dt:.1f}s)")
 
         improved = sel > best if higher_better else sel < best
         if improved:
@@ -583,6 +762,11 @@ def main():
                 "opening_weight_schedule": args.opening_weight,
                 "max_step": args.max_step,
                 "max_ship_ratio": args.max_ship_ratio,
+                "policy_loss_weight": args.policy_loss_weight,
+                "value_loss_weight": args.value_loss_weight,
+                "drop_turn_features": args.drop_turn_features,
+                "policy_action_upweight": args.policy_action_upweight,
+                "policy_conditional": args.policy_conditional,
             }, args.out)
             print(f"    saved (best {args.select_by}={sel:.4f}) -> {args.out}")
     return 0

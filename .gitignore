@@ -210,7 +210,7 @@ wandb/
 bots/mine/alphaow/train/data/*.npz
 
 # Raw Kaggle ladder replays (~1.3GB/zip)
-ladder_replays/
+ladder_replays*/
 
 # Aphrodite per-format training data + ladder intermediates (combined.npz is ~377MB)
 bots/mine/aphrodite/train/data/2p/
@@ -223,3 +223,5 @@ orbit-wars-lab/runs/*
 !orbit-wars-lab/runs/runtimes.json
 
 .DS_Store
+
+prometheus_ref/

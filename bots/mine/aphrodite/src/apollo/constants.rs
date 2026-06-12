@@ -33,11 +33,27 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450]; // Game steps 
 
 // Turn rules
 pub const ROTATION_LOOK_AHEAD_TURNS: i64 = 10; // Number of turns to look ahead when estimating future position of planets
-pub const OFFSET_LOOKAHEAD: i64 = 5; // Max base launch delay swept per target. Offset 0 emits now; winning delayed offsets become reservations so later choices cannot spend those ships.
-pub const MAX_COORD_DELAY: i64 = 5; // Max extra launch delay a source may add beyond the subset's base offset while trying to coordinate arrivals near the subset's natural latest arrival.
-pub const A_S_LOOKAHEAD: i64 = 3; // Max turns past the natural latest arrival that coordinated schedules may target, letting delayed sources grow extra production before launch.
+pub const OFFSET_LOOKAHEAD: i64 = 15; // Max per-source launch delay considered by attack planning and reinforcement hold checks. Offset 0 emits now; delayed attack offsets become reservations so later choices cannot spend those ships.
+pub const ENEMY_OFFSET_LOOKAHEAD: i64 = 5; // Max enemy launch delay considered when estimating reinforcement pressure.
+pub const REINFORCEMENT_PRESSURE_TURNS: i64 = 20; // Enemy planets within this many turns contribute to reinforcement pressure.
+pub const REINFORCEMENT_PRESSURE_DECAY: f64 = 0.5; // Enemy pressure multiplier at REINFORCEMENT_PRESSURE_TURNS; turns 0/1 contribute fully.
+pub const FRONTIER_PRESSURE_RATIO: f64 = 7.0 / 5.0; // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
+pub const ALLY_PRESSURE_RATIO: f64 = 0.8; // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
+
+// Early-game expansion pre-pass (see early_game.rs)
+pub const EARLY_GAME_END: i64 = 10; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.
+pub const EARLY_GAME_MAX_CANDIDATES: usize = 10; // Capture targets kept by earliest probe arrival; EARLY_GAME_VALUE_PICKS more are unioned in by value bound.
+pub const EARLY_GAME_VALUE_PICKS: usize = 5; // Reachable neutrals with the highest value bound (production·(window − earliest arrival) − garrison) unioned into the candidate set regardless of arrival rank.
+pub const EARLY_GAME_MAX_CHILD_FUND: usize = 4; // Per target, highest-production remaining neutrals considered for the min+child funding variant.
+pub const EARLY_GAME_NODE_BUDGET: u64 = 50_000; // Hard cap on early-game DFS nodes; best plan found so far is kept on exhaustion.
+pub const EARLY_GAME_PROBE_SHIPS: i64 = 1000; // Upper clamp on the reachability probe fleet — fleet speed saturates at 1000 ships, so a larger probe can't arrive earlier. The probe itself is sized from exact achievable ships (owned + producible over the window).
+pub const EARLY_GAME_FERRY_PROBES: usize = 8; // Max launch offsets probed per (source, target) for the ferry variant each node (plan-dependent ship counts bypass the geometry row cache).
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
+
+// `search_candidates_subsets`: number of top-ranked targets whose 2^k include/
+// exclude combinations seed the diversified candidate sweep.
+pub const SUBSET_TOP_TARGETS: usize = 3;
 
 // Fixed look-ahead used by the aimer when capping a shot's feasible arrival turn
 pub const AIM_HORIZON: i64 = 30;
@@ -48,20 +64,24 @@ pub struct Config {
     pub horizon: i64,
     /// Maximum distance between planets for us to consider fleet travel.
     pub max_distance: f64,
-    /// Upper bound on the number of inbound sources enumerated per target.
-    pub max_subset_sources: usize,
+    /// Upper bound on the number of inbound sources precomputed per target.
+    pub max_sources_to_consider: usize,
+    /// Upper bound on the number of sources used in a single attack plan.
+    pub max_sources: usize,
 }
 
 const CONFIG_2P: Config = Config {
     horizon: 30,
     max_distance: 38.0,
-    max_subset_sources: 16,
+    max_sources_to_consider: 16,
+    max_sources: 4,
 };
 
 const CONFIG_4P: Config = Config {
     horizon: 30,
     max_distance: 38.0,
-    max_subset_sources: 16,
+    max_sources_to_consider: 16,
+    max_sources: 4,
 };
 
 impl Config {

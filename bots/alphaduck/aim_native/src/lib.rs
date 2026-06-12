@@ -170,6 +170,30 @@ fn aim_eta_batch(
     Ok(out)
 }
 
+/// Same as `aim_eta_batch` but returns `(eta, angle)` per triple. Use this
+/// when the caller needs the apollo launch angle alongside the ETA — apollo's
+/// angle and an iterative lead-angle solver are NOT bit-equivalent, so a
+/// caller that uses the apollo eta MUST also use the apollo angle for the
+/// launched fleet to actually arrive at the target.
+#[pyfunction]
+#[pyo3(signature = (obs, triples))]
+fn aim_eta_angle_batch(
+    obs: &Bound<'_, PyDict>,
+    triples: Vec<(i64, i64, i64)>,
+) -> PyResult<Vec<Option<(f64, f64)>>> {
+    let cache = build_cache_from_obs(obs)?;
+    let n = triples.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (triples[i].0, triples[i].2));
+    let mut out: Vec<Option<(f64, f64)>> = vec![None; n];
+    for &i in &order {
+        let (src, tgt, fleet_size) = triples[i];
+        out[i] = crate::aim::aim_with_prediction(&cache, src, tgt, fleet_size, 0)
+            .map(|(angle, _t, _x, _y, flight_time)| (flight_time, angle));
+    }
+    Ok(out)
+}
+
 /// Stateful cache handle: build once per obs, query many times without
 /// re-parsing planets/comets or rebuilding entity tables. Useful when a single
 /// obs needs many independent aim_eta lookups (replay analysis, search loops).
@@ -425,6 +449,7 @@ fn engine_step<'py>(py: Python<'py>, state: &Bound<'_, PyDict>) -> PyResult<Boun
 fn aim_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(aim_eta, m)?)?;
     m.add_function(wrap_pyfunction!(aim_eta_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(aim_eta_angle_batch, m)?)?;
     m.add_function(wrap_pyfunction!(engine_step, m)?)?;
     m.add_class::<Cache>()?;
     Ok(())

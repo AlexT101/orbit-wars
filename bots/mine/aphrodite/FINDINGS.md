@@ -8,7 +8,7 @@ What remains important:
 - `build_submission.py` packages only `main.py`, the Rust `aphrodite` binary,
   and `xgb_2p_old_top10.json`.
 - `train/data/2p/old_top10.npz` and
-  `train/filter_top10_and_train_xgb.py` are the retained path for rebuilding
+  `train/train_xgb.py` are the retained path for rebuilding
   the deployed model.
 
 Removed experiments:

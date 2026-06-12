@@ -1,0 +1,5 @@
+name: alphaduck
+description: "PairNetV17 + DUCT MCTS with apollo aim/pathing. v17_jun weights (trained on Jun-6 Kaggle data, 1.48M rows, 80 chunks)."
+author: Derek Wang
+license: "Apache 2.0"
+tags: [mcts, transformer, value-net, learned]

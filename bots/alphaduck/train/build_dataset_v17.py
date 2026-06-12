@@ -91,13 +91,19 @@ def _dist_to_edge(p):
     return min(x, 100.0 - x, y, 100.0 - y)
 
 
-def extract_state_v17(state, player, owner_change_turn=None, obs_for_apollo=None, pair_cache=None):
+def extract_state_v17(state, player, owner_change_turn=None, obs_for_apollo=None, pair_cache=None,
+                      aim_etas=None):
     """Return dict with all v17 features for this state from `player`'s POV.
 
     obs_for_apollo: the raw kaggle obs dict for this turn — used as input to
     apollo's `aim_eta` function for the pair features.
     pair_cache: optional mutable dict to share pair_feats across both player
     POVs (pair geometry doesn't depend on which player is asking).
+    aim_etas: optional precomputed {(src_pid, tgt_pid, src_ships): eta_or_None}.
+    When provided, skip the apollo_native.aim_eta_batch call (which is the
+    expensive part of pair-feature construction) and read etas from this dict
+    instead. Used by inference to share apollo work with the MCTS candidate
+    generator. Training leaves this None.
     """
     planets = state["planets"]
     fleets = state["fleets"]
@@ -224,7 +230,25 @@ def extract_state_v17(state, player, owner_change_turn=None, obs_for_apollo=None
     pf_pair[..., 1] = dist_drift - dist_now
     # apollo aim_eta in a single batched Rust call: builds EntityCache once,
     # loops over all (src, tgt, ships) triples in Rust. ~25× faster per state.
-    if obs_for_apollo is not None:
+    # If aim_etas was supplied, skip the Rust call and read the cache directly.
+    if aim_etas is not None:
+        for i, p_src in enumerate(planets):
+            src_pid = int(p_src["id"])
+            ships = max(int(p_src["ships"]), 1)
+            for j, p_tgt in enumerate(planets):
+                if i == j:
+                    continue
+                tgt_pid = int(p_tgt["id"])
+                entry = aim_etas.get((src_pid, tgt_pid, ships))
+                if entry is None:
+                    pf_pair[i, j, 2] = 0.0
+                    pf_pair[i, j, 3] = 1.0
+                else:
+                    # entry may be a bare eta float or a (eta, angle) tuple.
+                    eta = entry[0] if isinstance(entry, tuple) else entry
+                    pf_pair[i, j, 2] = float(eta)
+                    pf_pair[i, j, 3] = 0.0
+    elif obs_for_apollo is not None:
         clean_obs = {
             "planets": obs_for_apollo["planets"],
             "angular_velocity": obs_for_apollo.get("angular_velocity", 0.0),

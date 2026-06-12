@@ -18,7 +18,13 @@ fn main() -> io::Result<()> {
     let budget_ms: u64 = std::env::var("APHRODITE_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(500);
+        .unwrap_or(1000);
+    // Only dip into the engine's overage pool when explicitly enabled (set by
+    // build_submission.py for final submissions; off in dev so local matches
+    // stay fast and predictable). See `duct::best_move`'s overage extension.
+    let use_overage = std::env::var("APHRODITE_USE_OVERAGE")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false);
     let mut dump: Option<File> = std::env::var("APHRODITE_DUMP_FEATURES_PATH")
         .ok()
         .and_then(|p| File::create(p).ok());
@@ -94,7 +100,35 @@ fn main() -> io::Result<()> {
             profiling::reset();
         }
         let __turn_t0 = std::time::Instant::now();
-        let actions = duct::best_move(&state, state.player, budget_ms);
+        // `remainingOverageTime` is reported in SECONDS by the engine. When it
+        // is nearly exhausted, shrink the base search cap to leave margin for
+        // wrapper/redirect overhead.
+        let remaining_overage_s = v["remainingOverageTime"].as_f64().unwrap_or(0.0);
+        let turns_left = (500 - state.step).max(0) as f64;
+        let low_overage_threshold_s = 1.5 + 0.015 * turns_left;
+        let effective_budget_ms = if remaining_overage_s <= low_overage_threshold_s {
+            budget_ms.min(900)
+        } else {
+            budget_ms
+        };
+        if effective_budget_ms < budget_ms {
+            eprintln!(
+                "[aphrodite-panic] step={} player={} remaining_overage={:.3}s threshold={:.3}s budget={}ms->{}ms",
+                state.step,
+                state.player,
+                remaining_overage_s,
+                low_overage_threshold_s,
+                budget_ms,
+                effective_budget_ms
+            );
+        }
+        // Convert to ms for the planner. 0.0 when overage use is disabled.
+        let overage_ms = if use_overage {
+            remaining_overage_s * 1000.0
+        } else {
+            0.0
+        };
+        let actions = duct::best_move(&state, state.player, effective_budget_ms, overage_ms);
         // Final no-loss reroute pass on the chosen plan — runs after the planner
         // has fully committed (apollo's `redirect_moves` tail, ported via the
         // bridge since `Action` tuples drop the target the pass needs).

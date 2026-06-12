@@ -10,7 +10,7 @@ Output: a single NPZ with arrays
   features:   float32 [N, INPUT_DIM=2728]
   labels:     float32 [N]                  (final reward for that player)
   meta:       int32   [N, 4]               (game_idx, step, player, num_players)
-  summary_v2: float32 [N, 46]
+  summary_v2: float32 [N, 41]
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ MAX_OBJECTS = 44
 PER_BLOCK = MAX_OBJECTS * PER_OBJECT  # 396
 DIST_BLOCK = MAX_OBJECTS * MAX_OBJECTS  # 1936
 INPUT_DIM = 2 * PER_BLOCK + DIST_BLOCK  # 2728
-SUMMARY_V2_DIM = 46
-# New record layout: step(i64) + player(i32) + features(2728 f32) + summary_v2(46 f32)
+SUMMARY_V2_DIM = 65
+# New record layout: step(i64) + player(i32) + features(2728 f32) + summary_v2(65 f32)
 RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM + 4 * SUMMARY_V2_DIM
 # Old layout (pre-v2): step(i64) + player(i32) + features only
 LEGACY_RECORD_BYTES = 8 + 4 + 4 * INPUT_DIM
@@ -106,13 +106,27 @@ class AphroditeDaemon:
     """
 
     def __init__(self, dump_path: Path | None, budget_ms: int, weights_path: Path | None,
-                 weights_2p_path: Path | None = None):
+                 weights_2p_path: Path | None = None,
+                 leaves_path: Path | None = None,
+                 tree_stats_path: Path | None = None,
+                 leaves_cap: int | None = None):
         env = dict(os.environ)
         env.pop("APHRODITE_DUMP_FEATURES_PATH", None)
         env.pop("APHRODITE_VALUE_NET_PATH", None)
         env.pop("APHRODITE_VALUE_NET_PATH_2P", None)
+        env.pop("APHRODITE_DUMP_LEAVES_PATH", None)
+        env.pop("APHRODITE_DUMP_TREE_STATS_PATH", None)
+        env.pop("APHRODITE_DUMP_LEAVES_MAX_PER_SEARCH", None)
         if dump_path is not None:
             env["APHRODITE_DUMP_FEATURES_PATH"] = str(Path(dump_path).resolve())
+        # Search-instrumentation dumps (probe.py): per-leaf summary-v2 features
+        # and per-turn DUCT tree stats.
+        if leaves_path is not None:
+            env["APHRODITE_DUMP_LEAVES_PATH"] = str(Path(leaves_path).resolve())
+        if tree_stats_path is not None:
+            env["APHRODITE_DUMP_TREE_STATS_PATH"] = str(Path(tree_stats_path).resolve())
+        if leaves_cap is not None:
+            env["APHRODITE_DUMP_LEAVES_MAX_PER_SEARCH"] = str(int(leaves_cap))
         env["APHRODITE_BUDGET_MS"] = str(budget_ms)
         if weights_path is not None:
             env["APHRODITE_VALUE_NET_PATH"] = str(Path(weights_path).resolve())
@@ -199,7 +213,7 @@ def teardown_other(module):
 
 
 def read_dump(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (features [n, INPUT_DIM], steps [n], summary_v2 [n, 46]).
+    """Return (features [n, INPUT_DIM], steps [n], summary_v2 [n, 41]).
     Auto-detects new vs legacy record size."""
     empty = (
         np.zeros((0, INPUT_DIM), dtype=np.float32),
