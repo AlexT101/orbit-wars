@@ -1,0 +1,39 @@
+import math
+from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
+
+
+def agent(obs):
+    moves = []
+    player = obs.get("player", 0) if isinstance(obs, dict) else obs.player
+    raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
+    planets = [Planet(*p) for p in raw_planets]
+
+    # Separate our planets from targets
+    my_planets = [p for p in planets if p.owner == player]
+    targets = [p for p in planets if p.owner != player]
+
+    if not targets:
+        return moves
+
+    for mine in my_planets:
+        # Find the nearest planet we don't own
+        nearest = None
+        min_dist = float('inf')
+        for t in targets:
+            dist = math.sqrt((mine.x - t.x)**2 + (mine.y - t.y)**2)
+            if dist < min_dist:
+                min_dist = dist
+                nearest = t
+
+        if nearest is None:
+            continue
+
+        # Only send if we have enough
+        if mine.ships >= 180:
+            # Calculate angle from our planet to the target
+            angle = math.atan2(nearest.y - mine.y, nearest.x - mine.x)
+            for i in range(180):
+                moves.append([mine.id, angle + i * 3.141592 / 180, 1])
+
+    return moves
+

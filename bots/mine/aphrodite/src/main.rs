@@ -59,7 +59,8 @@ fn main() -> io::Result<()> {
         };
         let state = parse_state(&v);
         if v.get("__cmd").and_then(Value::as_str) == Some("value") {
-            let value = value_net::predict(&state, state.player);
+            let cache = aphrodite::apollo_bridge::rollout_cache(&state);
+            let value = value_net::predict_with_cache(&state, state.player, &cache, None);
             let response = match value {
                 Some(y) => json!({"value": y}),
                 None => json!({"value": null}),
@@ -104,21 +105,28 @@ fn main() -> io::Result<()> {
         // is nearly exhausted, shrink the base search cap to leave margin for
         // wrapper/redirect overhead.
         let remaining_overage_s = v["remainingOverageTime"].as_f64().unwrap_or(0.0);
+        // Optional per-turn budget override (the chaos wrapper sends one each
+        // turn: its turn target minus however long its IL pass just took).
+        // Absent in aphrodite's own payloads — the env budget then applies.
+        let turn_budget_ms = v
+            .get("budget_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(budget_ms);
         let turns_left = (500 - state.step).max(0) as f64;
         let low_overage_threshold_s = 1.5 + 0.015 * turns_left;
         let effective_budget_ms = if remaining_overage_s <= low_overage_threshold_s {
-            budget_ms.min(900)
+            turn_budget_ms.min(900)
         } else {
-            budget_ms
+            turn_budget_ms
         };
-        if effective_budget_ms < budget_ms {
+        if effective_budget_ms < turn_budget_ms {
             eprintln!(
                 "[aphrodite-panic] step={} player={} remaining_overage={:.3}s threshold={:.3}s budget={}ms->{}ms",
                 state.step,
                 state.player,
                 remaining_overage_s,
                 low_overage_threshold_s,
-                budget_ms,
+                turn_budget_ms,
                 effective_budget_ms
             );
         }
@@ -128,7 +136,34 @@ fn main() -> io::Result<()> {
         } else {
             0.0
         };
-        let actions = duct::best_move(&state, state.player, effective_budget_ms, overage_ms);
+        // Optional externally proposed root candidates (the chaos wrapper's IL
+        // policy moves), each `[from_id, angle, ships]`. Absent in aphrodite's
+        // own wrapper payloads, in which case behavior is unchanged.
+        let il_candidates: Vec<aphrodite::sim::Action> = v
+            .get("il_candidates")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| {
+                        let arr = m.as_array()?;
+                        let from_id = aphrodite::as_i64(arr.get(0)?)?;
+                        let angle = aphrodite::as_f64(arr.get(1)?);
+                        let ships = aphrodite::as_i64(arr.get(2)?)?;
+                        if ships <= 0 {
+                            return None;
+                        }
+                        Some((from_id, angle, ships, state.player))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let actions = duct::best_move(
+            &state,
+            state.player,
+            effective_budget_ms,
+            overage_ms,
+            &il_candidates,
+        );
         // Final no-loss reroute pass on the chosen plan — runs after the planner
         // has fully committed (apollo's `redirect_moves` tail, ported via the
         // bridge since `Action` tuples drop the target the pass needs).
