@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+!bots/mine/triplepoint1/orbit_wars_model/orbit_wars_model.abi3.so
 
 # Distribution / packaging
 .Python
@@ -202,6 +203,7 @@ wandb/
 # Large data and model files
 *.npz
 *.pt
+!bots/mine/triplepoint1/osteo_il_latest.pt
 
 # Training NPZ datasets — too big to track in git, rebuildable via
 # bots/mine/alphaow/train/build_from_zip.py + extras_v{3,4}_build.py.

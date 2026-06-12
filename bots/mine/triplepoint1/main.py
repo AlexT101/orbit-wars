@@ -310,7 +310,7 @@ def agent(obs, config=None):
             return _IL.act(payload)
         except Exception as exc:
             if os.environ.get("TRIPLEPOINT1_DEBUG") or os.environ.get("HYBRID1_DEBUG"):
-                sys.stderr.write(f"[triplepoint1] IL error: {exc!r}\n")
+                sys.stderr.write(f"[triplepoint1] IL error, falling back to Aphrodite: {exc!r}\n")
                 sys.stderr.flush()
-            return []
+            return _aphrodite_move(payload)
     return _aphrodite_move(payload)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import zipfile
@@ -12,11 +13,11 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 TRAIN_DIR = REPO_ROOT / "experimental_arch" / "train_transformer"
 IL_DIR = REPO_ROOT / "experimental_arch" / "imitation_learning"
+ENV_MODEL_DIR = REPO_ROOT / "experimental_arch" / "env_model"
 APHRODITE_DIR = REPO_ROOT / "bots" / "mine" / "aphrodite"
 FRANKENSTEIN_DIR = REPO_ROOT / "bots" / "mine" / "frankenstein1"
 
 LATEST_CHECKPOINT = IL_DIR / "checkpoints" / "osteo_bc_transformer" / "latest.pt"
-SITE_ORBIT_MODEL = Path.home() / ".local" / "lib" / "python3.12" / "site-packages" / "orbit_wars_model"
 ZIP_OUT = HERE / "submission.zip"
 TAR_OUT = HERE / "submission.tar.gz"
 
@@ -54,8 +55,11 @@ def refresh_sources() -> None:
     for name in ("constants.py", "features.py", "model.py"):
         _copy(TRAIN_DIR / name, HERE / "il_support" / name)
 
-    _copy(SITE_ORBIT_MODEL / "__init__.py", HERE / "orbit_wars_model" / "__init__.py")
-    _copy(SITE_ORBIT_MODEL / "orbit_wars_model.abi3.so", HERE / "orbit_wars_model" / "orbit_wars_model.abi3.so")
+    cargo = shutil.which("cargo")
+    if not cargo:
+        raise SystemExit("cargo not found; cannot build orbit_wars_model")
+    subprocess.run([cargo, "build", "--release"], cwd=ENV_MODEL_DIR, check=True)
+    _copy(ENV_MODEL_DIR / "target" / "release" / "liborbit_wars_model.so", HERE / "orbit_wars_model" / "orbit_wars_model.abi3.so")
 
     aphrodite_bin = FRANKENSTEIN_DIR / "aphrodite"
     if not aphrodite_bin.is_file():
