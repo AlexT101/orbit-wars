@@ -78,7 +78,7 @@ impl<'a> HellburnerModel<'a> {
         for p in &non_comets {
             let pos = state
                 .cache
-                .position(p.id, 1 + ROTATION_LOOK_AHEAD_TURNS)
+                .position(p.id, 1 + *ROTATION_LOOK_AHEAD_TURNS)
                 .unwrap_or([p.x, p.y]);
             future_pos.insert(p.id, pos);
         }
@@ -346,7 +346,7 @@ fn reinforcement_pressure_clears_frontier_ratio(
     target_pressure: f64,
     source_pressure: f64,
 ) -> bool {
-    target_pressure >= source_pressure * FRONTIER_PRESSURE_RATIO
+    target_pressure >= source_pressure * *FRONTIER_PRESSURE_RATIO
 }
 
 fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMap<i64, f64> {
@@ -360,7 +360,7 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
             model,
             target.id,
             &state.enemy_planets,
-            ENEMY_OFFSET_LOOKAHEAD,
+            *ENEMY_OFFSET_LOOKAHEAD,
         );
         pressure.insert(target.id, total);
     }
@@ -385,7 +385,7 @@ fn pressure_from(
             continue;
         }
         let mut best_contribution = 0.0;
-        for offset in 0..=max_offset.min(REINFORCEMENT_PRESSURE_TURNS) {
+        for offset in 0..=max_offset.min(*REINFORCEMENT_PRESSURE_TURNS) {
             let ships = owner_available_to_launch_at(state, src.id, src.owner, offset);
             if ships <= 0 {
                 continue;
@@ -396,7 +396,7 @@ fn pressure_from(
                 continue;
             };
             let arrival = (offset + travel_turns).max(1);
-            if arrival <= REINFORCEMENT_PRESSURE_TURNS {
+            if arrival <= *REINFORCEMENT_PRESSURE_TURNS {
                 let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
                 if contribution > best_contribution {
                     best_contribution = contribution;
@@ -424,13 +424,13 @@ fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i
             model,
             target.id,
             &state.enemy_planets,
-            ENEMY_OFFSET_LOOKAHEAD,
+            *ENEMY_OFFSET_LOOKAHEAD,
         );
         if enemy <= 0.0 {
             continue;
         }
-        let ally = pressure_from(state, model, target.id, &state.my_planets, OFFSET_LOOKAHEAD);
-        if ally < ALLY_PRESSURE_RATIO * enemy {
+        let ally = pressure_from(state, model, target.id, &state.my_planets, *OFFSET_LOOKAHEAD);
+        if ally < *ALLY_PRESSURE_RATIO * enemy {
             gated.insert(target.id);
         }
     }
@@ -442,9 +442,9 @@ fn reinforcement_pressure_weight(turns: i64) -> f64 {
     if turns <= 1 {
         return 1.0;
     }
-    let span = (REINFORCEMENT_PRESSURE_TURNS - 1).max(1) as f64;
+    let span = (*REINFORCEMENT_PRESSURE_TURNS - 1).max(1) as f64;
     let exponent = (turns - 1) as f64 / span;
-    REINFORCEMENT_PRESSURE_DECAY.powf(exponent)
+    (*REINFORCEMENT_PRESSURE_DECAY).powf(exponent)
 }
 
 fn owner_available_to_launch_at(
@@ -1027,7 +1027,7 @@ fn collect_bucket_options_for_arrival(
     out: &mut Vec<SourceOption>,
 ) {
     out.clear();
-    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
+    let option_stride = (*OFFSET_LOOKAHEAD + 1) as usize;
     for i in 0..source_count {
         let row = i * option_stride;
         let mut best_option: Option<SourceOption> = None;
@@ -1067,7 +1067,7 @@ fn collect_source_candidates(
 ) {
     out.clear();
     option_table.clear();
-    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
+    let option_stride = (*OFFSET_LOOKAHEAD + 1) as usize;
     for &(src_id, _travel) in &ctx.origins {
         // Cap the candidate-search width: `origins` is distance-sorted (nearest
         // first), so once we've collected enough viable sources we stop —
@@ -1082,7 +1082,7 @@ fn collect_source_candidates(
         }
         let mut row = Vec::with_capacity(option_stride);
         let mut has_option = false;
-        for launch_offset in 0..=OFFSET_LOOKAHEAD {
+        for launch_offset in 0..=*OFFSET_LOOKAHEAD {
             let ships = plan.ships_available_at(world, &src, owner, launch_offset);
             let option = if ships > 0 {
                 model
@@ -1345,7 +1345,7 @@ fn send_reinforcements(
         // same-or-earlier arrival while delivering fewer ships. We re-plan every
         // turn, so this is a per-turn send-vs-hold decision, not a commitment to
         // a specific delay. Replaces the old fixed `REINFORCEMENT_SIZE` floor.
-        let wait_is_better = (1..=OFFSET_LOOKAHEAD).any(|d| {
+        let wait_is_better = (1..=*OFFSET_LOOKAHEAD).any(|d| {
             // Use the same forward-min availability model the planner relies on,
             // not raw linear growth (`ships + production·d`): a future enemy
             // arrival can shrink the garrison between now and `d`, so the

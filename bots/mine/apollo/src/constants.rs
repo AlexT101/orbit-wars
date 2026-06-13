@@ -1,5 +1,52 @@
 #![allow(dead_code)]
 
+use std::sync::LazyLock;
+
+// ── RUNTIME AGENT CONFIG (config.json) ──────────────────────────────────────
+// The *agent* (strategy) constants below are loaded once, at first access, from
+// a JSON file so the tuning loop can try new values WITHOUT recompiling the
+// Rust extension. Only `bots/mine/apollo` does this; the frozen baseline clone
+// keeps its compile-time constants.
+//
+// Path resolution:
+//   * `APOLLO_CONFIG` env var if set (absolute path), else
+//   * `<crate dir>/config.json` (CARGO_MANIFEST_DIR is baked in at build time,
+//     so it is stable regardless of the worker process CWD).
+//
+// A missing or malformed file PANICS rather than silently falling back, so a
+// tuning run can never quietly measure the wrong constants.
+//
+// ENGINE constants (game rules / physics) are deliberately NOT in config.json:
+// they mirror the engine and must never drift. The excluded agent constants
+// (early-game pre-pass, REACTIVE_TURNS, AIM_HORIZON, the cone/nudge sim knobs,
+// and the Config source caps) are likewise kept compile-time for now; promote
+// them to config.json the same way if they ever need tuning.
+
+static AGENT_CONFIG: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    let path = std::env::var_os("APOLLO_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("apollo: failed to read agent config at {}: {e}", path.display())
+    });
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("apollo: invalid JSON in {}: {e}", path.display()))
+});
+
+fn cfg_i64(key: &str) -> i64 {
+    AGENT_CONFIG
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_else(|| panic!("apollo: config.json missing integer key '{key}'"))
+}
+
+fn cfg_f64(key: &str) -> f64 {
+    AGENT_CONFIG
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_else(|| panic!("apollo: config.json missing number key '{key}'"))
+}
+
 // ── ENGINE CONSTANTS ────────────────────────────────────────────────────────
 // These are constants used by `engine.rs` to implement the game rules and physics and should never be changed
 
@@ -31,14 +78,15 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450]; // Game steps 
 // ── AGENT CONSTANTS ────────────────────────────────────────────────────────
 // Specific to our bot for internal decisions
 
-// Turn rules
-pub const ROTATION_LOOK_AHEAD_TURNS: i64 = 10; // Number of turns to look ahead when estimating future position of planets
-pub const OFFSET_LOOKAHEAD: i64 = 15; // Max per-source launch delay considered by attack planning and reinforcement hold checks. Offset 0 emits now; delayed attack offsets become reservations so later choices cannot spend those ships.
-pub const ENEMY_OFFSET_LOOKAHEAD: i64 = 5; // Max enemy launch delay considered when estimating reinforcement pressure.
-pub const REINFORCEMENT_PRESSURE_TURNS: i64 = 20; // Enemy planets within this many turns contribute to reinforcement pressure.
-pub const REINFORCEMENT_PRESSURE_DECAY: f64 = 0.5; // Enemy pressure multiplier at REINFORCEMENT_PRESSURE_TURNS; turns 0/1 contribute fully.
-pub const FRONTIER_PRESSURE_RATIO: f64 = 7.0 / 5.0; // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
-pub const ALLY_PRESSURE_RATIO: f64 = 0.8; // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
+// Turn rules — TUNABLE: loaded from config.json (see top of file).
+// Each is a `LazyLock<T>`; read with `*NAME` at the call site.
+pub static ROTATION_LOOK_AHEAD_TURNS: LazyLock<i64> = LazyLock::new(|| cfg_i64("rotation_look_ahead_turns")); // Number of turns to look ahead when estimating future position of planets
+pub static OFFSET_LOOKAHEAD: LazyLock<i64> = LazyLock::new(|| cfg_i64("offset_lookahead")); // Max per-source launch delay considered by attack planning and reinforcement hold checks. Offset 0 emits now; delayed attack offsets become reservations so later choices cannot spend those ships.
+pub static ENEMY_OFFSET_LOOKAHEAD: LazyLock<i64> = LazyLock::new(|| cfg_i64("enemy_offset_lookahead")); // Max enemy launch delay considered when estimating reinforcement pressure.
+pub static REINFORCEMENT_PRESSURE_TURNS: LazyLock<i64> = LazyLock::new(|| cfg_i64("reinforcement_pressure_turns")); // Enemy planets within this many turns contribute to reinforcement pressure.
+pub static REINFORCEMENT_PRESSURE_DECAY: LazyLock<f64> = LazyLock::new(|| cfg_f64("reinforcement_pressure_decay")); // Enemy pressure multiplier at REINFORCEMENT_PRESSURE_TURNS; turns 0/1 contribute fully.
+pub static FRONTIER_PRESSURE_RATIO: LazyLock<f64> = LazyLock::new(|| cfg_f64("frontier_pressure_ratio")); // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
+pub static ALLY_PRESSURE_RATIO: LazyLock<f64> = LazyLock::new(|| cfg_f64("ally_pressure_ratio")); // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
 
 // Early-game expansion pre-pass (see early_game.rs)
 pub const EARLY_GAME_END: i64 = 0; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.
@@ -66,12 +114,14 @@ pub struct Config {
     pub max_sources: usize,
 }
 
-const CONFIG_2P: Config = Config {
-    horizon: 30,
-    max_distance: 38.0,
+// `horizon` and `max_distance` are TUNABLE (config.json); the source caps are
+// held fixed for now (see top-of-file note).
+static CONFIG_2P: LazyLock<Config> = LazyLock::new(|| Config {
+    horizon: cfg_i64("horizon"),
+    max_distance: cfg_f64("max_distance"),
     max_sources_to_consider: 16,
     max_sources: 4,
-};
+});
 
 const CONFIG_4P: Config = Config {
     horizon: 30,
@@ -86,7 +136,7 @@ impl Config {
         if alive >= 3 {
             CONFIG_4P
         } else {
-            CONFIG_2P
+            *CONFIG_2P
         }
     }
 }

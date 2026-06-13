@@ -1,0 +1,11 @@
+{
+  "rotation_look_ahead_turns": 6,
+  "offset_lookahead": 17,
+  "enemy_offset_lookahead": 3,
+  "reinforcement_pressure_turns": 30,
+  "reinforcement_pressure_decay": 0.2103095279714829,
+  "frontier_pressure_ratio": 3.4345589308958866,
+  "ally_pressure_ratio": 0.607234130814569,
+  "horizon": 14,
+  "max_distance": 50.6782806073915
+}

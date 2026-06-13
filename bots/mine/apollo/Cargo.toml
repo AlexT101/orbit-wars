@@ -17,6 +17,9 @@ profile = []
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
 sha2 = "0.10"
 rustc-hash = "2.0"
+# Runtime-loaded agent config: constants.rs reads config.json so the tuning loop
+# can change constants without recompiling the extension. serde_json only.
+serde_json = "1"
 # Faster uncontended Mutex than std (no poisoning, lighter fast path) for the
 # hot aim caches. Still `Sync`, so the `Bot` pyclass bound is satisfied and the
 # cross-thread-per-step access pattern stays sound.
