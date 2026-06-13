@@ -532,23 +532,153 @@ def combine_sample_weights(*weights):
     return out
 
 
+def roc_auc(y_true, score):
+    """Rank-based ROC AUC (no sklearn dependency). `y_true` is 0/1; `score` is
+    any monotone-with-confidence value (e.g. predicted win prob)."""
+    order = np.argsort(score, kind="mergesort")
+    yr = np.asarray(y_true)[order]
+    npos = float(yr.sum())
+    nneg = float(len(yr) - npos)
+    if npos == 0 or nneg == 0:
+        return float("nan")
+    ranks = np.arange(1, len(yr) + 1, dtype=np.float64)
+    return float((ranks[yr == 1].sum() - npos * (npos + 1) / 2) / (npos * nneg))
+
+
+def summary_v2_monotone():
+    """Monotone-constraint vector for the 65-d summary_v2 layout (used by BOTH
+    the 2p net and the 4p v2aux net; see value_net.rs::summary_features_v2).
+    +1 = win-prob non-decreasing in the feature, -1 = non-increasing, 0 = free.
+
+    ONLY features with an unconditional sign prior are constrained: my/opponent
+    ship + production totals, the share/pressure/vulnerability relational
+    columns. Ambiguous features (planet COUNTS, fleet fractions, dispersion,
+    centroid distance, step) are left at 0 — a wrong constraint forbids a real
+    relationship and hurts both AUC and play.
+    """
+    c = [0] * 65
+    # me current (0:9) + me extrap (18:26): more of MY ships / production helps.
+    #   cur:  ships_on=0, prod_static=5, prod_orbit=6
+    #   ext:  ships_on=18, prod_static=22, prod_orbit=23
+    for i in (0, 5, 6, 18, 22, 23):
+        c[i] = 1
+    # dominant-enemy current (9:18) + extrap (26:34): more of THEIRS hurts.
+    #   cur:  ships_on=9, prod_static=14, prod_orbit=15
+    #   ext:  ships_on=26, prod_static=30, prod_orbit=31
+    for i in (9, 14, 15, 26, 30, 31):
+        c[i] = -1
+    # relational block (41:65); index = 41 + slot in relational_block()
+    c[46] = -1  # num_my_vulnerable_planets
+    c[47] = 1   # num_enemy_vulnerable_planets
+    c[48] = 1   # ship_share (me / me+enemy)
+    c[49] = 1   # production_share
+    c[50] = -1  # my_production_at_risk
+    c[51] = 1   # enemy_production_at_opportunity
+    c[52] = -1  # max_enemy_pressure (on my planets)
+    c[53] = 1   # max_ally_pressure (on enemy planets)
+    c[57] = -1  # prod_weighted_enemy_pressure
+    c[58] = 1   # prod_weighted_ally_pressure
+    c[61] = -1  # my_strength_rank (0 = leader, higher = worse)
+    c[62] = 1   # leader_strength_ratio
+    return c
+
+
+def summary_v3_monotone():
+    """Monotone-constraint vector for the 145-d summary_v3 layout (4p FFA; see
+    value_net.rs::summary_features_v3 assembly). v3 is share-normalized, so the
+    sign priors are clean: MY share/economy/aim ↑ = win-prob ↑; any OPPONENT's
+    share/economy or their threat on me ↑ = win-prob ↓.
+
+    Only unconditional-sign features are constrained: my vs opponent ship +
+    production SHARES, my-vs-k pairwise shares, vulnerability (me attacking =
+    +, me defending = -), and threat-on-me aggregates. Planet-count fractions,
+    fleet fraction, dispersion, centroid distance, in-flight direction, board
+    anchors, step/angular_velocity, and opp-vs-opp cells are left free.
+    """
+    c = [0] * 145
+    # globals 0 step, 1 angular_velocity → free
+    # me_cur (2..11): ships_on=2, ships_fly=3, prod_static=7, prod_orbit=8
+    for i in (2, 3, 7, 8):
+        c[i] = 1
+    # me_ext (11..19): ships_on=11, prod_static=15, prod_orbit=16
+    for i in (11, 15, 16):
+        c[i] = 1
+    # neutral block (19..26) → free
+    # aggregate (26..41)
+    c[26] = 1   # ship_share_me_vs_all
+    c[27] = 1   # production_share
+    c[28] = -1  # my_n_vuln
+    c[29] = -1  # my_prod_at_risk
+    c[30] = -1  # my_threat_max
+    c[31] = -1  # my_pw_threat
+    c[34] = 1   # avg_ally_ships
+    c[35] = 1   # leader_strength_ratio
+    c[40] = 1   # production[me] (absolute anchor — more of my own prod helps)
+    # per-opponent blocks: 3 × 24 at base 41, 65, 89.
+    for slot in range(3):
+        b = 41 + slot * 24
+        c[b + 0] = -1   # k ships_on share
+        c[b + 1] = -1   # k ships_fly share
+        c[b + 5] = -1   # k prod_static share
+        c[b + 6] = -1   # k prod_orbit share
+        c[b + 9] = -1   # k e_ships_on share
+        c[b + 13] = -1  # k e_prod_static share
+        c[b + 14] = -1  # k e_prod_orbit share
+        c[b + 17] = 1   # pw_my_on_k  (my prod-weighted pressure on k)
+        c[b + 18] = -1  # pw_k_on_me  (k's pressure on me)
+        c[b + 21] = 1   # strength share me/(me+k)
+        c[b + 22] = 1   # production share me/(me+k)
+    # vulnerability matrix (129..145), slot order S = [me, o1, o2, o3].
+    #   me-as-attacker = +1 (I can take their prod), me-as-defender = -1.
+    for i in (129, 130, 131, 141):  # me->o1, me->o2, me->o3, me->neutral
+        c[i] = 1
+    for i in (132, 135, 138):       # o1->me, o2->me, o3->me
+        c[i] = -1
+    # in-flight matrix (113..129) → free (fleet direction is not sign-definite)
+    return c
+
+
 def train_xgb(X, y, val_mask, out_json: Path,
-              max_depth=6, learning_rate=0.08, n_est=600, early_stopping=40, weight=None):
+              max_depth=6, learning_rate=0.08, n_est=600, early_stopping=40, weight=None,
+              min_child_weight=1.0, gamma=0.0, reg_alpha=0.0, reg_lambda=1.0,
+              subsample=0.85, colsample_bytree=0.85, max_bin=256,
+              monotone=False, early_stop_metric="logloss"):
     import xgboost as xgb
     yb = (y > 0).astype(np.float32)
     w_tr = weight[~val_mask] if weight is not None else None
     dtr = xgb.DMatrix(X[~val_mask], label=yb[~val_mask], weight=w_tr)
     dva = xgb.DMatrix(X[val_mask], label=yb[val_mask])
+    # Early stopping watches the LAST eval_metric, so order the list to put the
+    # chosen driver last; the other is still printed each round.
+    eval_metric = (["auc", "logloss"] if early_stop_metric == "logloss"
+                   else ["logloss", "auc"])
     params = dict(
         objective="binary:logistic",
-        eval_metric="logloss",
+        eval_metric=eval_metric,
         max_depth=max_depth,
         learning_rate=learning_rate,
-        subsample=0.85,
-        colsample_bytree=0.85,
+        min_child_weight=min_child_weight,
+        gamma=gamma,
+        reg_alpha=reg_alpha,
+        reg_lambda=reg_lambda,
+        subsample=subsample,
+        colsample_bytree=colsample_bytree,
+        max_bin=max_bin,
         tree_method="hist",
         verbosity=0,
     )
+    if monotone:
+        cons = ({65: summary_v2_monotone, 145: summary_v3_monotone}
+                .get(X.shape[1], lambda: None)())
+        if cons is None:
+            print(f"  [monotone] WARN feature matrix is {X.shape[1]}-d, not 65-d "
+                  f"summary_v2 or 145-d summary_v3; skipping constraints")
+        else:
+            params["monotone_constraints"] = "(" + ",".join(map(str, cons)) + ")"
+            n_con = sum(1 for v in cons if v != 0)
+            kind = "summary_v2" if X.shape[1] == 65 else "summary_v3"
+            print(f"  [monotone] constraining {n_con}/{X.shape[1]} {kind} columns "
+                  f"(+1 {sum(v == 1 for v in cons)} / -1 {sum(v == -1 for v in cons)})")
     t0 = time.time()
     bst = xgb.train(
         params, dtr, num_boost_round=n_est,
@@ -558,9 +688,10 @@ def train_xgb(X, y, val_mask, out_json: Path,
     )
     pred = bst.predict(dva)
     sign_acc = float(((pred > 0.5) == (yb[val_mask] > 0.5)).mean())
+    auc = roc_auc(yb[val_mask], pred)
     elapsed = time.time() - t0
-    print(f"  XGB val sign-acc = {100*sign_acc:.3f}%  "
-          f"best_iter={bst.best_iteration}  t={elapsed:.1f}s")
+    print(f"  XGB val AUC = {auc:.4f}  sign-acc = {100*sign_acc:.3f}%  "
+          f"best_iter={bst.best_iteration}  (early-stop on {early_stop_metric})  t={elapsed:.1f}s")
     if bst.best_iteration >= n_est - 1:
         print(f"  NOTE best_iter hit the {n_est}-round cap (no early stop) — "
               f"raise --rounds for a likely better model")
@@ -608,7 +739,24 @@ def main():
     p.add_argument("--learning-rate", type=float, default=0.08)
     p.add_argument("--max-depth", type=int, default=6)
     p.add_argument("--early-stopping", type=int, default=40,
-                   help="stop if val logloss hasn't improved in this many rounds")
+                   help="stop if the val early-stop metric hasn't improved in this many rounds")
+    # ── booster regularization / sampling knobs (for tuning toward higher AUC) ──
+    p.add_argument("--min-child-weight", type=float, default=1.0,
+                   help="min sum hessian per leaf; raise (e.g. 5) to regularize")
+    p.add_argument("--gamma", type=float, default=0.0,
+                   help="min split-loss reduction; raise (e.g. 0.1) to prune weak splits")
+    p.add_argument("--reg-alpha", type=float, default=0.0, help="L1 weight penalty")
+    p.add_argument("--reg-lambda", type=float, default=1.0, help="L2 weight penalty")
+    p.add_argument("--subsample", type=float, default=0.85)
+    p.add_argument("--colsample-bytree", type=float, default=0.85)
+    p.add_argument("--max-bin", type=int, default=256,
+                   help="hist bins; raise (e.g. 512) for finer splits at some cost")
+    p.add_argument("--early-stop-metric", choices=("logloss", "auc"), default="logloss",
+                   help="val metric that drives early stopping (both are always printed)")
+    p.add_argument("--monotone", action="store_true",
+                   help="apply unconditional monotone constraints on the summary_v2 "
+                        "ship/production/share/pressure columns (see summary_v2_monotone). "
+                        "Regularizes and gives DUCT a saner value surface; 65-d only.")
     p.add_argument("--zero-cols", type=str, default="",
                    help="comma-separated summary_v2 column indices to zero before training "
                         "(SHAP-dropped features). A constant column has zero split gain so XGBoost "
@@ -702,7 +850,10 @@ def main():
         Xs[:, cols] = 0.0
         print(f"  zeroed columns {cols} (treated as dropped; model stays {Xs.shape[1]}-d)")
 
-    print(f"\n=== STEP 2: train XGB (binary:logistic d=6 lr=0.08 n_est=600) ===")
+    print(f"\n=== STEP 2: train XGB (binary:logistic d={args.max_depth} "
+          f"lr={args.learning_rate} n_est={args.rounds} mcw={args.min_child_weight} "
+          f"gamma={args.gamma} L1={args.reg_alpha} L2={args.reg_lambda} "
+          f"max_bin={args.max_bin} monotone={args.monotone}) ===")
     val_mask = game_level_split_mask(ms, frac=0.12, seed=42)
     n_train_games = len(np.unique(ms[~val_mask, 0]))
     n_val_games = len(np.unique(ms[val_mask, 0]))
@@ -710,7 +861,12 @@ def main():
           f"train rows={(~val_mask).sum():,}, val rows={val_mask.sum():,}")
     train_xgb(Xs, ys, val_mask, args.model_out, weight=weight,
               max_depth=args.max_depth, learning_rate=args.learning_rate,
-              n_est=args.rounds, early_stopping=args.early_stopping)
+              n_est=args.rounds, early_stopping=args.early_stopping,
+              min_child_weight=args.min_child_weight, gamma=args.gamma,
+              reg_alpha=args.reg_alpha, reg_lambda=args.reg_lambda,
+              subsample=args.subsample, colsample_bytree=args.colsample_bytree,
+              max_bin=args.max_bin, monotone=args.monotone,
+              early_stop_metric=args.early_stop_metric)
 
     print("\nDone.")
 
