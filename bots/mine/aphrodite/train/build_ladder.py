@@ -80,14 +80,16 @@ def main() -> None:
     p.add_argument("--recency-halflife", type=float, default=0.0,
                    help="down-weight older days by 0.5 per this many days (0 = uniform)")
     p.add_argument("--gate", choices=("both-topn", "strong-topn", "strong-median", "none"),
-                   default="strong-topn",
-                   help="per-day quality gate. strong-topn (default): keep each game's side if that "
-                        "player is in the day's top-N by win rate; strong-median: bar is the median; "
-                        "both-topn: keep games where both players are top-N; none: keep all rows.")
+                   default="none",
+                   help="per-day extraction gate. none (default): keep ALL players' rows and weight by "
+                        "Elo at train time (see --quality-floor). strong-topn / strong-median / both-topn: "
+                        "legacy top-N win-rate gates that drop rows before training.")
     p.add_argument("--quality-weight", action="store_true", default=True,
-                   help="soft-weight kept rows by player strength (default on; only meaningful with a strong-* gate)")
+                   help="soft-weight rows by player Elo at train time (default on). With --gate none this "
+                        "uses a Bradley-Terry rating fit over all players (--quality-metric rating).")
     p.add_argument("--no-quality-weight", dest="quality_weight", action="store_false")
-    p.add_argument("--quality-floor", type=float, default=0.25)
+    p.add_argument("--quality-floor", type=float, default=0.05,
+                   help="weakest player's Elo weight (strongest = 1.0); exponential-decay shape.")
     p.add_argument("--top-n-start", type=int, default=10,
                    help="top-N for the OLDEST day (stricter on stale data)")
     p.add_argument("--top-n-end", type=int, default=15,
@@ -167,6 +169,10 @@ def main() -> None:
         train += ["--recency-halflife", args.recency_halflife]
     if args.quality_weight:
         train += ["--quality-weight", "--quality-floor", args.quality_floor]
+        # All-players flow (gate none): weight by Bradley-Terry Elo over every
+        # player, not the win_rate column (which only a strong-* gate records).
+        if not filtering:
+            train += ["--quality-metric", "rating"]
     run(train)
 
     if not args.keep_temp:

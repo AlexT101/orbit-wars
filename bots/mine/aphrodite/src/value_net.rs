@@ -390,25 +390,31 @@ pub fn predict_with_cache(
 pub mod summary_features_v2 {
     use super::*;
     use crate::apollo::constants::OFFSET_LOOKAHEAD;
-    use crate::apollo::strategy::resolve_shot;
+    use crate::apollo::strategy::resolve_shot_sun_only;
 
     pub const DIM: usize = 65;
 
     /// Turn horizon for the relational block (frontier / pressure / support /
-    /// inbound-outbound). Matches the "within 10 turns" spec.
-    const REL_HORIZON: i64 = 10;
+    /// inbound-outbound). Beyond this, projected force weighs zero.
+    const REL_HORIZON: i64 = 30;
+    /// Exponential half-life base: weight halves every `REL_HORIZON` turns.
+    const REL_DECAY: f32 = 0.3;
 
-    /// Monotone-decreasing distance weight over `REL_HORIZON`. `t = 0` (lands
-    /// now) → 1.0; every turn within the horizon keeps positive weight; beyond
-    /// the horizon → 0. Used identically for static-garrison turn-distance and
-    /// in-flight fleet ETA so a fleet `t` turns out and a garrison `t` turns
-    /// away weigh the same per ship.
+    /// Exponential time-decay weight over `REL_HORIZON`, mirroring apollo's
+    /// `reinforcement_pressure_weight`. `t ≤ 1` (lands now / next turn) → 1.0;
+    /// within the horizon → `REL_DECAY^((t-1)/(REL_HORIZON-1))` (so `t =
+    /// REL_HORIZON` → `REL_DECAY`); beyond the horizon → 0. Used identically for
+    /// static-garrison turn-distance and in-flight fleet ETA so a fleet `t` turns
+    /// out and a garrison `t` turns away weigh the same per ship.
     #[inline]
     fn rel_weight(turns: i64) -> f32 {
         if turns < 0 || turns > REL_HORIZON {
             0.0
+        } else if turns <= 1 {
+            1.0
         } else {
-            (REL_HORIZON + 1 - turns) as f32 / (REL_HORIZON + 1) as f32
+            let span = (REL_HORIZON - 1).max(1) as f32;
+            REL_DECAY.powf((turns - 1) as f32 / span)
         }
     }
 
@@ -432,7 +438,7 @@ pub mod summary_features_v2 {
         let mut best = 0.0f32;
         for off in 0..=OFFSET_LOOKAHEAD {
             let ships = (src.ships + src.production * off).max(1);
-            if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, None) {
+            if let Some(r) = resolve_shot_sun_only(cache, src.id, dst_id, ships, off) {
                 let contrib = ships as f32 * rel_weight(off + r.1);
                 if contrib > best {
                     best = contrib;
@@ -1007,13 +1013,15 @@ pub mod summary_features_v2 {
 pub mod summary_features_v3 {
     use super::*;
     use crate::apollo::constants::OFFSET_LOOKAHEAD;
-    use crate::apollo::strategy::resolve_shot;
+    use crate::apollo::strategy::resolve_shot_sun_only;
     use crate::apollo::world::ShotL1;
 
     pub const DIM: usize = 145;
     pub const AUX_DIM: usize = 9;
     const NP: usize = 4; // engine MAX_PLAYERS
-    const REL_HORIZON: i64 = 10;
+    const REL_HORIZON: i64 = 20;
+    /// Exponential half-life base: weight halves every `REL_HORIZON` turns.
+    const REL_DECAY: f32 = 0.5;
 
     /// Seat cycle by increasing orbital angle: always 0→1→3→2 (only the global
     /// phase rotates per game). Orbit advances in the +angle (`next`) direction,
@@ -1033,12 +1041,19 @@ pub mod summary_features_v3 {
         ]
     }
 
+    /// Exponential time-decay weight over `REL_HORIZON`, mirroring apollo's
+    /// `reinforcement_pressure_weight`: `t ≤ 1` → 1.0; within the horizon →
+    /// `REL_DECAY^((t-1)/(REL_HORIZON-1))` (so `t = REL_HORIZON` → `REL_DECAY`);
+    /// beyond → 0.
     #[inline]
     fn rel_weight(turns: i64) -> f32 {
         if turns < 0 || turns > REL_HORIZON {
             0.0
+        } else if turns <= 1 {
+            1.0
         } else {
-            (REL_HORIZON + 1 - turns) as f32 / (REL_HORIZON + 1) as f32
+            let span = (REL_HORIZON - 1).max(1) as f32;
+            REL_DECAY.powf((turns - 1) as f32 / span)
         }
     }
 
@@ -1056,11 +1071,14 @@ pub mod summary_features_v3 {
     /// (max over launch offsets). Mirrors `summary_features_v2::pressure_from`.
     /// `l1` is the search-scoped hot aim cache (the value net re-queries the same
     /// planet-pairs across many leaves at a turn); `None` falls back to L2/L3.
-    fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64, l1: Option<&ShotL1>) -> f32 {
+    fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64, _l1: Option<&ShotL1>) -> f32 {
+        // Sun-only reachability/turns: planet & comet blocking are intentionally
+        // ignored here for speed, so the search-scoped L1 (`_l1`, which memoizes
+        // *full* shots) is unused — the dedicated `sun_aim_cache` backs this path.
         let mut best = 0.0f32;
         for off in 0..=OFFSET_LOOKAHEAD {
             let ships = (src.ships + src.production * off).max(1);
-            if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, l1) {
+            if let Some(r) = resolve_shot_sun_only(cache, src.id, dst_id, ships, off) {
                 let contrib = ships as f32 * rel_weight(off + r.1);
                 if contrib > best {
                     best = contrib;

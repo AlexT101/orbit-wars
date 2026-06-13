@@ -232,29 +232,38 @@ def recency_weights(source, halflife_days: float):
     return w.astype(np.float32)
 
 
-def quality_weights(win_rate, floor: float, enabled: bool):
-    """Per-row sample weight from player strength, ranked WITHIN the kept set.
+def quality_weights(win_rate, floor: float, enabled: bool, shape: str = "decay"):
+    """Per-row sample weight from player strength, ranked WITHIN the dataset.
 
-    Maps each row's player win rate to its percentile among kept rows, then
-    onto [floor, 1.0]: the strongest kept players weigh ~1.0, the weakest
-    (just above the median gate) weigh `floor`. Rank-based so it is robust
-    to per-day median differences and absolute win-rate scale. Returns None
-    if disabled or no `win_rate` column is present.
+    Each row's strength signal (`win_rate` column, or a Bradley-Terry rating via
+    `--quality-metric rating`) is mapped to its rank-percentile `pct` in (0, 1]
+    across all rows (tie-aware: equal strength -> equal weight), then onto
+    [floor, 1.0] by `shape`:
+      * `linear` — `floor + (1-floor)*pct`: the legacy gentle ramp.
+      * `decay`  — `floor**(1-pct)`: an EXPONENTIAL decay from the top player
+        (`pct=1` -> 1.0) down to the weakest (`pct -> 0` -> ~`floor`). Strong
+        players weigh exponentially more than the long tail, so the fit is
+        dominated by elite play while weak rows still contribute `floor`
+        (e.g. the top player at 100% strength, the bottom at ~5%).
+    Rank-based, so robust to the absolute strength scale and per-day median
+    differences. Returns None if disabled or no strength column is present.
     """
     if not enabled:
         return None
     if win_rate is None:
-        print("  [quality] WARN no `win_rate` column (gate with --gate strong-median "
-              "to enable strength weighting); using uniform quality")
+        print("  [quality] WARN no strength column (pass --quality-metric rating, or "
+              "gate with --gate strong-median); using uniform quality")
         return None
     wr = win_rate.astype(np.float64)
-    # Tie-aware percentile: rows with equal win rate (== equal strength) get
-    # the same weight. `average` ranking shares the rank across ties.
+    # Tie-aware percentile: rows with equal strength share a rank.
     from scipy.stats import rankdata
     pct = rankdata(wr, method="average") / wr.shape[0]
-    w = floor + (1.0 - floor) * pct
-    print(f"  [quality] floor={floor}  strength range [{wr.min():.3f}, {wr.max():.3f}]  "
-          f"weight range [{w.min():.3f}, {w.max():.3f}]")
+    if shape == "decay":
+        w = np.power(floor, 1.0 - pct)
+    else:
+        w = floor + (1.0 - floor) * pct
+    print(f"  [quality] shape={shape} floor={floor}  strength range "
+          f"[{wr.min():.3f}, {wr.max():.3f}]  weight range [{w.min():.3f}, {w.max():.3f}]")
     return w.astype(np.float32)
 
 
@@ -721,12 +730,17 @@ def main():
     p.add_argument("--quality-weight", action="store_true",
                    help="soft-weight rows by player strength. Multiplies into the recency weight. "
                         "Use with --no-filter.")
-    p.add_argument("--quality-metric", choices=("winrate", "rating"), default="winrate",
-                   help="player-strength signal for --quality-weight. winrate: precomputed `win_rate` "
-                        "column (opponent-dependent). rating: opponent-adjusted Bradley-Terry rating fit "
-                        "from game_names+game_rewards (better on an Elo-matched ladder).")
-    p.add_argument("--quality-floor", type=float, default=0.25,
-                   help="weakest kept player's quality weight (strongest = 1.0); only with --quality-weight")
+    p.add_argument("--quality-metric", choices=("winrate", "rating"), default="rating",
+                   help="player-strength signal for --quality-weight. rating (default): opponent-adjusted "
+                        "Bradley-Terry Elo fit over ALL players from game_names+game_rewards (the all-players "
+                        "flow — no top-N extraction gate). winrate: precomputed `win_rate` column "
+                        "(opponent-dependent; only present after a strong-* gate).")
+    p.add_argument("--quality-shape", choices=("linear", "decay"), default="decay",
+                   help="map player strength-rank to weight. decay (default): exponential floor**(1-pct), "
+                        "so the top player weighs 1.0 and the weakest ~floor, with strong players weighing "
+                        "exponentially more. linear: gentle floor+(1-floor)*pct ramp (legacy).")
+    p.add_argument("--quality-floor", type=float, default=0.05,
+                   help="weakest player's quality weight (strongest = 1.0); only with --quality-weight")
     p.add_argument("--decisiveness-weight", action="store_true",
                    help="down-weight DECIDED positions (a side far ahead AND map mostly claimed) so "
                         "training focuses on contested midgame states. Computed from summary_v2 "
@@ -836,7 +850,7 @@ def main():
 
     weight = combine_sample_weights(
         recency_weights(row_source, args.recency_halflife),
-        quality_weights(row_win_rate, args.quality_floor, args.quality_weight),
+        quality_weights(row_win_rate, args.quality_floor, args.quality_weight, args.quality_shape),
         (decisiveness_weights_aux(row_aux, args.decisiveness_weight) if row_aux is not None
          else decisiveness_weights(Xs, args.decisiveness_weight)),
     )

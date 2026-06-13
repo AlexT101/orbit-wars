@@ -170,6 +170,14 @@ pub struct EntityCache {
     ///   * Rollout forward-sim entries (stored at the rollout's notion of
     ///     `current_turn`) likewise share slots with the bot's real turns.
     aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), CachedAim>>>,
+    /// Per-turn sun-only aim cache, sibling to [`Self::aim_cache`] for the
+    /// planet/comet-free [`crate::apollo::aim::aim_sun_only`] solver (reachability /
+    /// turns-to-reach features). Indexed by absolute launch turn, keyed
+    /// `(src, target, ships)`. Unlike `aim_cache` it never needs comet
+    /// re-verification: the sole obstacle is the sun, which never moves and never
+    /// spawns, so an entry is valid forever once stored — there is no
+    /// `stored_at_turn` and no `Stale` verdict.
+    sun_aim_cache: Mutex<Vec<HashMap<(i64, i64, i64), Option<AimResult>>>>,
     /// Cross-turn invariant aim cache, keyed by `(src, target, ships)` (no turn
     /// dimension — the entry is reusable at *every* turn via [`InvariantMode`]).
     /// See [`EntityCache::invariant_aim_lookup`] / `invariant_aim_store`.
@@ -211,6 +219,7 @@ impl EntityCache {
         }
 
         let aim_cache = (0..EPISODE_STEPS).map(|_| HashMap::default()).collect();
+        let sun_aim_cache = (0..EPISODE_STEPS).map(|_| HashMap::default()).collect();
 
         // Tightest inner reach of any static planet body. Static planets never
         // move, so this is fixed for the whole game (comets are never static).
@@ -237,6 +246,7 @@ impl EntityCache {
             entities,
             id_to_idx,
             aim_cache: Mutex::new(aim_cache),
+            sun_aim_cache: Mutex::new(sun_aim_cache),
             invariant_aim: Mutex::new(HashMap::default()),
             static_inner_limit,
             comet_ids,
@@ -409,6 +419,59 @@ impl EntityCache {
                     stored_at_turn: self.current_turn,
                 },
             );
+        }
+    }
+
+    /// Look up a cached sun-only aim result for a launch at
+    /// `current_turn + launch_turn_offset`. Returns `Some(result)` on a hit
+    /// (the inner `Option` is the stored verdict — `None` = no feasible shot)
+    /// and `None` on a miss. No comet re-verification: the sun is the only
+    /// obstacle, so a stored entry never goes stale. See [`Self::sun_aim_store`].
+    pub fn sun_aim_lookup(
+        &self,
+        src: i64,
+        target: i64,
+        ships: i64,
+        launch_turn_offset: i64,
+    ) -> Option<Option<AimResult>> {
+        let abs_launch = self.current_turn + launch_turn_offset;
+        if abs_launch < 0 || (abs_launch as usize) >= EPISODE_STEPS as usize {
+            return None;
+        }
+        self.sun_aim_cache.lock()[abs_launch as usize]
+            .get(&(src, target, ships))
+            .copied()
+    }
+
+    /// Store a sun-only aim result and, for free, populate its three quartet
+    /// siblings. The sun at CENTER is perfectly rotation-symmetric at every turn,
+    /// so rotating both endpoints to their quartet members yields the same
+    /// problem rotated by `k·90°` — exactly as [`Self::aim_cache_store`] argues
+    /// for the full obstacle field, but here it holds for the trivial reason that
+    /// a single centered disk is invariant under any rotation about CENTER.
+    /// Siblings share the `abs_launch` slot.
+    pub fn sun_aim_store(
+        &self,
+        src: i64,
+        target: i64,
+        ships: i64,
+        launch_turn_offset: i64,
+        result: Option<AimResult>,
+    ) {
+        let abs_launch = self.current_turn + launch_turn_offset;
+        if abs_launch < 0 || (abs_launch as usize) >= EPISODE_STEPS as usize {
+            return;
+        }
+        let slot = abs_launch as usize;
+        let mut map = self.sun_aim_cache.lock();
+        map[slot].insert((src, target, ships), result);
+        for k in 1..=3 {
+            let sib_src = rot_sibling(src, k);
+            let sib_target = rot_sibling(target, k);
+            if !self.id_to_idx.contains_key(&sib_src) || !self.id_to_idx.contains_key(&sib_target) {
+                continue;
+            }
+            map[slot].insert((sib_src, sib_target, ships), rotate_aim_result(result, k));
         }
     }
 
@@ -613,6 +676,9 @@ impl EntityCache {
             return;
         }
         if let Some(slot) = self.aim_cache.get_mut().get_mut(turn as usize) {
+            slot.clear();
+        }
+        if let Some(slot) = self.sun_aim_cache.get_mut().get_mut(turn as usize) {
             slot.clear();
         }
     }

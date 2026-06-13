@@ -63,12 +63,15 @@ bounded (the full corpus is too large to extract at once):
 
 ```
 for each day (oldest -> newest):
-    build_from_zip.py        zip          -> raw_<day>.npz   (extract_v2: obs -> 46-d SummaryV2)
-    filter_top10_..(--filter-only)        -> gated_<day>.npz (per-day quality gate)
-    delete raw_<day>.npz
-combine_npz.py  gated_*.npz (chronological) -> combined.npz  (source column = day rank)
-filter_top10_..(--no-filter, weighted)      -> weights/xgb_<2p|4p>.json
+    build_from_zip.py        zip          -> raw_<day>.npz   (extract_v2: obs -> SummaryV2; ALL players)
+combine_npz.py  raw_*.npz (chronological)  -> combined.npz   (source column = day rank)
+train_xgb.py (--no-filter, Elo-weighted)   -> weights/xgb_<2p|4p>.json
 ```
+
+We **extract every player** (no top-N gate) and instead weight rows by player
+Elo at train time — see the defaults below. (The old top-N extraction gate via
+`elo_topn.py --keep-players` is still supported with `--gate strong-topn`, but is
+no longer the default.)
 
 ### 2p
 
@@ -92,19 +95,21 @@ filter_top10_..(--no-filter, weighted)      -> weights/xgb_<2p|4p>.json
 
 What the defaults do:
 
-- **Gate `strong-topn`** (per-perspective): a row is kept iff *that row's*
-  player is in the day's top-N by win rate. This keeps the strong side of a
-  strong-vs-weak game and drops only the weak side (a 1st-vs-30th game still
-  contributes the strong player's positions).
-- **Top-N ramp `--top-n-start 10` -> `--top-n-end 15`**: stricter on older
-  days, looser on fresher days, interpolated by date. Override with `--top-n N`
-  for a flat gate, or `--gate strong-median` / `--gate both-topn` / `--gate none`.
+- **Gate `none`** (all players): every player's rows are extracted and kept; no
+  top-N drop. Strength enters only through the Elo weight below, so a weak
+  player's positions still contribute (down-weighted) rather than being thrown
+  away. Pass `--gate strong-topn` (with the `--top-n-start/-end` ramp) to restore
+  the old hard top-N extraction gate.
+- **Elo weight** (on by default; `--no-quality-weight` to disable): fit a single
+  global **Bradley-Terry rating over every player** (opponent-adjusted, from the
+  game outcomes), then weight each row by its player's rating-rank with an
+  **exponential decay** — the top player weighs `1.0`, the weakest `--quality-floor`
+  (default **0.05**), and strength in between decays as `floor^(1-pct)`. So elite
+  play dominates the fit while the long tail still contributes ~5%. Composes
+  multiplicatively with recency. (Train-side knobs: `--quality-metric rating`,
+  `--quality-shape decay`, `--quality-floor`.)
 - **`--recency-halflife 7`**: down-weight older rows by 0.5 every 7 days (reads
   the `source` day-rank from `combine_npz`). `0` = uniform.
-- **Quality weight** (on by default; `--no-quality-weight` to disable): weight
-  each kept row by its player's strength percentile *within the kept set*,
-  mapped to `[--quality-floor 0.25, 1.0]`. Composes multiplicatively with
-  recency. (Meaningful only with a `strong-*` gate, which records `win_rate`.)
 - **`--rounds 2000`** with `--early-stopping 50`: enough headroom for the
   booster to converge; early stopping picks the real count.
 
@@ -113,7 +118,7 @@ Useful flags:
 - `--keep-temp` — keep the per-day NPZs and `combined.npz` so you can retrain
   with different weighting without re-extracting (see below). Without it, the
   scratch dir is cleaned at the end.
-- `--resume` — skip days already gated (safe to re-run after an interruption).
+- `--resume` — skip days already extracted (safe to re-run after an interruption).
 - `--limit N` — cap games/day for a quick dry run.
 - `--workers N` — passed through to `build_from_zip.py` extraction.
 
@@ -127,16 +132,44 @@ With `--keep-temp`, the final train is one command over the kept
 ```bash
 ./venv/Scripts/python.exe bots/mine/aphrodite/train/train_xgb.py \
   --data bots/mine/aphrodite/train/data/2p/_ladder_work/combined.npz \
-  --no-filter --quality-weight --quality-floor 0.25 \
+  --no-filter --quality-weight --quality-metric rating --quality-floor 0.05 \
   --decisiveness-weight --drop-decided \
   --zero-cols 4,8,13,17,21,25,29,33,37,40,41,61,63,64 \
   --rounds 2000 --early-stopping 50 \
   --model-out bots/mine/aphrodite/train/weights/xgb_2p_try.json
 ```
 
+(`--quality-metric rating` + `--quality-shape decay` are the defaults; shown
+explicitly here. Sweep the tail weight with `--quality-floor`, or compare against
+`--quality-shape linear` / `--no-quality-weight`.)
+
 Note: more boosting rounds improves offline logloss but yields a bigger model,
 which costs more per leaf eval and so buys *fewer* MCTS iterations at a fixed
 budget — always confirm a candidate with eval (§3), don't trust sign-acc alone.
+
+### Quick single-day test (e.g. 6/11)
+
+To test the extractor + weighting on one day without the whole ladder, extract
+that day's zip directly (no top-N gate — **all players**), then train on it. The
+raw NPZ already carries `game_names` + `game_rewards`, so the Elo weight works on
+a single day:
+
+```bash
+# 1. extract every player's rows from the 6/11 replays
+./venv/Scripts/python.exe bots/mine/aphrodite/train/build_from_zip.py \
+  --zip ladder_replays/replays_6_11.zip \
+  --out bots/mine/aphrodite/train/data/2p/raw_6_11.npz \
+  --players 2
+
+# 2. train on it, Elo-decay weighted (top player 1.0, weakest 0.05)
+./venv/Scripts/python.exe bots/mine/aphrodite/train/train_xgb.py \
+  --data bots/mine/aphrodite/train/data/2p/raw_6_11.npz \
+  --no-filter --quality-weight --quality-metric rating --quality-floor 0.05 \
+  --rounds 2000 --early-stopping 50 \
+  --model-out bots/mine/aphrodite/train/weights/xgb_2p_test.json
+```
+
+(Recency weighting is a no-op on a single day — all rows share one `source`.)
 
 ---
 

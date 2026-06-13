@@ -229,6 +229,33 @@ pub fn resolve_shot(
     result
 }
 
+/// Sun-only counterpart to [`resolve_shot`] for cheap reachability / turns-to-reach
+/// queries (value-net pressure features): the board is treated as having no
+/// planets and no comets, so the only obstacle is the sun
+/// ([`crate::apollo::aim::aim_sun_only`]). This skips the full per-entity sweep
+/// and the comet gate entirely.
+///
+/// Cached in the dedicated [`EntityCache::sun_aim_cache`] (populate-once, never
+/// invalidated — the sun never moves or spawns). It does **not** touch the L1/L2/L3
+/// caches used by [`resolve_shot`]: those are keyed identically `(src, target,
+/// ships, abs_launch)` but hold *full*-obstacle results, so sharing them would
+/// cross-contaminate the two solvers' verdicts.
+pub fn resolve_shot_sun_only(
+    cache: &EntityCache,
+    src_id: i64,
+    target_id: i64,
+    ships: i64,
+    launch_turn_offset: i64,
+) -> Option<AimResult> {
+    let ships = ships.max(1);
+    if let Some(hit) = cache.sun_aim_lookup(src_id, target_id, ships, launch_turn_offset) {
+        return hit;
+    }
+    let r = crate::apollo::aim::aim_sun_only(cache, src_id, target_id, ships, launch_turn_offset);
+    cache.sun_aim_store(src_id, target_id, ships, launch_turn_offset, r);
+    r
+}
+
 fn build_reinforcement_targets(
     state: &WorldState,
     model: &HellburnerModel,
