@@ -1,12 +1,9 @@
 {
-  "_comment": "Search ranges for the tunable agent constants. Only keys listed here are varied by the tuner; every other key in config.json is held at its default. Ranges are set to semantic limits (not anchored to the current defaults). Defaults: rotation=10, offset=15, enemy_offset=5, reinf_turns=20, decay=0.5, frontier=1.4, ally=0.8, horizon=30, max_distance=38.",
-  "rotation_look_ahead_turns": { "type": "int",   "min": 2,    "max": 30   },
-  "offset_lookahead":          { "type": "int",   "min": 3,    "max": 28   },
-  "enemy_offset_lookahead":    { "type": "int",   "min": 0,    "max": 20   },
-  "reinforcement_pressure_turns": { "type": "int","min": 4,    "max": 50   },
-  "reinforcement_pressure_decay": { "type": "float","min": 0.05,"max": 0.95 },
-  "frontier_pressure_ratio":   { "type": "float", "min": 0.8,  "max": 5.0  },
-  "ally_pressure_ratio":       { "type": "float", "min": 0.2,  "max": 2.5  },
-  "horizon":                   { "type": "int",   "min": 12,   "max": 55   },
-  "max_distance":              { "type": "float", "min": 22.0, "max": 65.0 }
+  "_comment": "Phase-2 search ranges: the scoring / valuation constants ONLY. Phase-1 movement/pressure constants are intentionally absent (frozen at the adopted config.json/config_4p.json values; their ranges are archived in intervals_phase1.json). score_w_production is the scale anchor and is PINNED at 1.0 (NOT listed here) — the plan score is argmax-compared, so it has one redundant scale degree of freedom. default_strategy is {0=ScorePerShip, 1=ScoreFirst}; ProductionFirst is never the default. Identity defaults (reproduce pre-phase-2 play): score_w_ship_cost=1, score_w_final_ships=1, score_per_ship_smoothing=1, capture_min_score=0, score_enemy_capture_bonus=1, default_strategy=0.",
+  "score_w_ship_cost":         { "type": "float", "min": 0.3, "max": 3.0  },
+  "score_w_final_ships":       { "type": "float", "min": 0.0, "max": 2.0  },
+  "score_per_ship_smoothing":  { "type": "float", "min": 0.5, "max": 20.0 },
+  "capture_min_score":         { "type": "float", "min": -5.0,"max": 5.0  },
+  "score_enemy_capture_bonus": { "type": "float", "min": 1.0, "max": 2.0  },
+  "default_strategy":          { "type": "int",   "min": 0,   "max": 1    }
 }

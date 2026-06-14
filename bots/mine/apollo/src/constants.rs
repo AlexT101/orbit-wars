@@ -51,6 +51,20 @@ struct AgentConsts {
     ally_pressure_ratio: f64,
     horizon: i64,
     max_distance: f64,
+    // ── Scoring / valuation (phase-2 tunables) ──────────────────────────────
+    // `timeline_delta_score` = w_production·Σ production·Δowner
+    //                          + w_final_ships·Δsigned_final_ships
+    //                          − w_ship_cost·ships_committed.
+    // `score_w_production` is PINNED at 1.0 (scale anchor: the plan score is
+    // argmax-compared, so multiplying all three weights is a no-op). Defaults
+    // below reproduce the pre-phase-2 behavior exactly.
+    score_w_production: f64,
+    score_w_ship_cost: f64,
+    score_w_final_ships: f64,
+    score_per_ship_smoothing: f64,
+    capture_min_score: f64,
+    score_enemy_capture_bonus: f64,
+    default_strategy: i64,
 }
 
 // [0] = 2p, [1] = 4p.
@@ -90,6 +104,13 @@ fn parse_consts(env_key: &str, default_name: &str) -> AgentConsts {
         ally_pressure_ratio: f("ally_pressure_ratio"),
         horizon: i("horizon"),
         max_distance: f("max_distance"),
+        score_w_production: f("score_w_production"),
+        score_w_ship_cost: f("score_w_ship_cost"),
+        score_w_final_ships: f("score_w_final_ships"),
+        score_per_ship_smoothing: f("score_per_ship_smoothing"),
+        capture_min_score: f("capture_min_score"),
+        score_enemy_capture_bonus: f("score_enemy_capture_bonus"),
+        default_strategy: i("default_strategy"),
     }
 }
 
@@ -140,6 +161,22 @@ pub fn reinforcement_pressure_decay() -> f64 { agent().reinforcement_pressure_de
 pub fn frontier_pressure_ratio() -> f64 { agent().frontier_pressure_ratio } // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
 #[inline]
 pub fn ally_pressure_ratio() -> f64 { agent().ally_pressure_ratio } // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
+
+// Scoring / valuation — TUNABLE (phase 2). See AgentConsts for the formula.
+#[inline]
+pub fn score_w_production() -> f64 { agent().score_w_production } // PINNED at 1.0 (scale anchor for the argmax-compared plan score).
+#[inline]
+pub fn score_w_ship_cost() -> f64 { agent().score_w_ship_cost } // Weight on the `− ships_committed` capture-cost term (capture stinginess).
+#[inline]
+pub fn score_w_final_ships() -> f64 { agent().score_w_final_ships } // Weight on the horizon signed-ship-delta term vs the production-control integral.
+#[inline]
+pub fn score_per_ship_smoothing() -> f64 { agent().score_per_ship_smoothing } // The additive denominator in the ScorePerShip key `score / (smoothing + ships)`.
+#[inline]
+pub fn capture_min_score() -> f64 { agent().capture_min_score } // A winning commitment is only admitted when its timeline-delta score exceeds this gate.
+#[inline]
+pub fn score_enemy_capture_bonus() -> f64 { agent().score_enemy_capture_bonus } // Magnitude of an enemy-owned planet in owner_value (1.0 ⇒ the original symmetric 2:1 enemy-vs-neutral capture value).
+#[inline]
+pub fn default_strategy() -> i64 { agent().default_strategy } // Reply-policy strategy run directly by plan() and placed first in the search set: 0 = ScorePerShip, 1 = ScoreFirst.
 
 // Early-game expansion pre-pass (see early_game.rs)
 pub const EARLY_GAME_END: i64 = 0; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.

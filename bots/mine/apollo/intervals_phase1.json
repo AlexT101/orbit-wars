@@ -1,0 +1,12 @@
+{
+  "_comment": "Phase-1 search ranges (movement/pressure/horizon constants). Archived here while phase-2 (scoring) tuning freezes these at the adopted avg (2p) / trial175 (4p) values. To re-tune phase 1, copy these keys back into intervals.json. Defaults: rotation=10, offset=15, enemy_offset=5, reinf_turns=20, decay=0.5, frontier=1.4, ally=0.8, horizon=30, max_distance=38.",
+  "rotation_look_ahead_turns": { "type": "int",   "min": 2,    "max": 30   },
+  "offset_lookahead":          { "type": "int",   "min": 3,    "max": 28   },
+  "enemy_offset_lookahead":    { "type": "int",   "min": 0,    "max": 20   },
+  "reinforcement_pressure_turns": { "type": "int","min": 4,    "max": 50   },
+  "reinforcement_pressure_decay": { "type": "float","min": 0.05,"max": 0.95 },
+  "frontier_pressure_ratio":   { "type": "float", "min": 0.8,  "max": 5.0  },
+  "ally_pressure_ratio":       { "type": "float", "min": 0.2,  "max": 2.5  },
+  "horizon":                   { "type": "int",   "min": 12,   "max": 55   },
+  "max_distance":              { "type": "float", "min": 22.0, "max": 65.0 }
+}

@@ -651,7 +651,11 @@ fn owner_value(owner: i64, player: i64) -> f64 {
     } else if owner == -1 {
         0.0
     } else {
-        -1.0
+        // Enemy magnitude is tunable. At the default 1.0 this is the original
+        // symmetric ±1 (so capturing from an enemy is worth a 2.0 owner swing
+        // vs 1.0 for a neutral — the implicit 2:1). Raising it makes taking
+        // from / losing to an enemy weigh more without touching neutral value.
+        -crate::constants::score_enemy_capture_bonus()
     }
 }
 
@@ -677,6 +681,9 @@ fn timeline_delta_score(
     let player = world.player;
     let h = baseline.horizon as usize;
     let production = target.production as f64;
+    let w_production = crate::constants::score_w_production();
+    let w_final_ships = crate::constants::score_w_final_ships();
+    let w_ship_cost = crate::constants::score_w_ship_cost();
     let mut score = 0.0;
 
     // Turns before `start_turn` are copied verbatim from `baseline` by
@@ -685,13 +692,15 @@ fn timeline_delta_score(
     // way the checkpoint clamps it, so turn `h` is never skipped.
     let start = (start_turn.clamp(1, h.max(1) as i64)) as usize;
     for t in start..=h {
-        score += production
+        score += w_production
+            * production
             * (owner_value(owner_at[t], player) - owner_value(baseline.owner_at[t], player));
     }
 
-    score += signed_ships(owner_at[h], ships_at[h], player)
-        - signed_ships(baseline.owner_at[h], baseline.ships_at[h], player);
-    score - ships_committed as f64
+    score += w_final_ships
+        * (signed_ships(owner_at[h], ships_at[h], player)
+            - signed_ships(baseline.owner_at[h], baseline.ships_at[h], player));
+    score - w_ship_cost * ships_committed as f64
 }
 
 // ── evaluate_frontline_strategy ──────────────────────────────────────────
@@ -891,7 +900,7 @@ fn evaluate_frontline_strategy(
                     best_ships: &mut i64,
                     best_orders: &mut Vec<PlannedOrder>,
                     best_max_arrival: &mut i64| {
-        if score <= 0.0 {
+        if score <= crate::constants::capture_min_score() {
             return;
         }
         let better = score > *best_score
@@ -1250,7 +1259,9 @@ impl SelectionStrategy {
     fn key(self, score: f64, production: i64, ships_total: i64) -> f64 {
         match self {
             SelectionStrategy::ScoreFirst => score,
-            SelectionStrategy::ScorePerShip => score / (1.0 + ships_total as f64),
+            SelectionStrategy::ScorePerShip => {
+                score / (crate::constants::score_per_ship_smoothing() + ships_total as f64)
+            }
             SelectionStrategy::ProductionFirst => production as f64,
         }
     }
@@ -1595,11 +1606,26 @@ fn run_strategy(
 /// `plan()` runs directly (used as the cheap reply-policy hook inside the
 /// rollout layer), so its position is load-bearing — see the
 /// `search_candidates_includes_greedy_plan` test.
-const STRATEGIES: [SelectionStrategy; 3] = [
-    SelectionStrategy::ScorePerShip,
-    SelectionStrategy::ProductionFirst,
-    SelectionStrategy::ScoreFirst,
-];
+///
+/// The reply policy (index 0) is the tunable `default_strategy`: 0 ⇒
+/// ScorePerShip (the original default), 1 ⇒ ScoreFirst. ProductionFirst stays
+/// in the search set as a rollout candidate but is never the default. The full
+/// set of plans is unchanged — only the order is — so `search_candidates`
+/// behavior is unaffected; only `plan()`'s direct policy moves.
+fn strategies() -> [SelectionStrategy; 3] {
+    match crate::constants::default_strategy() {
+        1 => [
+            SelectionStrategy::ScoreFirst,
+            SelectionStrategy::ScorePerShip,
+            SelectionStrategy::ProductionFirst,
+        ],
+        _ => [
+            SelectionStrategy::ScorePerShip,
+            SelectionStrategy::ProductionFirst,
+            SelectionStrategy::ScoreFirst,
+        ],
+    }
+}
 
 pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     if world.enemy_planets.is_empty() {
@@ -1617,7 +1643,7 @@ pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     // *and* our own replanning during the reactive phase, so it must stay
     // cheap and deterministic. Multi-strategy search happens one level up,
     // in `search_candidates`.
-    let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &opening);
+    let (moves, _) = run_strategy(world, &model, strategies()[0], &opening);
     moves
 }
 
@@ -1755,9 +1781,10 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     //     }
     // }
 
-    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len() + 1);
+    let strats = strategies();
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(strats.len() + 1);
 
-    for &strat in &STRATEGIES {
+    for &strat in &strats {
         let (moves, _) = run_strategy(world, &model, strat, &opening);
         if !out.iter().any(|prev| prev == &moves) {
             out.push(moves);
@@ -1766,7 +1793,7 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     // The opening was planned with no enemy model; offer the rollout minimax
     // a no-opening alternative so a bad opening can be rejected wholesale.
     if !opening.is_empty() {
-        let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &[]);
+        let (moves, _) = run_strategy(world, &model, strats[0], &[]);
         if !out.iter().any(|prev| prev == &moves) {
             out.push(moves);
         }

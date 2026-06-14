@@ -67,7 +67,11 @@ from run_batched import (  # noqa: E402
 # Training opponents: each stage's games are split evenly across these, and the
 # objective is the BLENDED win rate (pushes the config to generalise, not
 # overfit one opponent). Override on the CLI with --opponent a,b,c.
-TRAIN_OPPONENTS = ["producer_v2", "apollo_baseline"]
+# producer_v2 (external), apollo_baseline (frozen pre-tuning clone) and
+# apollo_tuned (frozen phase-1 winner) are all trained against: beating the two
+# apollo clones guards against the scoring changes regressing vs our own prior
+# strategy, while producer_v2 keeps it honest vs an external bot.
+TRAIN_OPPONENTS = ["producer_v2", "apollo_baseline", "apollo_tuned"]
 # Reference opponents the best configs are validated against (no-regression).
 # Any training opponent is auto-excluded from this set at runtime.
 VALIDATION_OPPONENTS = ["producer", "simpleagent", "owheuristic", "apollo_baseline"]
