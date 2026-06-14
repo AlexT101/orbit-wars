@@ -230,12 +230,18 @@ fn maybe_dump_leaf(state: &GameState, me: i32) {
             let search_id = SEARCH_SEQ.with(|c| c.get());
             let v3 = with_cache_at(state.step, |cache| {
                 EVAL_L1.with(|l1| {
-                    crate::value_net::summary_features_v3::extract_with_cache(state, me, cache, Some(l1))
+                    crate::value_net::summary_features_v3::extract_with_cache(
+                        state,
+                        me,
+                        cache,
+                        Some(l1),
+                    )
                 })
             });
             let _ = w.write_all(&search_id.to_le_bytes());
             let _ = w.write_all(&leaf_step.to_le_bytes());
-            let bytes = unsafe { std::slice::from_raw_parts(v3.as_ptr() as *const u8, v3.len() * 4) };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(v3.as_ptr() as *const u8, v3.len() * 4) };
             let _ = w.write_all(bytes);
         } else {
             let search_step = SEARCH_STEP.with(|c| c.get()) as i32;
@@ -244,7 +250,8 @@ fn maybe_dump_leaf(state: &GameState, me: i32) {
             });
             let _ = w.write_all(&search_step.to_le_bytes());
             let _ = w.write_all(&leaf_step.to_le_bytes());
-            let bytes = unsafe { std::slice::from_raw_parts(v2.as_ptr() as *const u8, v2.len() * 4) };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(v2.as_ptr() as *const u8, v2.len() * 4) };
             let _ = w.write_all(bytes);
         }
     });

@@ -415,7 +415,15 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
                 if oi == ci || earliest[oi] >= window {
                     continue;
                 }
-                best = relax_arrival(model, pool[oi].id, cid, probe_ships, earliest[oi], window, best);
+                best = relax_arrival(
+                    model,
+                    pool[oi].id,
+                    cid,
+                    probe_ships,
+                    earliest[oi],
+                    window,
+                    best,
+                );
             }
             if best < earliest[ci] {
                 earliest[ci] = best;
@@ -525,7 +533,14 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     let mut events: Vec<Event> = Vec::new();
     let mut remaining = vec![true; search.candidates.len()];
     search.dfs(
-        world, model, &mut srcs, &mut events, &mut remaining, 0, 0, total_value,
+        world,
+        model,
+        &mut srcs,
+        &mut events,
+        &mut remaining,
+        0,
+        0,
+        total_value,
     );
     // `best_events` may be empty (no positive-value plan); the caller's map
     // over it yields the empty schedule naturally.

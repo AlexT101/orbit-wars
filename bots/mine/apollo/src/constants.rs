@@ -87,8 +87,12 @@ fn parse_consts(env_key: &str, default_name: &str) -> AgentConsts {
     let path = std::env::var_os(env_key)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(default_name));
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("apollo: failed to read agent config at {}: {e}", path.display()));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "apollo: failed to read agent config at {}: {e}",
+            path.display()
+        )
+    });
     let v: serde_json::Value = serde_json::from_str(&text)
         .unwrap_or_else(|e| panic!("apollo: invalid JSON in {}: {e}", path.display()));
     let pname = path.display().to_string();
@@ -160,45 +164,81 @@ pub const COMET_SPAWN_STEPS: [i64; 5] = [50, 150, 250, 350, 450]; // Game steps 
 // Turn rules — TUNABLE (config.json / config_4p.json), selected by MODE.
 // Read with `name()` at the call site.
 #[inline]
-pub fn rotation_look_ahead_turns() -> i64 { agent().rotation_look_ahead_turns } // Number of turns to look ahead when estimating future position of planets
+pub fn rotation_look_ahead_turns() -> i64 {
+    agent().rotation_look_ahead_turns
+} // Number of turns to look ahead when estimating future position of planets
 #[inline]
-pub fn offset_lookahead() -> i64 { agent().offset_lookahead } // Max per-source launch delay considered by attack planning and reinforcement hold checks. Offset 0 emits now; delayed attack offsets become reservations so later choices cannot spend those ships.
+pub fn offset_lookahead() -> i64 {
+    agent().offset_lookahead
+} // Max per-source launch delay considered by attack planning and reinforcement hold checks. Offset 0 emits now; delayed attack offsets become reservations so later choices cannot spend those ships.
 #[inline]
-pub fn enemy_offset_lookahead() -> i64 { agent().enemy_offset_lookahead } // Max enemy launch delay considered when estimating reinforcement pressure.
+pub fn enemy_offset_lookahead() -> i64 {
+    agent().enemy_offset_lookahead
+} // Max enemy launch delay considered when estimating reinforcement pressure.
 #[inline]
-pub fn reinforcement_pressure_turns() -> i64 { agent().reinforcement_pressure_turns } // Enemy planets within this many turns contribute to reinforcement pressure.
+pub fn reinforcement_pressure_turns() -> i64 {
+    agent().reinforcement_pressure_turns
+} // Enemy planets within this many turns contribute to reinforcement pressure.
 #[inline]
-pub fn reinforcement_pressure_decay() -> f64 { agent().reinforcement_pressure_decay } // Enemy pressure multiplier at REINFORCEMENT_PRESSURE_TURNS; turns 0/1 contribute fully.
+pub fn reinforcement_pressure_decay() -> f64 {
+    agent().reinforcement_pressure_decay
+} // Enemy pressure multiplier at REINFORCEMENT_PRESSURE_TURNS; turns 0/1 contribute fully.
 #[inline]
-pub fn frontier_pressure_ratio() -> f64 { agent().frontier_pressure_ratio } // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
+pub fn frontier_pressure_ratio() -> f64 {
+    agent().frontier_pressure_ratio
+} // Frontier planets only reinforce when the pressure sink is at least this much higher-pressure.
 #[inline]
-pub fn ally_pressure_ratio() -> f64 { agent().ally_pressure_ratio } // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
+pub fn ally_pressure_ratio() -> f64 {
+    agent().ally_pressure_ratio
+} // Enemy targets are only attacked when our pressure on them is at least this fraction of the enemy pressure on them.
 
 // Scoring / valuation — TUNABLE (phase 2). See AgentConsts for the formula.
 #[inline]
-pub fn score_w_production() -> f64 { agent().score_w_production } // PINNED at 1.0 (scale anchor for the argmax-compared plan score).
+pub fn score_w_production() -> f64 {
+    agent().score_w_production
+} // PINNED at 1.0 (scale anchor for the argmax-compared plan score).
 #[inline]
-pub fn score_w_ship_cost() -> f64 { agent().score_w_ship_cost } // Weight on the `− ships_committed` capture-cost term (capture stinginess).
+pub fn score_w_ship_cost() -> f64 {
+    agent().score_w_ship_cost
+} // Weight on the `− ships_committed` capture-cost term (capture stinginess).
 #[inline]
-pub fn score_w_final_ships() -> f64 { agent().score_w_final_ships } // Weight on the horizon signed-ship-delta term vs the production-control integral.
+pub fn score_w_final_ships() -> f64 {
+    agent().score_w_final_ships
+} // Weight on the horizon signed-ship-delta term vs the production-control integral.
 #[inline]
-pub fn score_per_ship_smoothing() -> f64 { agent().score_per_ship_smoothing } // The additive denominator in the ScorePerShip key `score / (smoothing + ships)`.
+pub fn score_per_ship_smoothing() -> f64 {
+    agent().score_per_ship_smoothing
+} // The additive denominator in the ScorePerShip key `score / (smoothing + ships)`.
 #[inline]
-pub fn capture_min_score() -> f64 { agent().capture_min_score } // A winning commitment is only admitted when its timeline-delta score exceeds this gate.
+pub fn capture_min_score() -> f64 {
+    agent().capture_min_score
+} // A winning commitment is only admitted when its timeline-delta score exceeds this gate.
 #[inline]
-pub fn score_enemy_capture_bonus() -> f64 { agent().score_enemy_capture_bonus } // Magnitude of an enemy-owned planet in owner_value (1.0 ⇒ the original symmetric 2:1 enemy-vs-neutral capture value).
+pub fn score_enemy_capture_bonus() -> f64 {
+    agent().score_enemy_capture_bonus
+} // Magnitude of an enemy-owned planet in owner_value (1.0 ⇒ the original symmetric 2:1 enemy-vs-neutral capture value).
 #[inline]
-pub fn default_strategy() -> i64 { agent().default_strategy } // Reply-policy strategy run directly by plan() and placed first in the search set: 0 = ScorePerShip, 1 = ScoreFirst.
+pub fn default_strategy() -> i64 {
+    agent().default_strategy
+} // Reply-policy strategy run directly by plan() and placed first in the search set: 0 = ScorePerShip, 1 = ScoreFirst.
 
 // Neutral-capture discipline — TUNABLE (phase 3). See tuning/PHASE3_DESIGN.md.
 #[inline]
-pub fn neutral_payback_turns() -> f64 { agent().neutral_payback_turns } // Turns-to-recoup (garrison/production) above which a neutral capture is surcharged.
+pub fn neutral_payback_turns() -> f64 {
+    agent().neutral_payback_turns
+} // Turns-to-recoup (garrison/production) above which a neutral capture is surcharged.
 #[inline]
-pub fn neutral_payback_penalty() -> f64 { agent().neutral_payback_penalty } // Surcharge steepness per excess payback-turn; 0 = disabled (no-op).
+pub fn neutral_payback_penalty() -> f64 {
+    agent().neutral_payback_penalty
+} // Surcharge steepness per excess payback-turn; 0 = disabled (no-op).
 #[inline]
-pub fn lead_gate() -> f64 { agent().lead_gate } // If our ship lead would stay >= this after the buy, waive the payback surcharge.
+pub fn lead_gate() -> f64 {
+    agent().lead_gate
+} // If our ship lead would stay >= this after the buy, waive the payback surcharge.
 #[inline]
-pub fn neutral_capture_penalty() -> f64 { agent().neutral_capture_penalty } // Flat score penalty on neutral captures (bites marginal neutrals hardest); 0 = no-op.
+pub fn neutral_capture_penalty() -> f64 {
+    agent().neutral_capture_penalty
+} // Flat score penalty on neutral captures (bites marginal neutrals hardest); 0 = no-op.
 
 // Early-game expansion pre-pass (see early_game.rs)
 pub const EARLY_GAME_END: i64 = 0; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.

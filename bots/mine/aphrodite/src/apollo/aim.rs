@@ -785,14 +785,7 @@ fn wrap_pi(a: f64) -> f64 {
 /// reported arc is genuinely blocked, full coverage of the cone proves no clear
 /// angle exists, so returning `None` cannot drop a recoverable shot. Movers are
 /// left to the scan fallback (their shadow isn't a fixed arc).
-///
-/// `include_sun` and `consider` select the obstacle subset, mirroring
-/// [`blocked_on_path`]: the sun contributes its shadow only when `include_sun`,
-/// and a static planet only when `consider(ent)` is true. A sun-only caller
-/// passes `consider = |_| false` so no planet shrinks the cone it is meant to
-/// ignore.
-#[allow(clippy::too_many_arguments)]
-fn cone_clear_impossible<F: Fn(&Entity) -> bool>(
+fn cone_clear_impossible(
     cache: &EntityCache,
     target_id: i64,
     lx: f64,
@@ -802,8 +795,6 @@ fn cone_clear_impossible<F: Fn(&Entity) -> bool>(
     phi_max: f64,
     ring_d: f64,
     launch_turn_offset: i64,
-    include_sun: bool,
-    consider: F,
 ) -> bool {
     let mut intervals: Vec<(f64, f64)> = Vec::new();
     let mut add = |cx: f64, cy: f64, r: f64| {
@@ -825,13 +816,11 @@ fn cone_clear_impossible<F: Fn(&Entity) -> bool>(
         }
     };
 
-    if include_sun {
-        add(CENTER, CENTER, SUN_RADIUS);
-    }
+    add(CENTER, CENTER, SUN_RADIUS);
     let abs = cache.current_turn + launch_turn_offset;
     if abs >= 0 {
         for ent in cache.entities.iter() {
-            if ent.id == target_id || !ent.is_static() || !consider(ent) {
+            if ent.id == target_id || !ent.is_static() {
                 continue;
             }
             if let Some(Some(p)) = ent.positions.get(abs as usize) {
@@ -881,7 +870,6 @@ pub fn aim_with_prediction(
         ships,
         launch_turn_offset,
         true,
-        |_| true,
     )
 }
 
@@ -906,40 +894,7 @@ pub fn aim_ignoring_comets(
         target_id,
         ships,
         launch_turn_offset,
-        true,
-        |e: &Entity| !e.is_comet(),
-    )
-}
-
-/// Sun-only aim: like [`aim_with_prediction`] but treats the board as having
-/// **no planets and no comets** — the sun at board center is the only obstacle.
-///
-/// Intended for cheap *reachability* and *turns-to-reach* queries (e.g. value-net
-/// pressure features) where the full per-entity sweep dominates cost. Geometry
-/// ([`lead_target_from`]) and the arrival-turn search are unchanged, so the
-/// returned `turns`/`flight_time` are the true earliest sun-clear intercept; only
-/// the obstacle set is restricted. Reuses the exact same primitives as the full
-/// aimer (`consider = |_| false` selects "no entities"), so the sun verdict — and
-/// the arrival-turn tiebreak that makes the sun lose to the target on the arrival
-/// turn — stays bit-identical to the full solver's sun handling.
-///
-/// Complexity: `O(turns_scanned)` for the geometry plus an `O(1)` swept sun test
-/// per candidate turn/cone-probe — the `O(entities)` planet/comet sweep is gone.
-pub fn aim_sun_only(
-    cache: &EntityCache,
-    shooter_id: i64,
-    target_id: i64,
-    ships: i64,
-    launch_turn_offset: i64,
-) -> Option<AimResult> {
-    aim_with_blocker(
-        cache,
-        shooter_id,
-        target_id,
-        ships,
-        launch_turn_offset,
-        true,
-        |_| false,
+        false,
     )
 }
 
@@ -958,7 +913,7 @@ const MAX_INTERCEPT_TRIES: i64 = 2;
 /// blocked (the caller may then try a later intercept turn). Factored out of
 /// [`aim_with_blocker`] so the multi-turn loop runs the identical per-turn logic.
 #[allow(clippy::too_many_arguments)]
-fn try_intercept_turn<F: Fn(&Entity) -> bool + Copy>(
+fn try_intercept_turn(
     cache: &EntityCache,
     shooter_id: i64,
     target_id: i64,
@@ -969,8 +924,7 @@ fn try_intercept_turn<F: Fn(&Entity) -> bool + Copy>(
     flight_time: f64,
     v_true: f64,
     launch_turn_offset: i64,
-    include_sun: bool,
-    consider: F,
+    include_comets: bool,
 ) -> Option<AimResult> {
     if !blocked_on_path(
         cache,
@@ -980,8 +934,8 @@ fn try_intercept_turn<F: Fn(&Entity) -> bool + Copy>(
         flight_time,
         v_true,
         launch_turn_offset,
-        include_sun,
-        consider,
+        true,
+        |e| include_comets || !e.is_comet(),
     ) {
         return Some((angle, turns, tx, ty, flight_time));
     }
@@ -1035,8 +989,6 @@ fn try_intercept_turn<F: Fn(&Entity) -> bool + Copy>(
         phi_max,
         ring_d,
         launch_turn_offset,
-        include_sun,
-        consider,
     ) {
         return None;
     }
@@ -1083,8 +1035,8 @@ fn try_intercept_turn<F: Fn(&Entity) -> bool + Copy>(
                 arrival_ft,
                 v_true,
                 launch_turn_offset,
-                include_sun,
-                consider,
+                true,
+                |e| include_comets || !e.is_comet(),
             ) {
                 let hx = q0x + s_hit * dqx;
                 let hy = q0y + s_hit * dqy;
@@ -1095,19 +1047,16 @@ fn try_intercept_turn<F: Fn(&Entity) -> bool + Copy>(
     None
 }
 
-/// Shared aim core. `include_sun` and `consider` select the obstacle set:
-/// `(true, |_| true)` for [`aim_with_prediction`] (sun + planets + comets),
-/// `(true, |e| !e.is_comet())` for [`aim_ignoring_comets`] (sun + planets), and
-/// `(true, |_| false)` for [`aim_sun_only`] (sun only).
-#[allow(clippy::too_many_arguments)]
-fn aim_with_blocker<F: Fn(&Entity) -> bool + Copy>(
+/// Shared aim core. `include_comets` selects the obstacle set (sun + planets +
+/// comets for [`aim_with_prediction`], sun + planets only for
+/// [`aim_ignoring_comets`]).
+fn aim_with_blocker(
     cache: &EntityCache,
     shooter_id: i64,
     target_id: i64,
     ships: i64,
     launch_turn_offset: i64,
-    include_sun: bool,
-    consider: F,
+    include_comets: bool,
 ) -> Option<AimResult> {
     // Lead the target at the exact engine speed so (angle, turns) land on the
     // actual orbital intercept point. Walk successive intercept turns: the
@@ -1138,8 +1087,7 @@ fn aim_with_blocker<F: Fn(&Entity) -> bool + Copy>(
             flight_time,
             v_true,
             launch_turn_offset,
-            include_sun,
-            consider,
+            include_comets,
         ) {
             return Some(res);
         }

@@ -1,5 +1,5 @@
 use super::reference_engine::RefEngine;
-use crate::aim::{aim_ignoring_comets, aim_sun_only, aim_with_prediction};
+use crate::aim::{aim_ignoring_comets, aim_with_prediction};
 use crate::cache::{rot_sibling, AimCacheVerdict, EntityCache, EntityKind, InvariantVerdict};
 use crate::constants::EPISODE_STEPS;
 use crate::engine::Configuration;
@@ -383,117 +383,6 @@ fn aim_ignoring_comets_matches_full_solve_without_comets() {
                     }
                     checked += 1;
                 }
-            }
-        }
-    }
-    assert!(checked > 0);
-}
-
-/// Sun-only aim drops the planet/comet sweep, so it can only *gain* reachability
-/// and *lower* the intercept turn versus the full solve: every shot the full
-/// aimer lands is sun-clear at its accepted turn (the sun is in the full obstacle
-/// set), so the sun-only scan finds that turn or an earlier one. Verifies the
-/// implication `full.is_some() ⇒ sun.is_some()` and `sun.turns ≤ full.turns`.
-#[test]
-fn sun_only_is_reachability_superset_of_full() {
-    let seeds = [42u64, 7, 100, 1234];
-    let ships_grid = [5i64, 50, 500];
-    let mut checked = 0usize;
-    let mut strictly_earlier = 0usize;
-    for seed in seeds {
-        let state = RefEngine::new(seed, 2, Configuration::default());
-        let mut cache = cache_for(&state);
-        let mut ids: Vec<i64> = cache.entities.iter().map(|e| e.id).collect();
-        ids.sort();
-        for t in [1i64, 7, 20] {
-            cache.set_current_turn(t);
-            for &src in &ids {
-                for &target in &ids {
-                    if src == target {
-                        continue;
-                    }
-                    for &ships in &ships_grid {
-                        let sun = aim_sun_only(&cache, src, target, ships, 0);
-                        let full = aim_with_prediction(&cache, src, target, ships, 0);
-                        if let Some(f) = full {
-                            let s = sun.unwrap_or_else(|| {
-                                panic!("full feasible but sun-only None {src}->{target} s={ships}")
-                            });
-                            assert!(
-                                s.1 <= f.1,
-                                "sun-only turns {} > full turns {} ({src}->{target} s={ships})",
-                                s.1,
-                                f.1
-                            );
-                            if s.1 < f.1 {
-                                strictly_earlier += 1;
-                            }
-                        }
-                        checked += 1;
-                    }
-                }
-            }
-        }
-    }
-    assert!(checked > 0);
-    // Sanity that the corpus actually exercises the "earlier turn" path at least
-    // once (planets do block some earliest geometric intercepts).
-    assert!(strictly_earlier > 0, "expected some planet-blocked-earlier shots");
-}
-
-/// The sun-only cache round-trips: a stored result reads back equal to a direct
-/// `aim_sun_only` solve, and the three quartet siblings are populated as the
-/// 90°-rotation of the base (the sun is rotation-symmetric about CENTER).
-#[test]
-fn sun_aim_cache_round_trips_with_siblings() {
-    let state = RefEngine::new(42, 2, Configuration::default());
-    let mut cache = cache_for(&state);
-    let mut ids: Vec<i64> = cache.entities.iter().map(|e| e.id).collect();
-    ids.sort();
-    cache.set_current_turn(5);
-
-    let mut checked = 0usize;
-    for &src in &ids {
-        for &target in &ids {
-            if src == target {
-                continue;
-            }
-            for &ships in [5i64, 50, 500].iter() {
-                let direct = aim_sun_only(&cache, src, target, ships, 0);
-                cache.sun_aim_store(src, target, ships, 0, direct);
-                let hit = cache
-                    .sun_aim_lookup(src, target, ships, 0)
-                    .expect("just stored");
-                match (direct, hit) {
-                    (None, None) => {}
-                    (Some(a), Some(b)) => {
-                        assert_eq!(a.0.to_bits(), b.0.to_bits(), "angle {src}->{target}");
-                        assert_eq!(a.1, b.1, "turns {src}->{target}");
-                    }
-                    _ => panic!("cache feasibility differ {src}->{target}"),
-                }
-                // A quartet sibling must independently match a fresh solve for the
-                // rotated pair (only when both sibling ids exist on this board).
-                let ssrc = rot_sibling(src, 1);
-                let starget = rot_sibling(target, 1);
-                if ssrc != src
-                    && cache.get(ssrc).is_some()
-                    && cache.get(starget).is_some()
-                    && ssrc != starget
-                {
-                    let sib = cache
-                        .sun_aim_lookup(ssrc, starget, ships, 0)
-                        .expect("sibling stored by fill");
-                    let fresh = aim_sun_only(&cache, ssrc, starget, ships, 0);
-                    match (sib, fresh) {
-                        (None, None) => {}
-                        (Some(b), Some(f)) => {
-                            assert_eq!(b.1, f.1, "sibling turns {ssrc}->{starget}");
-                        }
-                        _ => panic!("sibling feasibility differ {ssrc}->{starget}"),
-                    }
-                }
-                checked += 1;
             }
         }
     }

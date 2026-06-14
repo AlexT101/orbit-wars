@@ -429,7 +429,13 @@ fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i
         if enemy <= 0.0 {
             continue;
         }
-        let ally = pressure_from(state, model, target.id, &state.my_planets, offset_lookahead());
+        let ally = pressure_from(
+            state,
+            model,
+            target.id,
+            &state.my_planets,
+            offset_lookahead(),
+        );
         if ally < ally_pressure_ratio() * enemy {
             gated.insert(target.id);
         }

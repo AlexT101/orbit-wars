@@ -192,7 +192,8 @@ fn early_game_search_profile() {
     for &num_players in &[2usize, 4] {
         // Per turn: runs, plans found, total/max nodes, exhausted count,
         // total/max ms, total events.
-        let mut per_turn = vec![(0u64, 0u64, 0u64, 0u64, 0u64, 0.0f64, 0.0f64, 0u64); EARLY_GAME_END as usize];
+        let mut per_turn =
+            vec![(0u64, 0u64, 0u64, 0u64, 0u64, 0.0f64, 0.0f64, 0u64); EARLY_GAME_END as usize];
         for &seed in seeds {
             let mut state = RefEngine::new(seed, num_players, Configuration::default());
             let mut cache = EntityCache::build(

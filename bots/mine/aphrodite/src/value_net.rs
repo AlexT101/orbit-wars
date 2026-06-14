@@ -390,7 +390,7 @@ pub fn predict_with_cache(
 pub mod summary_features_v2 {
     use super::*;
     use crate::apollo::constants::OFFSET_LOOKAHEAD;
-    use crate::apollo::strategy::resolve_shot_sun_only;
+    use crate::apollo::strategy::resolve_shot;
 
     pub const DIM: usize = 65;
 
@@ -438,7 +438,7 @@ pub mod summary_features_v2 {
         let mut best = 0.0f32;
         for off in 0..=OFFSET_LOOKAHEAD {
             let ships = (src.ships + src.production * off).max(1);
-            if let Some(r) = resolve_shot_sun_only(cache, src.id, dst_id, ships, off) {
+            if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, None) {
                 let contrib = ships as f32 * rel_weight(off + r.1);
                 if contrib > best {
                     best = contrib;
@@ -1013,7 +1013,7 @@ pub mod summary_features_v2 {
 pub mod summary_features_v3 {
     use super::*;
     use crate::apollo::constants::OFFSET_LOOKAHEAD;
-    use crate::apollo::strategy::resolve_shot_sun_only;
+    use crate::apollo::strategy::resolve_shot;
     use crate::apollo::world::ShotL1;
 
     pub const DIM: usize = 145;
@@ -1071,14 +1071,11 @@ pub mod summary_features_v3 {
     /// (max over launch offsets). Mirrors `summary_features_v2::pressure_from`.
     /// `l1` is the search-scoped hot aim cache (the value net re-queries the same
     /// planet-pairs across many leaves at a turn); `None` falls back to L2/L3.
-    fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64, _l1: Option<&ShotL1>) -> f32 {
-        // Sun-only reachability/turns: planet & comet blocking are intentionally
-        // ignored here for speed, so the search-scoped L1 (`_l1`, which memoizes
-        // *full* shots) is unused — the dedicated `sun_aim_cache` backs this path.
+    fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64, l1: Option<&ShotL1>) -> f32 {
         let mut best = 0.0f32;
         for off in 0..=OFFSET_LOOKAHEAD {
             let ships = (src.ships + src.production * off).max(1);
-            if let Some(r) = resolve_shot_sun_only(cache, src.id, dst_id, ships, off) {
+            if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, l1) {
                 let contrib = ships as f32 * rel_weight(off + r.1);
                 if contrib > best {
                     best = contrib;
@@ -1251,10 +1248,13 @@ pub mod summary_features_v3 {
             }
         }
         let extrap_owner = |id: i64| -> i32 {
-            extrap
-                .get(&id)
-                .map(|x| x.0)
-                .unwrap_or_else(|| planets.iter().find(|p| p.id == id).map(|p| p.owner).unwrap_or(-1))
+            extrap.get(&id).map(|x| x.0).unwrap_or_else(|| {
+                planets
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.owner)
+                    .unwrap_or(-1)
+            })
         };
 
         // "closer" counts (current + extrapolated owners), per player.
@@ -1277,8 +1277,9 @@ pub mod summary_features_v3 {
                     }
                 } else if o.owner != pi {
                     let d_me = min_dist_to(planets, o.x, o.y, |q| q.owner == pi);
-                    let d_ot =
-                        min_dist_to(planets, o.x, o.y, |q| q.owner != pi && q.owner != -1 && q.id != o.id);
+                    let d_ot = min_dist_to(planets, o.x, o.y, |q| {
+                        q.owner != pi && q.owner != -1 && q.id != o.id
+                    });
                     if d_me < d_ot {
                         enemies_closer[p] += 1.0;
                     }
@@ -1287,8 +1288,10 @@ pub mod summary_features_v3 {
                 let eo = extrap_owner(o.id);
                 if eo == -1 {
                     let d_me = min_dist_to(planets, o.x, o.y, |q| extrap_owner(q.id) == pi);
-                    let d_en =
-                        min_dist_to(planets, o.x, o.y, |q| { let qo = extrap_owner(q.id); qo != pi && qo != -1 });
+                    let d_en = min_dist_to(planets, o.x, o.y, |q| {
+                        let qo = extrap_owner(q.id);
+                        qo != pi && qo != -1
+                    });
                     if d_me < d_en {
                         e_neutrals_closer[p] += 1.0;
                     }
@@ -1320,7 +1323,10 @@ pub mod summary_features_v3 {
         let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::new();
         for f in &state.fleets {
             if let Some((pid, dt)) = cached_predict_fleet_collision(f, state) {
-                arrivals.entry(pid).or_default().push((f.owner, f.ships, dt));
+                arrivals
+                    .entry(pid)
+                    .or_default()
+                    .push((f.owner, f.ships, dt));
             }
         }
         let mut pfo: Vec<[f32; NP]> = vec![[0.0f32; NP]; planets.len()];
@@ -1379,8 +1385,7 @@ pub mod summary_features_v3 {
             }
             // aggregate enemy threat on my planets
             if jo == me_u as i32 {
-                let enemy_threat: f32 =
-                    (0..NP).filter(|&i| i != me_u).map(|i| pfo[di][i]).sum();
+                let enemy_threat: f32 = (0..NP).filter(|&i| i != me_u).map(|i| pfo[di][i]).sum();
                 if enemy_threat > my_threat_max {
                     my_threat_max = enemy_threat;
                 }
@@ -1532,9 +1537,7 @@ pub mod summary_features_v3 {
             let _ = np_k;
             // rel + scale + alive (7)
             let cdist = match (centroids[me_u], centroids[k]) {
-                (Some(a), Some(b)) => {
-                    (((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()) as f32
-                }
+                (Some(a), Some(b)) => (((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()) as f32,
                 _ => 0.0,
             };
             out[base + 17] = pw_my_on_k[k];
@@ -1605,7 +1608,11 @@ pub mod summary_features_v3 {
     }
 
     fn extrap_owner_target(planets: &[Planet], pid: i64) -> i32 {
-        planets.iter().find(|p| p.id == pid).map(|p| p.owner).unwrap_or(-1)
+        planets
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.owner)
+            .unwrap_or(-1)
     }
 
     fn neutral_block_v3(state: &GameState) -> [f32; 7] {
@@ -1634,7 +1641,15 @@ pub mod summary_features_v3 {
                 comet_time += state.comet_remaining(planet) as f32;
             }
         }
-        [ships, n_static, n_orbit, n_comet, prod_static, prod_orbit, comet_time]
+        [
+            ships,
+            n_static,
+            n_orbit,
+            n_comet,
+            prod_static,
+            prod_orbit,
+            comet_time,
+        ]
     }
 }
 

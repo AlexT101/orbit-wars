@@ -12,8 +12,8 @@ import sys
 import threading
 
 # Update these contants if training new weights
-_WEIGHTS_2P_NAME = "xgb_2p_top25.json"
-_WEIGHTS_4P_NAME = "xgb_4p_v3_top25.json"
+_WEIGHTS_2P_NAME = "xgb_2p_light.json"
+_WEIGHTS_4P_NAME = "xgb_4p_v3_light.json"
 
 # Local testing uses lower limits for speed
 _DEV_BUDGET_MS = "700"

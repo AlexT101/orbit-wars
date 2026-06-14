@@ -40,7 +40,7 @@ fn main() -> io::Result<()> {
         let _ = duct::best_move(&state, state.player, budget, 0.0, &[]);
         n += 1;
         if n % 25 == 0 {
-            eprintln!("  ran {n} searches", );
+            eprintln!("  ran {n} searches",);
         }
     }
     eprintln!("done: {n} searches");
