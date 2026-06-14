@@ -1,0 +1,5 @@
+name: apollo_tuned
+description: "Python wrapper that delegates to a native Rust agent. Currently mirrors the nearest-sniper baseline; vendors an in-bot engine clone for simulation-based strategy."
+author: Alex Thummalapalli
+license: "Apache 2.0"
+tags: [rust, native, simulation]
