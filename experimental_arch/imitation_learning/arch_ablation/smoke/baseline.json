@@ -1,0 +1,23 @@
+{
+  "params": 759555,
+  "train_accuracy": 0.0,
+  "train_loss": 5.731187343597412,
+  "train_rows_per_sec": 19.22125392463065,
+  "train_rows_seen": 16,
+  "train_steps": 1,
+  "val_accuracy": 0.21961325966850828,
+  "val_launch_accuracy": 0.0,
+  "val_loss": 5.405041436464089,
+  "val_noop_accuracy": 1.0,
+  "val_rows": 2172,
+  "val_weighted_loss": 5.138351460183989,
+  "variant": {
+    "action_features": false,
+    "cross_attention": false,
+    "heads": 4,
+    "hidden": 128,
+    "layers": 3,
+    "name": "baseline",
+    "temporal_frames": false
+  }
+}

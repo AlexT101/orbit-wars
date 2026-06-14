@@ -912,7 +912,8 @@ impl OrbitWarsModel {
             .state
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("call set_state first"))?;
-        features::encode(s, player).into_py_dict(py)
+        let features = py.allow_threads(|| features::encode(s, player));
+        features.into_py_dict(py)
     }
 
     #[getter]
@@ -941,7 +942,8 @@ fn encode_obs(
     let dict = obs.downcast::<PyDict>()?;
     let cfg = parse_configuration(configuration)?;
     let state = EngineState::from_py_obs(dict, num_players, cfg)?;
-    features::encode(&state, player).into_py_dict(py)
+    let features = py.allow_threads(|| features::encode(&state, player));
+    features.into_py_dict(py)
 }
 
 #[pymodule]

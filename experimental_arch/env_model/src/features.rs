@@ -6,7 +6,8 @@
 //! Frames: `NUM_FRAMES` snapshots at `t`, `t+1`, `t+10`, `t_resolved` (first
 //! future turn with no fleets in flight). Each frame has `PLANET_SLOTS = 44`
 //! planet tokens. Action space is `(44, 44, ACTIONS_DIM)` = `(source, target,
-//! action)`: noop or send 100% of the source's ships to the selected target.
+//! action)`: noop, send 50%, or send 100% of the source's ships to the
+//! selected target.
 //!
 //! Outputs (dict keys / shapes in [`Features::into_py_dict`]):
 //!   - `tokens`   `(NUM_FRAMES, 44, TOKEN_DIM)`  per-planet features, all frames
@@ -16,6 +17,8 @@
 //!   - `reachable_mask` `(NUM_FRAMES, 44, 44, ACTIONS_DIM)` per-frame clean-launch bits
 //!   - `angles` / `mask` `(44, 44, ACTIONS_DIM)`  decision frame (t) only
 //!   - `ship_counts` `(44, 44, ACTIONS_DIM)` integer ships sent by each action
+//!   - `pair_outcome_features` `(44, 44, ACTIONS_DIM, PAIR_OUTCOME_DIM)`
+//!     resolve-frame counterfactual ownership features for each launch.
 //!
 //! `angles`/`mask`/`ship_counts` are frame t only: the policy acts now. `turns`
 //! and `reachable_mask` are computed for every frame so temporal message
@@ -30,6 +33,7 @@
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -46,12 +50,18 @@ thread_local! {
 }
 
 pub const PLANET_SLOTS: usize = 44;
-pub const ACTIONS_DIM: usize = 2;
+pub const ACTIONS_DIM: usize = 3;
 pub const NUM_FRAMES: usize = 4;
 /// Per-planet token width. See [`fill_token`] for the layout.
-pub const TOKEN_DIM: usize = 11;
+pub const TOKEN_DIM: usize = 15;
 /// Board-level feature width. See [`compute_globals`] for the layout.
 pub const GLOBAL_DIM: usize = 16;
+pub const PLANET_TIMELINE_SAMPLES: [usize; 11] = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 64];
+pub const PLANET_TIMELINE_DIM: usize = PLANET_TIMELINE_SAMPLES.len() * 2 + 9;
+/// Per `(source, target, action)` counterfactual features:
+/// `[source_still_mine_at_resolve, target_mine_after_launch_at_resolve,
+///   target_takeover_delta_at_resolve, target_takeover_time]`.
+pub const PAIR_OUTCOME_DIM: usize = 4;
 
 /// Future-frame offsets (turns from `t`). The 4th frame, `t_resolved`, is found
 /// dynamically (first turn with no fleets), so it isn't a fixed offset here.
@@ -68,8 +78,11 @@ const RESOLVE_CAP: usize = 96;
 /// Per-source noop action. It is valid only at target slot 0, giving each
 /// source row one way to do nothing without duplicating noop across targets.
 const NOOP_ACTION: usize = 0;
+/// Send half the source ships, rounded down. Invalid when the source has < 2
+/// ships.
+const SEND_HALF_ACTION: usize = 1;
 /// Send every ship currently on the source planet.
-const SEND_ALL_ACTION: usize = 1;
+const SEND_ALL_ACTION: usize = 2;
 
 // ---- normalization -------------------------------------------------------
 /// `log1p(x) / log1p(full)`: 0 at x=0, ~1 at x=full. For non-negative inputs.
@@ -95,12 +108,16 @@ fn norm_ships(s: i64) -> f32 {
     log_norm(s as f64, 1000.0)
 }
 #[inline]
-fn norm_prod(p: i64) -> f32 {
-    log_norm(p as f64, 10.0)
+fn norm_signed_ships(s: i64) -> f32 {
+    signed_log_norm(s as f64, 1000.0)
 }
 #[inline]
 fn norm_count(c: usize) -> f32 {
     c as f32 / PLANET_SLOTS as f32
+}
+#[inline]
+fn production_index(p: i64) -> usize {
+    p.clamp(1, 5) as usize - 1
 }
 
 /// Geometry of one planet at one turn.
@@ -353,6 +370,7 @@ impl Trajectory {
 fn action_count(a: usize, src_ships: i64) -> Option<i64> {
     let c = match a {
         NOOP_ACTION => return None,
+        SEND_HALF_ACTION => src_ships / 2,
         SEND_ALL_ACTION => src_ships,
         _ => return None,
     };
@@ -377,6 +395,8 @@ pub struct Features {
     pub mask: Vec<u8>,           // (44, 44, ACTIONS_DIM), frame t
     pub ship_counts: Vec<i64>,   // (44, 44, ACTIONS_DIM), frame t
     pub reachable_mask: Vec<u8>, // (NUM_FRAMES, 44, 44, ACTIONS_DIM)
+    pub planet_timeline_features: Vec<f32>, // (44, PLANET_TIMELINE_DIM)
+    pub pair_outcome_features: Vec<f32>, // (44, 44, ACTIONS_DIM, PAIR_OUTCOME_DIM)
     /// Raw per-frame planet state `[id, owner, x, y, ships]`, present planets
     /// only. Not a model input — exposed for validation/debugging against the
     /// reference engine.
@@ -420,15 +440,32 @@ impl Features {
             "reachable_mask_shape",
             (NUM_FRAMES, PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM),
         )?;
+        d.set_item(
+            "planet_timeline_features",
+            self.planet_timeline_features.into_pyarray(py),
+        )?;
+        d.set_item(
+            "planet_timeline_features_shape",
+            (PLANET_SLOTS, PLANET_TIMELINE_DIM),
+        )?;
+        d.set_item(
+            "pair_outcome_features",
+            self.pair_outcome_features.into_pyarray(py),
+        )?;
+        d.set_item(
+            "pair_outcome_features_shape",
+            (PLANET_SLOTS, PLANET_SLOTS, ACTIONS_DIM, PAIR_OUTCOME_DIM),
+        )?;
         Ok(d.into_any().unbind())
     }
 }
 
 /// Per-planet token: `[is_mine, is_enemy, is_neutral, is_comet, is_orbiting,
-/// production, ships, x, y, dist_to_sun, angular_velocity]`. Positions and
-/// distance-to-sun are normalized by board size. `angular_velocity` is the
-/// board's orbital rate for orbiting planets and 0 for static planets / comets,
-/// scaled to ~[0, 1] (board rate is ~0.025–0.05).
+/// prod_1, prod_2, prod_3, prod_4, prod_5, ships, x, y, dist_to_sun,
+/// angular_velocity]`. Positions and distance-to-sun are normalized by board
+/// size. `angular_velocity` is the board's orbital rate for orbiting planets
+/// and 0 for static planets / comets, scaled to ~[0, 1] (board rate is
+/// ~0.025–0.05).
 fn fill_token(
     tk: &mut [f32],
     p: &Planet,
@@ -448,12 +485,12 @@ fn fill_token(
     tk[2] = (p.owner == -1) as i32 as f32;
     tk[3] = is_comet as i32 as f32;
     tk[4] = is_orbiting as i32 as f32;
-    tk[5] = norm_prod(p.production);
-    tk[6] = norm_ships(p.ships);
-    tk[7] = norm_dist(p.x);
-    tk[8] = norm_dist(p.y);
-    tk[9] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
-    tk[10] = if is_orbiting {
+    tk[5 + production_index(p.production)] = 1.0;
+    tk[10] = norm_ships(p.ships);
+    tk[11] = norm_dist(p.x);
+    tk[12] = norm_dist(p.y);
+    tk[13] = norm_dist(distance((p.x, p.y), (CENTER, CENTER)));
+    tk[14] = if is_orbiting {
         (angular_velocity / 0.05) as f32
     } else {
         0.0
@@ -468,6 +505,220 @@ fn fill_token(
 /// fleet_ships`; enemy aggregates all non-self players; shares are own/(own+enemy)
 /// (0.5 when both are 0). Counts are /44; ships/production are log-normalized;
 /// diffs are signed-log.
+#[inline]
+fn owner_side(owner: i64, player: i64) -> i64 {
+    if owner == player {
+        1
+    } else if owner >= 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+#[inline]
+fn scaled_tick(t: Option<usize>) -> f32 {
+    t.map(|x| (x.min(AIM_HORIZON) as f32) / (AIM_HORIZON as f32))
+        .unwrap_or(1.0)
+}
+
+fn planet_at_turn<'a>(traj: &'a Trajectory, planet_id: i64, turn: usize) -> Option<&'a Planet> {
+    traj.snapshots
+        .get(turn)
+        .and_then(|planets| planets.iter().find(|p| p.id == planet_id))
+}
+
+fn signed_balance_at(traj: &Trajectory, planet_id: i64, turn: usize, player: i64) -> (i64, i64) {
+    let Some(p) = planet_at_turn(traj, planet_id, turn) else {
+        return (0, 0);
+    };
+    let side = owner_side(p.owner, player);
+    let balance = match side {
+        1 => p.ships,
+        -1 => -p.ships,
+        _ => 0,
+    };
+    (side, balance)
+}
+
+fn compute_planet_timeline_features(
+    traj: &Trajectory,
+    slot_id: &[i64],
+    player: i64,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; PLANET_SLOTS * PLANET_TIMELINE_DIM];
+    for si in 0..PLANET_SLOTS {
+        let id = slot_id[si];
+        if id < 0 {
+            continue;
+        }
+        let base = si * PLANET_TIMELINE_DIM;
+        let mut write = base;
+
+        for &turn in &PLANET_TIMELINE_SAMPLES {
+            let (_, balance) = signed_balance_at(traj, id, turn, player);
+            out[write] = norm_signed_ships(balance);
+            write += 1;
+        }
+        for &turn in &PLANET_TIMELINE_SAMPLES {
+            let (side, _) = signed_balance_at(traj, id, turn, player);
+            out[write] = side as f32;
+            write += 1;
+        }
+
+        let (initial_side, _) = signed_balance_at(traj, id, 0, player);
+        let mut first_enemy: Option<usize> = None;
+        let mut first_mine: Option<usize> = None;
+        let mut first_loss: Option<usize> = None;
+        let mut first_gain: Option<usize> = None;
+        let mut ever_enemy = false;
+        let mut ever_mine = initial_side == 1;
+        let mut prev_side = initial_side;
+        let mut flips = 0usize;
+        let mut min_balance = i64::MAX;
+
+        for turn in 0..=AIM_HORIZON {
+            let (side, balance) = signed_balance_at(traj, id, turn, player);
+            min_balance = min_balance.min(balance);
+            if turn > 0 && side != prev_side {
+                flips += 1;
+            }
+            prev_side = side;
+
+            if side == -1 {
+                ever_enemy = true;
+                first_enemy.get_or_insert(turn);
+            }
+            if side == 1 {
+                ever_mine = true;
+                first_mine.get_or_insert(turn);
+            }
+            if initial_side == 1 && side != 1 {
+                first_loss.get_or_insert(turn);
+            }
+            if initial_side != 1 && side == 1 {
+                first_gain.get_or_insert(turn);
+            }
+        }
+        let (_, final_balance) = signed_balance_at(traj, id, AIM_HORIZON, player);
+
+        out[write] = scaled_tick(first_enemy);
+        write += 1;
+        out[write] = scaled_tick(first_mine);
+        write += 1;
+        out[write] = scaled_tick(first_loss);
+        write += 1;
+        out[write] = scaled_tick(first_gain);
+        write += 1;
+        out[write] = ever_enemy as i32 as f32;
+        write += 1;
+        out[write] = ever_mine as i32 as f32;
+        write += 1;
+        out[write] = (flips.min(8) as f32) / 8.0;
+        write += 1;
+        out[write] = norm_signed_ships(min_balance);
+        write += 1;
+        out[write] = norm_signed_ships(final_balance);
+    }
+    out
+}
+
+fn apply_arrival_at_resolve(owner: i64, ships: i64, player: i64, count: i64) -> (i64, i64) {
+    if count <= 0 {
+        return (owner, ships);
+    }
+    if owner == player {
+        (owner, ships + count)
+    } else {
+        let after = ships - count;
+        if after < 0 {
+            (player, after.abs())
+        } else {
+            (owner, after)
+        }
+    }
+}
+
+fn source_still_mine_at_resolve(
+    resolved_by_id: &FxHashMap<i64, &Planet>,
+    source_id: i64,
+    player: i64,
+    count: i64,
+) -> bool {
+    resolved_by_id
+        .get(&source_id)
+        .is_some_and(|p| p.owner == player && p.ships - count >= 0)
+}
+
+fn compute_pair_outcome_features(
+    traj: &Trajectory,
+    slot_id: &[i64],
+    player: i64,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM * PAIR_OUTCOME_DIM];
+    let resolved_turn = traj.offsets[NUM_FRAMES - 1];
+    let resolved_by_id: FxHashMap<i64, &Planet> = traj
+        .snapshots
+        .get(resolved_turn)
+        .map(|planets| planets.iter().map(|p| (p.id, p)).collect())
+        .unwrap_or_default();
+    let current_by_id: FxHashMap<i64, &Planet> =
+        traj.frame_planets(0).iter().map(|p| (p.id, p)).collect();
+
+    for si in 0..PLANET_SLOTS {
+        let src_id = slot_id[si];
+        if src_id < 0 {
+            continue;
+        }
+        let Some(src_now) = current_by_id.get(&src_id) else {
+            continue;
+        };
+        if src_now.owner != player {
+            continue;
+        }
+        for sj in 0..PLANET_SLOTS {
+            if si == sj {
+                continue;
+            }
+            let dst_id = slot_id[sj];
+            if dst_id < 0 {
+                continue;
+            }
+            let Some(dst_resolved) = resolved_by_id.get(&dst_id) else {
+                continue;
+            };
+            for a in 0..ACTIONS_DIM {
+                let Some(count) = action_count(a, src_now.ships) else {
+                    continue;
+                };
+                let Some((arrival_turn, _theta)) = traj.aim(0, src_id, dst_id, count) else {
+                    continue;
+                };
+                let source_retained =
+                    source_still_mine_at_resolve(&resolved_by_id, src_id, player, count);
+                let (target_owner_after, _target_ships_after) = apply_arrival_at_resolve(
+                    dst_resolved.owner,
+                    dst_resolved.ships,
+                    player,
+                    count,
+                );
+                let target_owned_after = target_owner_after == player;
+                let target_takeover_delta = dst_resolved.owner != player && target_owned_after;
+                let base = ((si * PLANET_SLOTS + sj) * ACTIONS_DIM + a) * PAIR_OUTCOME_DIM;
+                out[base] = source_retained as i32 as f32;
+                out[base + 1] = target_owned_after as i32 as f32;
+                out[base + 2] = target_takeover_delta as i32 as f32;
+                out[base + 3] = if target_takeover_delta {
+                    norm_turns(arrival_turn)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+    out
+}
+
 fn compute_globals(state: &EngineState, player: i64) -> Vec<f32> {
     let np = state.num_players;
     let (mut own_planet_ships, mut enemy_planet_ships, mut neutral_ships) = (0i64, 0i64, 0i64);
@@ -612,6 +863,8 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
     let mut mask = vec![0u8; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut ship_counts = vec![0i64; PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
     let mut reachable_mask = vec![0u8; NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM];
+    let planet_timeline_features = compute_planet_timeline_features(&traj, &slot_id, player);
+    let pair_outcome_features = compute_pair_outcome_features(&traj, &slot_id, player);
     for si in 0..PLANET_SLOTS {
         mask[(si * PLANET_SLOTS) * ACTIONS_DIM + NOOP_ACTION] = 1;
     }
@@ -650,28 +903,38 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
 
         const ROW: usize = PLANET_SLOTS * ACTIONS_DIM;
         const FRAME_ROWS: usize = PLANET_SLOTS * ROW;
-        for si in 0..PLANET_SLOTS {
-            let row_start = f * FRAME_ROWS + si * ROW;
-            let t_row = &mut turns[row_start..row_start + ROW];
-            let r_row = &mut reachable_mask[row_start..row_start + ROW];
-            if f == 0 {
-                let a_row = &mut angles[si * ROW..(si + 1) * ROW];
-                let m_row = &mut mask[si * ROW..(si + 1) * ROW];
-                let c_row = &mut ship_counts[si * ROW..(si + 1) * ROW];
-                compute_source_row(
-                    &traj,
-                    off,
-                    si,
-                    &slot_id,
-                    &by,
-                    player,
-                    t_row,
-                    r_row,
-                    Some((a_row, m_row, c_row)),
-                );
-            } else {
-                compute_source_row(&traj, off, si, &slot_id, &by, player, t_row, r_row, None);
-            }
+        let frame_start = f * FRAME_ROWS;
+        let t_frame = &mut turns[frame_start..frame_start + FRAME_ROWS];
+        let r_frame = &mut reachable_mask[frame_start..frame_start + FRAME_ROWS];
+        if f == 0 {
+            t_frame
+                .par_chunks_mut(ROW)
+                .zip(r_frame.par_chunks_mut(ROW))
+                .zip(angles.par_chunks_mut(ROW))
+                .zip(mask.par_chunks_mut(ROW))
+                .zip(ship_counts.par_chunks_mut(ROW))
+                .enumerate()
+                .for_each(|(si, ((((t_row, r_row), a_row), m_row), c_row))| {
+                    compute_source_row(
+                        &traj,
+                        off,
+                        si,
+                        &slot_id,
+                        &by,
+                        player,
+                        t_row,
+                        r_row,
+                        Some((a_row, m_row, c_row)),
+                    );
+                });
+        } else {
+            t_frame
+                .par_chunks_mut(ROW)
+                .zip(r_frame.par_chunks_mut(ROW))
+                .enumerate()
+                .for_each(|(si, (t_row, r_row))| {
+                    compute_source_row(&traj, off, si, &slot_id, &by, player, t_row, r_row, None);
+                });
         }
     }
 
@@ -687,6 +950,8 @@ pub fn encode(state: &EngineState, player: i64) -> Features {
         mask,
         ship_counts,
         reachable_mask,
+        planet_timeline_features,
+        pair_outcome_features,
         frame_planets,
     }
 }
@@ -989,12 +1254,17 @@ mod tests {
                 f.reachable_mask.len(),
                 NUM_FRAMES * PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM
             );
+            assert_eq!(
+                f.pair_outcome_features.len(),
+                PLANET_SLOTS * PLANET_SLOTS * ACTIONS_DIM * PAIR_OUTCOME_DIM
+            );
             for v in f
                 .tokens
                 .iter()
                 .chain(f.turns.iter())
                 .chain(f.angles.iter())
                 .chain(f.globals.iter())
+                .chain(f.pair_outcome_features.iter())
             {
                 assert!(v.is_finite(), "non-finite feature");
             }
@@ -1012,14 +1282,14 @@ mod tests {
             for token in f.tokens.chunks_exact(TOKEN_DIM) {
                 if token[0..5].iter().any(|&x| x > 0.0) {
                     assert!(
-                        (0.0..=1.0).contains(&token[7]),
+                        (0.0..=1.0).contains(&token[11]),
                         "x out of [0,1]: {}",
-                        token[7]
+                        token[11]
                     );
                     assert!(
-                        (0.0..=1.0).contains(&token[8]),
+                        (0.0..=1.0).contains(&token[12]),
                         "y out of [0,1]: {}",
-                        token[8]
+                        token[12]
                     );
                 }
             }

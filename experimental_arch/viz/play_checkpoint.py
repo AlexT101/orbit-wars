@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import argparse
 import importlib.util
 import io
 import shutil
@@ -12,9 +13,8 @@ from typing import Protocol
 import torch
 from torch.distributions import Categorical
 
-# ==== HARDCODED CONFIG ====
-HERO = "/home/sunrise/orbitwars/pantheow/experimental_arch/train_transformer/checkpoints/galaxy_a2_p44_reference_ppo_transformer_v1/latest.pt"
-OPPONENT = "self"  # "self", .zip, .py, or bot name
+HERO = "/home/ec2-user/orbit-wars-osteo/experimental_arch/imitation_learning/checkpoints/isaiah_bc_transformer/latest.pt"
+OPPONENT = "hellburner"  # "self", .zip, .py, or bot name
 
 HERO_DETERMINISTIC = False
 OPPONENT_DETERMINISTIC = False
@@ -65,8 +65,9 @@ class CheckpointAgent:
         self.device = torch.device(device)
         ckpt = torch.load(checkpoint, map_location=self.device, weights_only=False)
         config = ckpt.get("config", {})
+        self.model_type = config.get("model", "entity_transformer")
         self.model = build_policy(
-            config.get("model", "entity_transformer"),
+            self.model_type,
             config.get("hidden", 128),
             config.get("transformer_layers", 3),
             config.get("transformer_heads", 4),
@@ -79,12 +80,30 @@ class CheckpointAgent:
 
     def act(self, obs: dict) -> list[list[float]]:
         encoded = encode_obs(obs, player=self.player)
+        planets = encoded.planets
+        planet_mask = encoded.planet_mask
         batch = {
-            "planets": torch.as_tensor(encoded.planets, dtype=torch.float32, device=self.device).unsqueeze(0),
-            "planet_mask": torch.as_tensor(encoded.planet_mask, dtype=torch.float32, device=self.device).unsqueeze(0),
+            "planets": torch.as_tensor(planets, dtype=torch.float32, device=self.device).unsqueeze(0),
+            "planet_mask": torch.as_tensor(planet_mask, dtype=torch.float32, device=self.device).unsqueeze(0),
             "globals_": torch.as_tensor(encoded.globals, dtype=torch.float32, device=self.device).unsqueeze(0),
             "action_mask": torch.as_tensor(encoded.action_mask, dtype=torch.bool, device=self.device).unsqueeze(0),
         }
+        if self.model_type == "entity_transformer_temporal":
+            batch["pair_turns"] = torch.as_tensor(
+                encoded.pair_turns,
+                dtype=torch.float32,
+                device=self.device,
+            ).unsqueeze(0)
+            batch["pair_reachable_mask"] = torch.as_tensor(
+                encoded.pair_reachable_mask,
+                dtype=torch.float32,
+                device=self.device,
+            ).unsqueeze(0)
+            batch["planet_timeline_features"] = torch.as_tensor(
+                encoded.planet_timeline_features,
+                dtype=torch.float32,
+                device=self.device,
+            ).unsqueeze(0)
         with torch.no_grad():
             logits, _value = self.model(**batch)
             if self.deterministic:
@@ -237,25 +256,36 @@ def play_and_render(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hero", default=HERO)
+    parser.add_argument("--opponent", default=OPPONENT)
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--out", default=OUT_PATH)
+    parser.add_argument("--device", default=DEVICE)
+    parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
+    parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--opponent-deterministic", action="store_true")
+    args = parser.parse_args()
+
     # --- hero ---
-    hero_path = resolve_path(HERO)
+    hero_path = resolve_path(args.hero)
 
     if hero_path.exists() and hero_path.suffix == ".pt":
         hero = CheckpointAgent(
             hero_path,
             player=0,
-            deterministic=HERO_DETERMINISTIC,
-            device=DEVICE,
+            deterministic=args.deterministic or HERO_DETERMINISTIC,
+            device=args.device,
         )
         self_checkpoint = hero_path
     elif hero_path.exists() and hero_path.suffix == ".py":
         hero = PythonAgent(hero_path)
         self_checkpoint = hero_path
     else:
-        raise FileNotFoundError(f"invalid HERO: {HERO}")
+        raise FileNotFoundError(f"invalid HERO: {args.hero}")
 
     # --- opponent ---
-    opponent_ref = OPPONENT
+    opponent_ref = args.opponent
     if opponent_ref == "self":
         opponent_ref = str(self_checkpoint)
 
@@ -263,19 +293,19 @@ def main() -> int:
         opponent_ref,
         player=1,
         self_checkpoint=self_checkpoint,
-        deterministic=OPPONENT_DETERMINISTIC,
-        device=DEVICE,
+        deterministic=args.opponent_deterministic or OPPONENT_DETERMINISTIC,
+        device=args.device,
     )
 
     # --- run ---
-    out_path = resolve_path(OUT_PATH) if OUT_PATH else DEFAULT_OUT
+    out_path = resolve_path(args.out) if args.out else DEFAULT_OUT
 
     play_and_render(
         hero=hero,
         opponent=opponent,
-        seed=SEED,
+        seed=args.seed,
         out=out_path,
-        max_steps=MAX_STEPS,
+        max_steps=args.max_steps,
     )
     return 0
 

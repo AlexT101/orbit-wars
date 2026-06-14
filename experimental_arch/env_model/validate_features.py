@@ -36,8 +36,9 @@ COMET_WARMUPS = [50, 75, 150, 250, 350, 450]
 COMET_ACTIONS_PER_STATE = 3
 POS_TOL = 1e-6
 PLANET_SLOTS = 44
-ACTIONS_DIM = 2
-SEND_ALL_ACTION = 1
+ACTIONS_DIM = 3
+SEND_HALF_ACTION = 1
+SEND_ALL_ACTION = 2
 
 
 def fresh_env(seed: int, warmup: int):
@@ -143,11 +144,11 @@ def check_aim(seed: int, rng: random.Random) -> tuple[int, list[str]]:
     obs0 = obs_of(env, 0)
     feat = encode_obs(obs0, 0)
     ids = feat["planet_ids"]
-    turns = feat["turns"]      # flat (4,44,44,2), first frame is decision frame
-    angles = feat["angles"]    # flat (44,44,2)
-    mask = feat["mask"]        # flat (44,44,2)
-    ship_counts = feat["ship_counts"]  # flat (44,44,2), integral ships sent
-    reachable = feat["reachable_mask"]  # flat (4,44,44,2), first frame starts at index 0
+    turns = feat["turns"]      # flat (4,44,44,3), first frame is decision frame
+    angles = feat["angles"]    # flat (44,44,3)
+    mask = feat["mask"]        # flat (44,44,3)
+    ship_counts = feat["ship_counts"]  # flat (44,44,3), integral ships sent
+    reachable = feat["reachable_mask"]  # flat (4,44,44,3), first frame starts at index 0
 
     valid = [
         (si, sj, a)
@@ -208,12 +209,11 @@ def check_mask_completeness(seed: int, rng: random.Random) -> tuple[int, list[st
             id_j = ids[sj]
             if sj == si or id_j < 0 or id_j not in pmap:
                 continue
-            a = SEND_ALL_ACTION
-            if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]:
-                continue
-            count = ss
-            if 1 <= count <= ss:
-                cands.append((si, sj, a, id_i, id_j, count))
+            for a, count in ((SEND_HALF_ACTION, ss // 2), (SEND_ALL_ACTION, ss)):
+                if mask[(si * PLANET_SLOTS + sj) * ACTIONS_DIM + a]:
+                    continue
+                if 1 <= count <= ss:
+                    cands.append((si, sj, a, id_i, id_j, count))
     rng.shuffle(cands)
 
     checked = 0

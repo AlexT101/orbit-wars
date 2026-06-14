@@ -1,0 +1,51 @@
+{
+  "args": {
+    "batch_size": 256,
+    "cross_batch_size": 128,
+    "dataset": "/home/ubuntu/osteo_data/osteo_data/manifest.json",
+    "epochs": 20,
+    "lr": 0.001,
+    "max_grad_norm": 1.0,
+    "out_dir": "arch_ablation/runs_scaled_vs_ngpt_20epoch",
+    "seed": 123,
+    "steps": 0,
+    "train_chunks": 10,
+    "val_chunks": 10,
+    "variants": [
+      "scaled",
+      "ngpt_scaled"
+    ],
+    "weight_decay": 0.0001,
+    "workers": 2
+  },
+  "dataset": "/home/ubuntu/osteo_data/osteo_data/manifest.json",
+  "device": "cuda",
+  "train_chunk_indices": [
+    2275,
+    2608,
+    4410,
+    174,
+    2159,
+    3423,
+    4265,
+    4387,
+    1737,
+    1128
+  ],
+  "train_games": 75,
+  "train_rows": 32708,
+  "val_chunk_indices": [
+    3619,
+    2301,
+    3509,
+    3817,
+    4372,
+    2090,
+    405,
+    1358,
+    1118,
+    3404
+  ],
+  "val_games": 78,
+  "val_rows": 24586
+}

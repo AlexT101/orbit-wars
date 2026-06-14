@@ -1,5 +1,1 @@
-__pycache__/
-checkpoints/
-data/
 wandb/
-ship_fraction_audit.json

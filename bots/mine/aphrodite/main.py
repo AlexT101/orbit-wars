@@ -3,6 +3,7 @@ This bot needs to be rebuilt on any Rust change.
 """
 
 import json
+import inspect
 import os
 import shutil
 import stat
@@ -51,10 +52,13 @@ def _bin_in(d):
 
 
 def _wrapper_dir():
-    try:
+    if "__file__" in globals():
         return os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        return None
+    frame = inspect.currentframe()
+    filename = frame.f_code.co_filename if frame is not None else ""
+    if filename and filename != "<string>":
+        return os.path.dirname(os.path.abspath(filename))
+    return None
 
 
 def _locate():

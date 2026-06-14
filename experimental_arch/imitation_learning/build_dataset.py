@@ -19,8 +19,9 @@ except ImportError:  # pragma: no cover - optional progress nicety.
     tqdm = None
 
 IL_DIR = Path(__file__).resolve().parent
-TRAIN_DIR = IL_DIR.parent / "train_transformer"
-REPO_ROOT = IL_DIR.parents[1]
+EXPERIMENTAL_ARCH_DIR = IL_DIR.parent
+TRAIN_DIR = EXPERIMENTAL_ARCH_DIR / "train_transformer"
+REPO_ROOT = EXPERIMENTAL_ARCH_DIR.parent
 TROJAN_TRAIN_DIR = REPO_ROOT / "bots" / "mine" / "trojan_horse" / "train"
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
@@ -28,32 +29,37 @@ if str(TROJAN_TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TROJAN_TRAIN_DIR))
 
 from build_from_zip import SUMMARY_V2_DIM, normalize_obs  # noqa: E402
-from constants import ACTIONS_DIM, PLANET_SLOTS, SEND_ALL_ACTION  # noqa: E402
+from constants import ACTIONS_DIM, PAIR_TURN_SHAPE, PLANET_SLOTS  # noqa: E402
 from engineered_features import append_engineered_features, append_tempo_features  # noqa: E402
 from extras_v4_build import EXTRA_DIM  # noqa: E402
-from features import ACTION_DIM, EncodedObs, discrete_action_index, encode_obs  # noqa: E402
+from features import (  # noqa: E402
+    ACTION_DIM,
+    SEND_ACTIONS,
+    SEND_FRACTIONS,
+    EncodedObs,
+    discrete_action_index,
+    encoded_from_feat,
+)
 from orbit_wars_model import encode_obs as rust_encode_obs  # noqa: E402
 
 
 REPLAY_DIRS = [
-    Path("/home/sunrise/orbitwars/pantheow/experimental_arch/replays"),
+    EXPERIMENTAL_ARCH_DIR / "replays",
 ]
 ISAIAH_NAME = "Isaiah @ Tufa Labs"
-XGB_MODEL_PATH = Path(
-    "/home/sunrise/orbitwars/pantheow/bots/mine/trojan_horse/train/weights/xgb_46p12e88t11_latest.json"
-)
-EXTRACT_V4_BIN = Path("/home/sunrise/orbitwars/pantheow/bots/mine/trojan_horse/target/release/extract_v4")
+XGB_MODEL_PATH = TROJAN_TRAIN_DIR / "weights" / "xgb_46p12e88t11_latest.json"
+EXTRACT_V4_BIN = REPO_ROOT / "bots" / "mine" / "trojan_horse" / "target" / "release" / "extract_v4"
 OUT_DIR = IL_DIR / "data"
-DATASET_STATS_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_stats.json"
-DATASET_DIR = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_chunks"
-DATASET_DB = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc.sqlite"
-DATASET_MANIFEST_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_manifest.json"
+DATASET_FORMAT_VERSION = 5
+DATASET_STATS_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5_stats.json"
+DATASET_DIR = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5_chunks"
+DATASET_DB = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5.sqlite"
+DATASET_MANIFEST_JSON = OUT_DIR / "isaiah_tufa_labs_2p_wins_bc_v5_manifest.json"
 
 MAX_REPLAYS = None
 MAX_SAMPLES = None
 MAX_ANGLE_ERROR = 0.08
-REQUIRE_FULL_SEND = True
-FULL_SEND_TOLERANCE = 0.08
+SEND_FRACTION_TOLERANCE = 0.25
 VALUE_RECORD_BYTES = 8 + 4 + 4 * SUMMARY_V2_DIM + 4 * EXTRA_DIM
 SHOW_PROGRESS = True
 
@@ -68,8 +74,8 @@ class DatasetBuildConfig:
     max_replays: int | None
     max_samples: int | None
     max_angle_error: float
-    require_full_send: bool
-    full_send_tolerance: float
+    send_fractions: tuple[float, ...]
+    send_fraction_tolerance: float
 
 
 @dataclass(frozen=True)
@@ -120,8 +126,8 @@ def make_config() -> DatasetBuildConfig:
         max_replays=MAX_REPLAYS,
         max_samples=MAX_SAMPLES,
         max_angle_error=MAX_ANGLE_ERROR,
-        require_full_send=REQUIRE_FULL_SEND,
-        full_send_tolerance=FULL_SEND_TOLERANCE,
+        send_fractions=tuple(float(x) for x in SEND_FRACTIONS),
+        send_fraction_tolerance=SEND_FRACTION_TOLERANCE,
     )
 
 
@@ -229,6 +235,15 @@ def ship_fraction(obs: dict[str, Any], move: list[Any]) -> float | None:
     return None
 
 
+def nearest_send_bin(frac: float | None, tolerance: float) -> int | None:
+    if frac is None or not math.isfinite(frac) or frac <= 0.0:
+        return None
+    best_bin = min(range(len(SEND_FRACTIONS)), key=lambda i: abs(float(SEND_FRACTIONS[i]) - frac))
+    if abs(float(SEND_FRACTIONS[best_bin]) - frac) > tolerance:
+        return None
+    return int(best_bin)
+
+
 def obs_with_step(obs: dict[str, Any], turn_index: int) -> dict[str, Any]:
     if "step" in obs and obs.get("step") is not None:
         return obs
@@ -237,12 +252,18 @@ def obs_with_step(obs: dict[str, Any], turn_index: int) -> dict[str, Any]:
     return out
 
 
-def encode_replay_move(obs: dict[str, Any], move: list[Any], player: int, max_angle_error: float) -> tuple[int | None, str]:
+def encode_replay_move(
+    obs: dict[str, Any],
+    move: list[Any],
+    player: int,
+    max_angle_error: float,
+    feat: dict[str, Any],
+    send_bin: int,
+) -> tuple[int | None, str]:
     if len(move) < 3:
         return None, "short_move"
     source_id = int(move[0])
     move_angle = float(move[1])
-    feat = rust_encode_obs(obs, player)
     planet_ids = [int(x) for x in feat["planet_ids"]]
     try:
         source_slot = planet_ids.index(source_id)
@@ -251,14 +272,17 @@ def encode_replay_move(obs: dict[str, Any], move: list[Any], player: int, max_an
 
     best_label: int | None = None
     best_delta = float("inf")
+    if send_bin < 0 or send_bin >= len(SEND_ACTIONS):
+        return None, "bad_send_bin"
+    raw_action = SEND_ACTIONS[send_bin]
     for target_slot in range(PLANET_SLOTS):
-        raw_idx = (source_slot * PLANET_SLOTS + target_slot) * ACTIONS_DIM + SEND_ALL_ACTION
+        raw_idx = (source_slot * PLANET_SLOTS + target_slot) * ACTIONS_DIM + raw_action
         if raw_idx >= len(feat["mask"]) or not bool(feat["mask"][raw_idx]):
             continue
         delta = angle_delta(float(feat["angles"][raw_idx]), move_angle)
         if delta < best_delta:
             best_delta = delta
-            best_label = discrete_action_index(source_slot, target_slot)
+            best_label = discrete_action_index(source_slot, target_slot, send_bin)
     if best_label is None:
         return None, "no_valid_target"
     if best_delta > max_angle_error:
@@ -269,8 +293,7 @@ def encode_replay_move(obs: dict[str, Any], move: list[Any], player: int, max_an
 def build_replay_samples(
     ref: ReplayRef,
     max_angle_error: float,
-    require_full_send: bool,
-    full_send_tolerance: float,
+    send_fraction_tolerance: float,
     max_samples: int | None = None,
 ) -> ReplayBuildResult:
     samples: list[ReplaySample] = []
@@ -301,7 +324,8 @@ def build_replay_samples(
         if len(action) > 1:
             multi_launch_steps += 1
         if not action:
-            encoded = encode_obs(obs, player=ref.player)
+            feat = rust_encode_obs(obs, ref.player)
+            encoded = encoded_from_feat(feat)
             samples.append(
                 ReplaySample(
                     encoded=encoded,
@@ -314,16 +338,25 @@ def build_replay_samples(
             )
             label_counts[0] += 1
         else:
+            feat = rust_encode_obs(obs, ref.player)
+            encoded = encoded_from_feat(feat)
             for move in action:
                 frac = ship_fraction(obs, move)
-                if require_full_send and (frac is None or abs(frac - 1.0) > full_send_tolerance):
+                send_bin = nearest_send_bin(frac, send_fraction_tolerance)
+                if send_bin is None:
                     skipped_bad_ship_fraction += 1
                     continue
-                label, _reason = encode_replay_move(obs, move, ref.player, max_angle_error)
+                label, _reason = encode_replay_move(
+                    obs,
+                    move,
+                    ref.player,
+                    max_angle_error,
+                    feat,
+                    send_bin,
+                )
                 if label is None:
                     skipped_invalid += 1
                     continue
-                encoded = encode_obs(obs, player=ref.player)
                 if label < 0 or label >= len(encoded.action_mask) or not bool(encoded.action_mask[label]):
                     skipped_invalid += 1
                     continue
@@ -365,8 +398,15 @@ def stack_encoded(items: list[EncodedObs]) -> dict[str, np.ndarray]:
     return {
         "planets": np.stack([x.planets for x in items]).astype(np.float32),
         "planet_mask": np.stack([x.planet_mask for x in items]).astype(np.float32),
+        "tokens": np.stack([x.tokens for x in items]).astype(np.float32),
+        "presence": np.stack([x.presence for x in items]).astype(np.float32),
         "globals_": np.stack([x.globals for x in items]).astype(np.float32),
         "action_mask": np.stack([x.action_mask for x in items]).astype(np.bool_),
+        "pair_turns": np.stack([x.pair_turns for x in items]).reshape((-1, *PAIR_TURN_SHAPE)).astype(np.float32),
+        "pair_reachable_mask": np.stack([x.pair_reachable_mask for x in items])
+        .reshape((-1, *PAIR_TURN_SHAPE))
+        .astype(np.float32),
+        "planet_timeline_features": np.stack([x.planet_timeline_features for x in items]).astype(np.float32),
     }
 
 
@@ -511,10 +551,13 @@ def write_samples_chunk(
     labels = np.asarray([sample.label for sample in samples], dtype=np.int64)
     encoded = stack_encoded([sample.encoded for sample in samples])
     tensors = {
-        "planets": torch.as_tensor(encoded["planets"], dtype=torch.float32),
-        "planet_mask": torch.as_tensor(encoded["planet_mask"], dtype=torch.float32),
+        "tokens": torch.as_tensor(encoded["tokens"], dtype=torch.float16),
+        "presence": torch.as_tensor(encoded["presence"], dtype=torch.bool),
         "globals_": torch.as_tensor(encoded["globals_"], dtype=torch.float32),
         "action_mask": torch.as_tensor(encoded["action_mask"], dtype=torch.bool),
+        "pair_turns": torch.as_tensor(np.rint(encoded["pair_turns"] * 20.0).clip(0, 255), dtype=torch.uint8),
+        "pair_reachable_mask": torch.as_tensor(encoded["pair_reachable_mask"].astype(np.bool_), dtype=torch.bool),
+        "planet_timeline_features": torch.as_tensor(encoded["planet_timeline_features"], dtype=torch.float16),
         "labels": torch.as_tensor(labels, dtype=torch.long),
         "values": torch.as_tensor(values, dtype=torch.float32),
         "weights": torch.as_tensor(weights, dtype=torch.float32),
@@ -526,7 +569,7 @@ def write_samples_chunk(
     tmp_path = DATASET_DIR / f".{chunk_name}.tmp"
     final_path = DATASET_DIR / chunk_name
     payload = {
-        "format_version": 2,
+        "format_version": DATASET_FORMAT_VERSION,
         "player_name": cfg.player_name,
         "game_id": ref.path.stem,
         "replay_path": str(ref.path),
@@ -666,7 +709,7 @@ def aggregate_stats(conn: sqlite3.Connection, cfg: DatasetBuildConfig) -> tuple[
         label_counts=dict(label_counts.most_common(20)),
     )
     stats_payload = {
-        "format_version": 2,
+        "format_version": DATASET_FORMAT_VERSION,
         "config": asdict(cfg),
         "dataset": asdict(stats),
         "value_mean": float(values.mean()) if values.size else 0.0,
@@ -685,7 +728,7 @@ def aggregate_stats(conn: sqlite3.Connection, cfg: DatasetBuildConfig) -> tuple[
 def write_manifest(conn: sqlite3.Connection, cfg: DatasetBuildConfig) -> dict[str, Any]:
     stats_payload, chunks = aggregate_stats(conn, cfg)
     manifest = {
-        "format_version": 2,
+        "format_version": DATASET_FORMAT_VERSION,
         "player_name": cfg.player_name,
         "config": asdict(cfg),
         "stats": stats_payload,
@@ -724,8 +767,7 @@ def main() -> int:
         result = build_replay_samples(
             ref,
             max_angle_error=cfg.max_angle_error,
-            require_full_send=cfg.require_full_send,
-            full_send_tolerance=cfg.full_send_tolerance,
+            send_fraction_tolerance=cfg.send_fraction_tolerance,
             max_samples=remaining,
         )
         if result.samples:

@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 
@@ -13,6 +14,30 @@ ROOT = Path(__file__).resolve().parent
 BOTS_DIR = ROOT / "bots"
 
 MAX_STEPS = 500
+
+
+@dataclass
+class MatchResult:
+    seed: int
+    done: bool
+    steps: int
+    scores: list[int] | None
+    rewards: list[float | None]
+    avg_step_ms: list[float]
+    statuses: list[str] | None = None
+
+
+def scores_from_rows(planets: list[list[float]], fleets: list[list[float]], num_players: int) -> list[int]:
+    scores = [0] * num_players
+    for planet in planets:
+        owner = int(planet[1])
+        if 0 <= owner < num_players:
+            scores[owner] += int(planet[5])
+    for fleet in fleets:
+        owner = int(fleet[1])
+        if 0 <= owner < num_players:
+            scores[owner] += int(fleet[6])
+    return scores
 
 
 @contextlib.contextmanager
@@ -78,12 +103,12 @@ def load_agent(main_path: Path, mod_name: str):
     return module.agent
 
 
-def run_rust_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> int:
+def run_rust_match(bot_paths: list[Path], bot_names: list[str], seed: int, game_index: int = 1) -> MatchResult:
     print(f"Match (rust engine): {bot_names[0]} vs {bot_names[1]}")
 
     from engine_parity_checker.candidates.rust import RustEngine
 
-    agents = [load_agent(path, f"bot_{i}_main") for i, path in enumerate(bot_paths)]
+    agents = [load_agent(path, f"bot_{game_index}_{i}_main") for i, path in enumerate(bot_paths)]
     engine = RustEngine()
     obs = engine.reset(seed, len(agents))
 
@@ -107,19 +132,33 @@ def run_rust_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> in
 
     snap = engine.snapshot()
     print(f"Finished: done={done} steps={steps_run}")
+    scores = scores_from_rows(snap.planets, snap.fleets, len(agents))
+    if len(scores) == 2:
+        print(f"Score: {scores[0]}-{scores[1]} diff={scores[0] - scores[1]:+d}")
+    else:
+        print("Score: " + ", ".join(str(score) for score in scores))
     rewards = snap.rewards if snap.rewards is not None else [None] * len(agents)
+    avg_step_ms = []
     for i, reward in enumerate(rewards):
         avg_ms = (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
+        avg_step_ms.append(avg_ms)
         print(f"Player {i} ({bot_names[i]}): reward={reward}, avg_step_ms={avg_ms:.2f}")
-    return 0
+    return MatchResult(
+        seed=seed,
+        done=done,
+        steps=steps_run,
+        scores=scores,
+        rewards=rewards,
+        avg_step_ms=avg_step_ms,
+    )
 
 
-def run_kaggle_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> int:
+def run_kaggle_match(bot_paths: list[Path], bot_names: list[str], seed: int, game_index: int = 1) -> MatchResult | None:
     try:
         from kaggle_environments import make
     except ModuleNotFoundError:
         print('Missing dependency: install with `pip install "kaggle-environments>=1.28.0"`')
-        return 1
+        return None
 
     print(f"Match (kaggle engine): {bot_names[0]} vs {bot_names[1]}")
 
@@ -144,8 +183,14 @@ def run_kaggle_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> 
                     over_budget[i] += 1
 
     final = env.steps[-1]
+    rewards = []
+    statuses = []
+    avg_step_ms = []
     for i, state in enumerate(final):
         avg_ms = (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
+        rewards.append(state.reward)
+        statuses.append(state.status)
+        avg_step_ms.append(avg_ms)
         print(
             f"Player {i} ({bot_names[i]}): reward={state.reward}, "
             f"status={state.status}, avg_step_ms={avg_ms:.2f}"
@@ -158,13 +203,67 @@ def run_kaggle_match(bot_paths: list[Path], bot_names: list[str], seed: int) -> 
             for i in range(n_players)
         ]
         print(f"Turns over actTimeout ({act_timeout}s): " + ", ".join(parts))
-    return 0
+    return MatchResult(
+        seed=seed,
+        done=all(state.status == "DONE" for state in final),
+        steps=max(0, len(env.steps) - 1),
+        scores=None,
+        rewards=rewards,
+        avg_step_ms=avg_step_ms,
+        statuses=statuses,
+    )
+
+
+def summarize_results(results: list[MatchResult], bot_names: list[str]) -> None:
+    if len(results) <= 1:
+        return
+    n_players = len(bot_names)
+    wins = [0] * n_players
+    ties = 0
+    total_steps = 0
+    total_avg_ms = [0.0] * n_players
+    score_diffs = []
+
+    for result in results:
+        total_steps += result.steps
+        for i in range(n_players):
+            if i < len(result.avg_step_ms):
+                total_avg_ms[i] += result.avg_step_ms[i]
+        if result.scores is not None and len(result.scores) == 2:
+            score_diffs.append(result.scores[0] - result.scores[1])
+            if result.scores[0] > result.scores[1]:
+                wins[0] += 1
+            elif result.scores[1] > result.scores[0]:
+                wins[1] += 1
+            else:
+                ties += 1
+        elif result.rewards:
+            best = max(x for x in result.rewards if x is not None)
+            winners = [i for i, reward in enumerate(result.rewards) if reward == best]
+            if len(winners) == 1:
+                wins[winners[0]] += 1
+            else:
+                ties += 1
+
+    print()
+    print(f"Summary: games={len(results)} mean_steps={total_steps / len(results):.1f}")
+    if n_players == 2:
+        print(f"W-L-T for {bot_names[0]}: {wins[0]}-{wins[1]}-{ties}")
+        if score_diffs:
+            print(f"Mean score diff for {bot_names[0]}: {sum(score_diffs) / len(score_diffs):+.1f}")
+    else:
+        print("Wins: " + ", ".join(f"{bot_names[i]}={wins[i]}" for i in range(n_players)) + f", ties={ties}")
+    print(
+        "Mean avg_step_ms: "
+        + ", ".join(f"{bot_names[i]}={total_avg_ms[i] / len(results):.2f}" for i in range(n_players))
+    )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run a single Orbit Wars match between two bots.")
+    parser = argparse.ArgumentParser(description="Run Orbit Wars matches between two bots.")
     parser.add_argument("bot1")
     parser.add_argument("bot2")
+    parser.add_argument("-n", "--num-games", "--games", dest="games", type=int, default=1)
     parser.add_argument(
         "--kaggle",
         action="store_true",
@@ -177,9 +276,14 @@ def main() -> int:
         help="Seed for the match. If omitted, a random seed is chosen and printed.",
     )
     args = parser.parse_args()
+    if args.games < 1:
+        print("--num-games/-n must be at least 1")
+        return 1
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
     print(f"Seed: {seed}")
+    if args.games > 1:
+        print(f"Games: {args.games} (seeds {seed}..{seed + args.games - 1})")
 
     bot_names = [args.bot1, args.bot2]
     bot_paths = [bot_entry(name) for name in bot_names]
@@ -191,9 +295,21 @@ def main() -> int:
             print(f"  {path}")
         return 1
 
-    if args.kaggle:
-        return run_kaggle_match(bot_paths, bot_names, seed)
-    return run_rust_match(bot_paths, bot_names, seed)
+    results: list[MatchResult] = []
+    for i in range(args.games):
+        game_seed = seed + i
+        if args.games > 1:
+            print()
+            print(f"Game {i + 1}: seed={game_seed}")
+        if args.kaggle:
+            result = run_kaggle_match(bot_paths, bot_names, game_seed, game_index=i + 1)
+            if result is None:
+                return 1
+        else:
+            result = run_rust_match(bot_paths, bot_names, game_seed, game_index=i + 1)
+        results.append(result)
+    summarize_results(results, bot_names)
+    return 0
 
 
 if __name__ == "__main__":

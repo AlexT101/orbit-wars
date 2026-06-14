@@ -1,0 +1,32 @@
+{
+  "args": {
+    "batch_size": 16,
+    "cross_batch_size": 8,
+    "dataset": "/home/ubuntu/osteo_data/osteo_data/manifest.json",
+    "epochs": 1,
+    "lr": 0.001,
+    "max_grad_norm": 1.0,
+    "out_dir": "arch_ablation/smoke",
+    "seed": 123,
+    "steps": 1,
+    "train_chunks": 1,
+    "val_chunks": 1,
+    "variants": [
+      "baseline"
+    ],
+    "weight_decay": 0.0001,
+    "workers": 0
+  },
+  "dataset": "/home/ubuntu/osteo_data/osteo_data/manifest.json",
+  "device": "cuda",
+  "train_chunk_indices": [
+    2275
+  ],
+  "train_games": 8,
+  "train_rows": 2082,
+  "val_chunk_indices": [
+    2608
+  ],
+  "val_games": 8,
+  "val_rows": 2172
+}

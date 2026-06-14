@@ -378,6 +378,44 @@ fn enumerate_pair(
     )
 }
 
+/// Splice externally supplied single-launch candidates (the chaos IL policy's
+/// top-k moves) into the root's MY candidate set. Entries are appended, never
+/// interleaved in place: `children` is keyed by candidate index, so existing
+/// entries — including a reused subtree's — must keep their positions. The
+/// interleave instead happens in the prior vector: weights decay by sqrt(0.5)
+/// per virtual slot (apollo#0, il#0, apollo#1, il#1, …), which preserves the
+/// apollo candidates' existing 0.5-per-rank ratios exactly while giving il#j
+/// the geometric mean of apollo#j and apollo#j+1.
+fn inject_root_candidates(node: &mut Node, extra: &[Action]) -> usize {
+    let base_n = node.my_candidates.len();
+    for &a in extra {
+        let plan = vec![a];
+        if node.my_candidates.iter().any(|c| actions_equal(c, &plan)) {
+            continue;
+        }
+        node.my_candidates.push(plan);
+        node.my_stats.push(ActionStats {
+            visits: 0,
+            sum_value: 0.0,
+        });
+    }
+    let added = node.my_candidates.len() - base_n;
+    if added == 0 {
+        return 0;
+    }
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    let mut raw: Vec<f64> = Vec::with_capacity(node.my_candidates.len());
+    for r in 0..base_n {
+        raw.push(half.powi((2 * r) as i32));
+    }
+    for j in 0..added {
+        raw.push(half.powi((2 * j + 1) as i32));
+    }
+    let z: f64 = raw.iter().sum();
+    node.my_priors = raw.into_iter().map(|w| w / z).collect();
+    added
+}
+
 fn actions_equal(a: &[Action], b: &[Action]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -716,6 +754,7 @@ pub fn best_move(
     me: i32,
     budget_ms: u64,
     overage_remaining_ms: f64,
+    il_candidates: &[Action],
 ) -> Vec<Action> {
     // Build/refresh the persistent shared apollo cache before any candidate
     // generation or rollout reads it.
@@ -756,6 +795,19 @@ pub fn best_move(
         },
     };
     ensure_candidates(&mut root, me, true);
+    if !il_candidates.is_empty() {
+        let added = inject_root_candidates(&mut root, il_candidates);
+        if std::env::var("OW_DEBUG").is_ok() {
+            eprintln!(
+                "[chaos-il] step={} player={} il_offered={} il_added={} root_K={}",
+                state.step,
+                me,
+                il_candidates.len(),
+                added,
+                root.my_candidates.len()
+            );
+        }
+    }
 
     if prof_enabled() {
         prof_reset();
