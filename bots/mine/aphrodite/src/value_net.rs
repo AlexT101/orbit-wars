@@ -403,7 +403,7 @@ pub fn predict_with_cache(
 /// the "closer to me" features, matching the user's wording.
 pub mod summary_features_v2 {
     use super::*;
-    use crate::apollo::constants::OFFSET_LOOKAHEAD;
+    use crate::apollo::constants::offset_lookahead;
     use crate::apollo::strategy::resolve_shot;
 
     pub const DIM: usize = 65;
@@ -453,7 +453,7 @@ pub mod summary_features_v2 {
     /// shot so faster large fleets are reflected.
     fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64) -> f32 {
         let mut best = 0.0f32;
-        for off in 0..=OFFSET_LOOKAHEAD {
+        for off in 0..=offset_lookahead() {
             let ships = (src.ships + src.production * off).max(1);
             if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, None) {
                 let contrib = ships as f32 * rel_weight(off + r.1);
@@ -1029,7 +1029,7 @@ pub mod summary_features_v2 {
 /// with a few absolute anchors. 2p is unaffected (stays on `summary_v2`).
 pub mod summary_features_v3 {
     use super::*;
-    use crate::apollo::constants::OFFSET_LOOKAHEAD;
+    use crate::apollo::constants::offset_lookahead;
     use crate::apollo::strategy::resolve_shot;
     use crate::apollo::world::ShotL1;
 
@@ -1095,7 +1095,7 @@ pub mod summary_features_v3 {
     /// planet-pairs across many leaves at a turn); `None` falls back to L2/L3.
     fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64, l1: Option<&ShotL1>) -> f32 {
         let mut best = 0.0f32;
-        for off in 0..=OFFSET_LOOKAHEAD {
+        for off in 0..=offset_lookahead() {
             let ships = (src.ships + src.production * off).max(1);
             if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, l1) {
                 let contrib = ships as f32 * rel_weight(off + r.1);

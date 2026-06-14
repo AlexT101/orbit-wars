@@ -1,0 +1,22 @@
+{
+  "rotation_look_ahead_turns": 10,
+  "offset_lookahead": 18,
+  "enemy_offset_lookahead": 10,
+  "reinforcement_pressure_turns": 28,
+  "reinforcement_pressure_decay": 0.25310933822405324,
+  "frontier_pressure_ratio": 3.1992377687381963,
+  "ally_pressure_ratio": 0.794565368894421,
+  "horizon": 16,
+  "max_distance": 56.91600635470856,
+  "score_w_production": 1.0,
+  "score_w_ship_cost": 0.7113649057362126,
+  "score_w_final_ships": 1.136482164596601,
+  "score_per_ship_smoothing": 3.6162818929369163,
+  "capture_min_score": -1.7482430981011194,
+  "score_enemy_capture_bonus": 1.503569413438521,
+  "default_strategy": 0,
+  "neutral_payback_turns": 31.414204933723283,
+  "neutral_payback_penalty": 0.035471475406247566,
+  "lead_gate": 15.555928595584987,
+  "neutral_capture_penalty": 27.28463735061637
+}

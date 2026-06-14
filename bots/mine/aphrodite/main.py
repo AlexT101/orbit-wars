@@ -128,6 +128,18 @@ def _weight_candidates(run_cwd, build_cwd, n_players):
     return None
 
 
+def _config_candidate(run_cwd, build_cwd, name):
+    """Locate an apollo runtime config (`config.json` / `config_4p.json`) next
+    to the binary (flat bundle) or in the crate dir (dev). Returns the path or
+    None."""
+    for d in (run_cwd, build_cwd):
+        if d:
+            p = os.path.join(d, name)
+            if os.path.isfile(p):
+                return p
+    return None
+
+
 def _infer_num_players(payload):
     seen = set()
     for planet in payload.get("planets", []) or []:
@@ -214,6 +226,19 @@ def _ensure(payload=None):
         w2p = _weight_candidates(run_cwd, build_cwd, 2)
         if w2p:
             env["APHRODITE_VALUE_NET_PATH_2P"] = w2p
+    # Apollo heuristics read their tunable constants from config.json /
+    # config_4p.json at runtime. The binary's built-in fallback is
+    # CARGO_MANIFEST_DIR, which on Kaggle is the (nonexistent) Docker build
+    # dir, so point it at the configs bundled next to the binary. `setdefault`
+    # keeps any explicit override (e.g. the tuner sets APOLLO_CONFIG).
+    for var, name in (
+        ("APOLLO_CONFIG", "config.json"),
+        ("APOLLO_CONFIG_4P", "config_4p.json"),
+    ):
+        if var not in env:
+            cfg = _config_candidate(run_cwd, build_cwd, name)
+            if cfg:
+                env[var] = cfg
     _PROC = subprocess.Popen(
         [binary],
         stdin=subprocess.PIPE,

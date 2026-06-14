@@ -53,6 +53,15 @@ WEIGHTS_4P_NAME = aphrodite_main._WEIGHTS_4P_NAME
 WEIGHTS_2P = APHRODITE / "train" / "weights" / WEIGHTS_2P_NAME
 WEIGHTS_4P = APHRODITE / "train" / "weights" / WEIGHTS_4P_NAME
 
+# Apollo's tunable constants are read at runtime from these JSON files (2p +
+# 4p). The binary's built-in fallback path is CARGO_MANIFEST_DIR, which on
+# Kaggle is the (nonexistent) Docker build dir — so they ship next to main.py
+# and main.py points APOLLO_CONFIG / APOLLO_CONFIG_4P at them. Both required.
+CONFIG_2P_NAME = "config.json"
+CONFIG_4P_NAME = "config_4p.json"
+CONFIG_2P = APHRODITE / CONFIG_2P_NAME
+CONFIG_4P = APHRODITE / CONFIG_4P_NAME
+
 # The submission's main.py is the dev wrapper with a single literal flipped:
 # `_USE_PROD_LIMITS = True`. main.py then applies the submission budget and
 # overage-pool usage itself (so those values live only in main.py). Otherwise
@@ -87,6 +96,9 @@ cargo build --release --bin aphrodite
 def main() -> int:
     if not WEIGHTS_2P.is_file():
         sys.exit(f"2p weights missing (required): expected {WEIGHTS_2P}")
+    for cfg in (CONFIG_2P, CONFIG_4P):
+        if not cfg.is_file():
+            sys.exit(f"runtime config missing (required): expected {cfg}")
 
     print(f"Building aphrodite inside {KAGGLE_IMAGE}...")
     rc = subprocess.run(
@@ -127,6 +139,8 @@ def main() -> int:
         for src, name in (
             (WEIGHTS_2P, WEIGHTS_2P_NAME),
             (WEIGHTS_4P, WEIGHTS_4P_NAME),
+            (CONFIG_2P, CONFIG_2P_NAME),
+            (CONFIG_4P, CONFIG_4P_NAME),
         ):
             if src.is_file():
                 shutil.copy(src, td / name)

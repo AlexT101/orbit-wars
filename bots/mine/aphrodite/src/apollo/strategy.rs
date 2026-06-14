@@ -23,8 +23,8 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::apollo::cache::{AimCacheVerdict, EntityCache, InvariantVerdict};
 use crate::apollo::constants::{
-    ALLY_PRESSURE_RATIO, ENEMY_OFFSET_LOOKAHEAD, FRONTIER_PRESSURE_RATIO, OFFSET_LOOKAHEAD,
-    REINFORCEMENT_PRESSURE_DECAY, REINFORCEMENT_PRESSURE_TURNS, ROTATION_LOOK_AHEAD_TURNS,
+    ally_pressure_ratio, enemy_offset_lookahead, frontier_pressure_ratio, offset_lookahead,
+    reinforcement_pressure_decay, reinforcement_pressure_turns, rotation_look_ahead_turns,
     SUBSET_TOP_TARGETS,
 };
 use crate::apollo::early_game::OpeningEvent;
@@ -79,7 +79,7 @@ impl<'a> HellburnerModel<'a> {
         for p in &non_comets {
             let pos = state
                 .cache
-                .position(p.id, 1 + ROTATION_LOOK_AHEAD_TURNS)
+                .position(p.id, 1 + rotation_look_ahead_turns())
                 .unwrap_or([p.x, p.y]);
             future_pos.insert(p.id, pos);
         }
@@ -347,7 +347,7 @@ fn reinforcement_pressure_clears_frontier_ratio(
     target_pressure: f64,
     source_pressure: f64,
 ) -> bool {
-    target_pressure >= source_pressure * FRONTIER_PRESSURE_RATIO
+    target_pressure >= source_pressure * frontier_pressure_ratio()
 }
 
 fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMap<i64, f64> {
@@ -361,7 +361,7 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
             model,
             target.id,
             &state.enemy_planets,
-            ENEMY_OFFSET_LOOKAHEAD,
+            enemy_offset_lookahead(),
         );
         pressure.insert(target.id, total);
     }
@@ -386,7 +386,7 @@ fn pressure_from(
             continue;
         }
         let mut best_contribution = 0.0;
-        for offset in 0..=max_offset.min(REINFORCEMENT_PRESSURE_TURNS) {
+        for offset in 0..=max_offset.min(reinforcement_pressure_turns()) {
             let ships = owner_available_to_launch_at(state, src.id, src.owner, offset);
             if ships <= 0 {
                 continue;
@@ -397,7 +397,7 @@ fn pressure_from(
                 continue;
             };
             let arrival = (offset + travel_turns).max(1);
-            if arrival <= REINFORCEMENT_PRESSURE_TURNS {
+            if arrival <= reinforcement_pressure_turns() {
                 let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
                 if contribution > best_contribution {
                     best_contribution = contribution;
@@ -425,13 +425,13 @@ fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i
             model,
             target.id,
             &state.enemy_planets,
-            ENEMY_OFFSET_LOOKAHEAD,
+            enemy_offset_lookahead(),
         );
         if enemy <= 0.0 {
             continue;
         }
-        let ally = pressure_from(state, model, target.id, &state.my_planets, OFFSET_LOOKAHEAD);
-        if ally < ALLY_PRESSURE_RATIO * enemy {
+        let ally = pressure_from(state, model, target.id, &state.my_planets, offset_lookahead());
+        if ally < ally_pressure_ratio() * enemy {
             gated.insert(target.id);
         }
     }
@@ -443,9 +443,9 @@ fn reinforcement_pressure_weight(turns: i64) -> f64 {
     if turns <= 1 {
         return 1.0;
     }
-    let span = (REINFORCEMENT_PRESSURE_TURNS - 1).max(1) as f64;
+    let span = (reinforcement_pressure_turns() - 1).max(1) as f64;
     let exponent = (turns - 1) as f64 / span;
-    REINFORCEMENT_PRESSURE_DECAY.powf(exponent)
+    (reinforcement_pressure_decay()).powf(exponent)
 }
 
 fn owner_available_to_launch_at(
@@ -652,7 +652,11 @@ fn owner_value(owner: i64, player: i64) -> f64 {
     } else if owner == -1 {
         0.0
     } else {
-        -1.0
+        // Enemy magnitude is tunable. At the default 1.0 this is the original
+        // symmetric ±1 (so capturing from an enemy is worth a 2.0 owner swing
+        // vs 1.0 for a neutral — the implicit 2:1). Raising it makes taking
+        // from / losing to an enemy weigh more without touching neutral value.
+        -crate::apollo::constants::score_enemy_capture_bonus()
     }
 }
 
@@ -678,6 +682,9 @@ fn timeline_delta_score(
     let player = world.player;
     let h = baseline.horizon as usize;
     let production = target.production as f64;
+    let w_production = crate::apollo::constants::score_w_production();
+    let w_final_ships = crate::apollo::constants::score_w_final_ships();
+    let w_ship_cost = crate::apollo::constants::score_w_ship_cost();
     let mut score = 0.0;
 
     // Turns before `start_turn` are copied verbatim from `baseline` by
@@ -686,13 +693,40 @@ fn timeline_delta_score(
     // way the checkpoint clamps it, so turn `h` is never skipped.
     let start = (start_turn.clamp(1, h.max(1) as i64)) as usize;
     for t in start..=h {
-        score += production
+        score += w_production
+            * production
             * (owner_value(owner_at[t], player) - owner_value(baseline.owner_at[t], player));
     }
 
-    score += signed_ships(owner_at[h], ships_at[h], player)
-        - signed_ships(baseline.owner_at[h], baseline.ships_at[h], player);
-    score - ships_committed as f64
+    score += w_final_ships
+        * (signed_ships(owner_at[h], ships_at[h], player)
+            - signed_ships(baseline.owner_at[h], baseline.ships_at[h], player));
+    score -= w_ship_cost * ships_committed as f64;
+
+    // ── Neutral-capture discipline (phase 3, see tuning/PHASE3_DESIGN.md) ────
+    // Applies only when the target is NEUTRAL at the turn our fleet arrives
+    // (`start` = earliest rewritten/arrival turn). Both terms default to no-ops.
+    if baseline.owner_at[start] == -1 {
+        // (a) Flat marginal-neutral penalty: a fixed shift bites low-score
+        // (marginal) neutral grabs hardest; barely dents a high-value capture.
+        score -= crate::apollo::constants::neutral_capture_penalty();
+
+        // (b) Payback surcharge for slow-to-recoup garrisons, waived when we'd
+        // keep a comfortable ship lead after paying for it. The surcharge scales
+        // by ships_committed (large for high-garrison planets), so it accelerates
+        // with garrison size without needing an explicit exponent.
+        let penalty = crate::apollo::constants::neutral_payback_penalty();
+        if penalty > 0.0 && production > 0.0 {
+            let garrison = target.ships.max(0) as f64;
+            let payback = garrison / production; // turns of own output to recoup
+            let excess = (payback - crate::apollo::constants::neutral_payback_turns()).max(0.0);
+            let lead_after = world.ship_lead - garrison;
+            if excess > 0.0 && lead_after < crate::apollo::constants::lead_gate() {
+                score -= w_ship_cost * ships_committed as f64 * penalty * excess;
+            }
+        }
+    }
+    score
 }
 
 // ── evaluate_frontline_strategy ──────────────────────────────────────────
@@ -893,7 +927,7 @@ fn evaluate_frontline_strategy(
                     best_ships: &mut i64,
                     best_orders: &mut Vec<PlannedOrder>,
                     best_max_arrival: &mut i64| {
-        if score <= 0.0 {
+        if score <= crate::apollo::constants::capture_min_score() {
             return;
         }
         let better = score > *best_score
@@ -1029,7 +1063,7 @@ fn collect_bucket_options_for_arrival(
     out: &mut Vec<SourceOption>,
 ) {
     out.clear();
-    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
+    let option_stride = (offset_lookahead() + 1) as usize;
     for i in 0..source_count {
         let row = i * option_stride;
         let mut best_option: Option<SourceOption> = None;
@@ -1069,7 +1103,7 @@ fn collect_source_candidates(
 ) {
     out.clear();
     option_table.clear();
-    let option_stride = (OFFSET_LOOKAHEAD + 1) as usize;
+    let option_stride = (offset_lookahead() + 1) as usize;
     for &(src_id, _travel) in &ctx.origins {
         // Cap the candidate-search width: `origins` is distance-sorted (nearest
         // first), so once we've collected enough viable sources we stop —
@@ -1084,7 +1118,7 @@ fn collect_source_candidates(
         }
         let mut row = Vec::with_capacity(option_stride);
         let mut has_option = false;
-        for launch_offset in 0..=OFFSET_LOOKAHEAD {
+        for launch_offset in 0..=offset_lookahead() {
             let ships = plan.ships_available_at(world, &src, owner, launch_offset);
             let option = if ships > 0 {
                 model
@@ -1252,7 +1286,9 @@ impl SelectionStrategy {
     fn key(self, score: f64, production: i64, ships_total: i64) -> f64 {
         match self {
             SelectionStrategy::ScoreFirst => score,
-            SelectionStrategy::ScorePerShip => score / (1.0 + ships_total as f64),
+            SelectionStrategy::ScorePerShip => {
+                score / (crate::apollo::constants::score_per_ship_smoothing() + ships_total as f64)
+            }
             SelectionStrategy::ProductionFirst => production as f64,
         }
     }
@@ -1347,7 +1383,7 @@ fn send_reinforcements(
         // same-or-earlier arrival while delivering fewer ships. We re-plan every
         // turn, so this is a per-turn send-vs-hold decision, not a commitment to
         // a specific delay. Replaces the old fixed `REINFORCEMENT_SIZE` floor.
-        let wait_is_better = (1..=OFFSET_LOOKAHEAD).any(|d| {
+        let wait_is_better = (1..=offset_lookahead()).any(|d| {
             // Use the same forward-min availability model the planner relies on,
             // not raw linear growth (`ships + production·d`): a future enemy
             // arrival can shrink the garrison between now and `d`, so the
@@ -1640,11 +1676,26 @@ fn run_strategy(
 /// `plan()` runs directly (used as the cheap reply-policy hook inside the
 /// rollout layer), so its position is load-bearing — see the
 /// `search_candidates_includes_greedy_plan` test.
-const STRATEGIES: [SelectionStrategy; 3] = [
-    SelectionStrategy::ScorePerShip,
-    SelectionStrategy::ProductionFirst,
-    SelectionStrategy::ScoreFirst,
-];
+///
+/// The reply policy (index 0) is the tunable `default_strategy`: 0 ⇒
+/// ScorePerShip (the original default), 1 ⇒ ScoreFirst. ProductionFirst stays
+/// in the search set as a rollout candidate but is never the default. The full
+/// set of plans is unchanged — only the order is — so `search_candidates`
+/// behavior is unaffected; only `plan()`'s direct policy moves.
+fn strategies() -> [SelectionStrategy; 3] {
+    match crate::apollo::constants::default_strategy() {
+        1 => [
+            SelectionStrategy::ScoreFirst,
+            SelectionStrategy::ScorePerShip,
+            SelectionStrategy::ProductionFirst,
+        ],
+        _ => [
+            SelectionStrategy::ScorePerShip,
+            SelectionStrategy::ProductionFirst,
+            SelectionStrategy::ScoreFirst,
+        ],
+    }
+}
 
 pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     if world.enemy_planets.is_empty() {
@@ -1662,7 +1713,7 @@ pub fn plan(world: &WorldState) -> Vec<MoveAction> {
     // *and* our own replanning during the reactive phase, so it must stay
     // cheap and deterministic. Multi-strategy search happens one level up,
     // in `search_candidates`.
-    let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &opening);
+    let (moves, _) = run_strategy(world, &model, strategies()[0], &opening);
     moves
 }
 
@@ -1833,9 +1884,10 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     //     }
     // }
 
-    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(STRATEGIES.len() + 1);
+    let strats = strategies();
+    let mut out: Vec<Vec<MoveAction>> = Vec::with_capacity(strats.len() + 1);
 
-    for &strat in &STRATEGIES {
+    for &strat in &strats {
         let (moves, _) = run_strategy(world, &model, strat, &opening);
         if !out.iter().any(|prev| prev == &moves) {
             out.push(moves);
@@ -1844,7 +1896,7 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
     // The opening was planned with no enemy model; offer the rollout minimax
     // a no-opening alternative so a bad opening can be rejected wholesale.
     if !opening.is_empty() {
-        let (moves, _) = run_strategy(world, &model, STRATEGIES[0], &[]);
+        let (moves, _) = run_strategy(world, &model, strats[0], &[]);
         if !out.iter().any(|prev| prev == &moves) {
             out.push(moves);
         }
