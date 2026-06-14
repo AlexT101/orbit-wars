@@ -77,8 +77,10 @@ TRAIN_OPPONENTS = ["producer_v2", "apollo_baseline", "apollo_tuned"]
 VALIDATION_OPPONENTS = ["producer", "simpleagent", "owheuristic", "apollo_baseline"]
 
 # Staged game budgets and hard floors (the user's 15/50/100 scheme).
+# Floors are in POINTS (win=1, draw=0.5), matching the objective, so a draw-heavy
+# mirror config isn't culled for the wrong reason.
 STAGE_GAMES = [15, 50, 100]            # -> 165 total
-STAGE_MIN_WINS = [4, 25, None]         # hard floor per stage; None = no floor
+STAGE_MIN_WINS = [4, 25, None]         # hard points floor per stage; None = no floor
 DEFAULT_BASE_SEED_RANGE = (1, 2_000_000)
 
 
@@ -99,6 +101,14 @@ def _blank():
 
 def _avg_ms(d):
     return (d["ms_sum"] / d["ms_n"]) if d["ms_n"] else 0.0
+
+
+def _points(d):
+    """Ladder points: a win = 1, a draw = 0.5, a loss = 0. 2p Kaggle Elo scores
+    a draw as 0.5, so this is the honest objective — and it stops the search from
+    being rewarded for merely breaking a mirror (vs apollo_tuned/apollo_baseline)
+    into coin-flips when it has no real edge."""
+    return d["wins"] + 0.5 * d["draws"]
 
 
 def play_batch(executor, apollo_path, opp_specs, n, start_seed):
@@ -227,11 +237,11 @@ def make_objective(intervals, threads, trials_log, seed_range, apollo_path,
                                cum_games, opp_names, status=f"pruned_slow_s{si + 1}")
                     raise optuna.TrialPruned()
 
-                rate = cum["wins"] / cum_games
+                rate = _points(cum) / cum_games
                 trial.report(rate, step=cum_games)
 
                 floor = STAGE_MIN_WINS[si]
-                if floor is not None and agg["wins"] < floor:
+                if floor is not None and _points(agg) < floor:
                     _log_trial(trials_log, trial, cfg, base, stages, cum, cum_per,
                                cum_games, opp_names, status=f"pruned_floor_s{si + 1}")
                     raise optuna.TrialPruned()
@@ -242,7 +252,7 @@ def make_objective(intervals, threads, trials_log, seed_range, apollo_path,
 
         _log_trial(trials_log, trial, cfg, base, stages, cum, cum_per, cum_games,
                    opp_names, status="complete")
-        return cum["wins"] / cum_games
+        return _points(cum) / cum_games
 
     return objective
 
@@ -259,7 +269,11 @@ def _log_trial(path, trial, cfg, base, stages, cum, cum_per, cum_games, opp_name
         "cum": cum,
         "cum_by_opponent": cum_per,
         "cum_games": cum_games,
-        "win_rate": (cum["wins"] / cum_games) if cum_games else None,
+        # `win_rate` is now the points-based objective (win=1, draw=0.5) so it
+        # matches study.best_value and the gauntlet's selection metric.
+        # `raw_win_rate` keeps the old wins/games for reference.
+        "win_rate": (_points(cum) / cum_games) if cum_games else None,
+        "raw_win_rate": (cum["wins"] / cum_games) if cum_games else None,
         "avg_ms": _avg_ms(cum),
     })
 
