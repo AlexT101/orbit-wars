@@ -326,6 +326,20 @@ fn count_alive_players(state: &GameState) -> usize {
     alive.iter().filter(|&&a| a).count()
 }
 
+fn use_decayed_rel_features() -> bool {
+    static USE_DECAY: OnceLock<bool> = OnceLock::new();
+    *USE_DECAY.get_or_init(|| {
+        std::env::var("APHRODITE_VALUE_DECAY")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// Run the value net on `state` from `me`'s perspective, reusing a prebuilt
 /// apollo `EntityCache` (e.g. duct's per-search shared cache) for any aim-based
 /// features. Caller must have set the cache's current turn to `state.step`
@@ -394,27 +408,30 @@ pub mod summary_features_v2 {
 
     pub const DIM: usize = 65;
 
-    /// Turn horizon for the relational block (frontier / pressure / support /
-    /// inbound-outbound). Beyond this, projected force weighs zero.
-    const REL_HORIZON: i64 = 30;
-    /// Exponential half-life base: weight halves every `REL_HORIZON` turns.
+    /// Current weights were trained with a 10-turn linear relational falloff.
+    const REL_HORIZON_LINEAR: i64 = 10;
+    /// Experimental decay path for retrained weights.
+    const REL_HORIZON_DECAY: i64 = 30;
+    /// Exponential base for the decay path.
     const REL_DECAY: f32 = 0.3;
 
-    /// Exponential time-decay weight over `REL_HORIZON`, mirroring apollo's
-    /// `reinforcement_pressure_weight`. `t ≤ 1` (lands now / next turn) → 1.0;
-    /// within the horizon → `REL_DECAY^((t-1)/(REL_HORIZON-1))` (so `t =
-    /// REL_HORIZON` → `REL_DECAY`); beyond the horizon → 0. Used identically for
-    /// static-garrison turn-distance and in-flight fleet ETA so a fleet `t` turns
-    /// out and a garrison `t` turns away weigh the same per ship.
+    /// Relational time weight. Default is the old linear feature definition;
+    /// `APHRODITE_VALUE_DECAY=1` selects the retrained exponential definition.
     #[inline]
     fn rel_weight(turns: i64) -> f32 {
-        if turns < 0 || turns > REL_HORIZON {
+        if use_decayed_rel_features() {
+            if turns < 0 || turns > REL_HORIZON_DECAY {
+                0.0
+            } else if turns <= 1 {
+                1.0
+            } else {
+                let span = (REL_HORIZON_DECAY - 1).max(1) as f32;
+                REL_DECAY.powf((turns - 1) as f32 / span)
+            }
+        } else if turns < 0 || turns > REL_HORIZON_LINEAR {
             0.0
-        } else if turns <= 1 {
-            1.0
         } else {
-            let span = (REL_HORIZON - 1).max(1) as f32;
-            REL_DECAY.powf((turns - 1) as f32 / span)
+            (REL_HORIZON_LINEAR + 1 - turns) as f32 / (REL_HORIZON_LINEAR + 1) as f32
         }
     }
 
@@ -1019,8 +1036,9 @@ pub mod summary_features_v3 {
     pub const DIM: usize = 145;
     pub const AUX_DIM: usize = 9;
     const NP: usize = 4; // engine MAX_PLAYERS
-    const REL_HORIZON: i64 = 20;
-    /// Exponential half-life base: weight halves every `REL_HORIZON` turns.
+    const REL_HORIZON_LINEAR: i64 = 10;
+    const REL_HORIZON_DECAY: i64 = 20;
+    /// Exponential base for the decay path.
     const REL_DECAY: f32 = 0.5;
 
     /// Seat cycle by increasing orbital angle: always 0→1→3→2 (only the global
@@ -1041,19 +1059,23 @@ pub mod summary_features_v3 {
         ]
     }
 
-    /// Exponential time-decay weight over `REL_HORIZON`, mirroring apollo's
-    /// `reinforcement_pressure_weight`: `t ≤ 1` → 1.0; within the horizon →
-    /// `REL_DECAY^((t-1)/(REL_HORIZON-1))` (so `t = REL_HORIZON` → `REL_DECAY`);
-    /// beyond → 0.
+    /// Relational time weight. Default is the old linear feature definition;
+    /// `APHRODITE_VALUE_DECAY=1` selects the retrained exponential definition.
     #[inline]
     fn rel_weight(turns: i64) -> f32 {
-        if turns < 0 || turns > REL_HORIZON {
+        if use_decayed_rel_features() {
+            if turns < 0 || turns > REL_HORIZON_DECAY {
+                0.0
+            } else if turns <= 1 {
+                1.0
+            } else {
+                let span = (REL_HORIZON_DECAY - 1).max(1) as f32;
+                REL_DECAY.powf((turns - 1) as f32 / span)
+            }
+        } else if turns < 0 || turns > REL_HORIZON_LINEAR {
             0.0
-        } else if turns <= 1 {
-            1.0
         } else {
-            let span = (REL_HORIZON - 1).max(1) as f32;
-            REL_DECAY.powf((turns - 1) as f32 / span)
+            (REL_HORIZON_LINEAR + 1 - turns) as f32 / (REL_HORIZON_LINEAR + 1) as f32
         }
     }
 
