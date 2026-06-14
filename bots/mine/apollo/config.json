@@ -9,10 +9,14 @@
   "horizon": 16,
   "max_distance": 56.91600635470856,
   "score_w_production": 1.0,
-  "score_w_ship_cost": 1.0,
-  "score_w_final_ships": 1.0,
-  "score_per_ship_smoothing": 1.0,
-  "capture_min_score": 0.0,
-  "score_enemy_capture_bonus": 1.0,
-  "default_strategy": 0
+  "score_w_ship_cost": 0.7113649057362126,
+  "score_w_final_ships": 1.136482164596601,
+  "score_per_ship_smoothing": 3.6162818929369163,
+  "capture_min_score": -1.7482430981011194,
+  "score_enemy_capture_bonus": 1.503569413438521,
+  "default_strategy": 0,
+  "neutral_payback_turns": 31.414204933723283,
+  "neutral_payback_penalty": 0.035471475406247566,
+  "lead_gate": 15.555928595584987,
+  "neutral_capture_penalty": 27.28463735061637
 }

@@ -71,7 +71,7 @@ from run_batched import (  # noqa: E402
 # apollo_tuned (frozen phase-1 winner) are all trained against: beating the two
 # apollo clones guards against the scoring changes regressing vs our own prior
 # strategy, while producer_v2 keeps it honest vs an external bot.
-TRAIN_OPPONENTS = ["producer_v2", "apollo_baseline", "apollo_tuned"]
+TRAIN_OPPONENTS = ["producer_v2", "apollo_baseline", "apollo_tuned", "simpleagent"]
 # Reference opponents the best configs are validated against (no-regression).
 # Any training opponent is auto-excluded from this set at runtime.
 VALIDATION_OPPONENTS = ["producer", "simpleagent", "owheuristic", "apollo_baseline"]
@@ -332,6 +332,10 @@ def main():
     parser.add_argument("--no-enqueue-current", action="store_true",
                         help="Skip warm-starting a fresh study with the current "
                              "config.json values (the identity/anchor trial).")
+    parser.add_argument("--enqueue-seeds", default=None,
+                        help="JSON file with a list of (partial) configs to also "
+                             "warm-start a fresh study. Missing tunable keys are "
+                             "filled from config.json (e.g. new constants at identity).")
     args = parser.parse_args()
 
     if args.stage_games:
@@ -395,6 +399,23 @@ def main():
         else:
             missing = [k for k in intervals if k not in anchor]
             print(f"Warm-start SKIPPED (config.json missing tunable keys: {missing})")
+
+        # Extra seeds: each (partial) config is filled from config.json for any
+        # tunable key it omits (so prior-phase configs get the new constants at
+        # their config.json/identity values), then enqueued.
+        if args.enqueue_seeds:
+            seeds = json.loads(Path(args.enqueue_seeds).read_text())
+            for s in seeds:
+                seed = {}
+                for k, spec in intervals.items():
+                    v = s.get(k, base_cfg.get(k))
+                    if v is None:
+                        break
+                    seed[k] = int(v) if spec["type"] == "int" else float(v)
+                if len(seed) == len(intervals):
+                    study.enqueue_trial(seed)
+            print(f"Warm-start: enqueued {len(seeds)} extra seed config(s) "
+                  f"from {Path(args.enqueue_seeds).name}")
 
     # Track the best so we only validate on genuine improvements.
     try:

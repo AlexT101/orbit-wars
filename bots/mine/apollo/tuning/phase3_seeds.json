@@ -1,0 +1,3 @@
+[
+  {"score_w_ship_cost": 1.0, "score_w_final_ships": 1.0, "score_per_ship_smoothing": 1.0, "capture_min_score": -2.5, "score_enemy_capture_bonus": 1.65, "default_strategy": 0}
+]

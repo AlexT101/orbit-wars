@@ -700,7 +700,32 @@ fn timeline_delta_score(
     score += w_final_ships
         * (signed_ships(owner_at[h], ships_at[h], player)
             - signed_ships(baseline.owner_at[h], baseline.ships_at[h], player));
-    score - w_ship_cost * ships_committed as f64
+    score -= w_ship_cost * ships_committed as f64;
+
+    // ── Neutral-capture discipline (phase 3, see tuning/PHASE3_DESIGN.md) ────
+    // Applies only when the target is NEUTRAL at the turn our fleet arrives
+    // (`start` = earliest rewritten/arrival turn). Both terms default to no-ops.
+    if baseline.owner_at[start] == -1 {
+        // (a) Flat marginal-neutral penalty: a fixed shift bites low-score
+        // (marginal) neutral grabs hardest; barely dents a high-value capture.
+        score -= crate::constants::neutral_capture_penalty();
+
+        // (b) Payback surcharge for slow-to-recoup garrisons, waived when we'd
+        // keep a comfortable ship lead after paying for it. The surcharge scales
+        // by ships_committed (large for high-garrison planets), so it accelerates
+        // with garrison size without needing an explicit exponent.
+        let penalty = crate::constants::neutral_payback_penalty();
+        if penalty > 0.0 && production > 0.0 {
+            let garrison = target.ships.max(0) as f64;
+            let payback = garrison / production; // turns of own output to recoup
+            let excess = (payback - crate::constants::neutral_payback_turns()).max(0.0);
+            let lead_after = world.ship_lead - garrison;
+            if excess > 0.0 && lead_after < crate::constants::lead_gate() {
+                score -= w_ship_cost * ships_committed as f64 * penalty * excess;
+            }
+        }
+    }
+    score
 }
 
 // ── evaluate_frontline_strategy ──────────────────────────────────────────

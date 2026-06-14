@@ -14,5 +14,9 @@
   "score_per_ship_smoothing": 1.0,
   "capture_min_score": 0.0,
   "score_enemy_capture_bonus": 1.0,
-  "default_strategy": 0
+  "default_strategy": 0,
+  "neutral_payback_turns": 20.0,
+  "neutral_payback_penalty": 0.0,
+  "lead_gate": 50.0,
+  "neutral_capture_penalty": 0.0
 }

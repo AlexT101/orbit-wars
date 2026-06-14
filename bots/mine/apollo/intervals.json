@@ -1,9 +1,13 @@
 {
-  "_comment": "Phase-2 search ranges: the scoring / valuation constants ONLY. Phase-1 movement/pressure constants are intentionally absent (frozen at the adopted config.json/config_4p.json values; their ranges are archived in intervals_phase1.json). score_w_production is the scale anchor and is PINNED at 1.0 (NOT listed here) — the plan score is argmax-compared, so it has one redundant scale degree of freedom. default_strategy is {0=ScorePerShip, 1=ScoreFirst}; ProductionFirst is never the default. Identity defaults (reproduce pre-phase-2 play): score_w_ship_cost=1, score_w_final_ships=1, score_per_ship_smoothing=1, capture_min_score=0, score_enemy_capture_bonus=1, default_strategy=0.",
-  "score_w_ship_cost":         { "type": "float", "min": 0.3, "max": 3.0  },
-  "score_w_final_ships":       { "type": "float", "min": 0.0, "max": 2.0  },
+  "_comment": "All-at-once study: 6 scoring constants + 4 neutral-discipline constants (phase 2 + phase 3 jointly; see tuning/PHASE3_DESIGN.md). score_w_production is PINNED at 1.0 (NOT listed). Identity defaults (reproduce current play): scoring all 1/0/0; neutral penalties 0 (neutral_payback_penalty=0, neutral_capture_penalty=0 make the gate a no-op). Neutral ranges are grounded in sampled map stats: production 1-5, neutral garrison 5-92 (p90 53), payback garrison/production 1-92 (p50 9, p90 28). score_w_ship_cost [0.7,1.5] and score_w_final_ships [0.6,1.4] are TIGHTENED around 1.0: a bisection on the correct build showed extremes (cost~0.5, final~1.7) are catastrophic (apollo over-commits / hoards), so the wide ranges just wasted trials getting pruned.",
+  "score_w_ship_cost":         { "type": "float", "min": 0.7, "max": 1.5  },
+  "score_w_final_ships":       { "type": "float", "min": 0.6, "max": 1.4  },
   "score_per_ship_smoothing":  { "type": "float", "min": 0.5, "max": 20.0 },
   "capture_min_score":         { "type": "float", "min": -5.0,"max": 5.0  },
   "score_enemy_capture_bonus": { "type": "float", "min": 1.0, "max": 2.0  },
-  "default_strategy":          { "type": "int",   "min": 0,   "max": 1    }
+  "default_strategy":          { "type": "int",   "min": 0,   "max": 1    },
+  "neutral_payback_turns":     { "type": "float", "min": 2.0, "max": 50.0  },
+  "neutral_payback_penalty":   { "type": "float", "min": 0.0, "max": 0.5   },
+  "lead_gate":                 { "type": "float", "min": 0.0, "max": 300.0 },
+  "neutral_capture_penalty":   { "type": "float", "min": 0.0, "max": 50.0  }
 }

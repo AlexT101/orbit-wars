@@ -64,6 +64,12 @@ pub struct WorldState<'a> {
     /// this and stands down: running a DFS per simulated reply would blow the
     /// turn budget, and the rollout's reply policy is meant to stay cheap.
     pub rollout_internal: bool,
+
+    /// Our total ships (owned planets + in-flight fleets) minus the strongest
+    /// single enemy's total, at this snapshot. Computed once here so the greedy
+    /// scorer (`timeline_delta_score`) can weigh a capture's ship drain against
+    /// the overall lead (phase-3 neutral discipline) without a global re-walk.
+    pub ship_lead: f64,
 }
 
 impl<'a> WorldState<'a> {
@@ -148,6 +154,33 @@ impl<'a> WorldState<'a> {
             }
         }
 
+        // Per-player ship totals (planets + in-flight fleets) → our lead over the
+        // strongest single enemy. Neutral (owner -1) is excluded.
+        let mut totals = [0.0f64; crate::constants::MAX_PLAYERS];
+        let add = |totals: &mut [f64; crate::constants::MAX_PLAYERS], owner: i64, ships: i64| {
+            if owner >= 0 && (owner as usize) < crate::constants::MAX_PLAYERS {
+                totals[owner as usize] += ships.max(0) as f64;
+            }
+        };
+        for planet in &planets {
+            add(&mut totals, planet.owner, planet.ships);
+        }
+        for fleet in sim.fleets() {
+            add(&mut totals, fleet.owner, fleet.ships);
+        }
+        let my_total = if (player as usize) < crate::constants::MAX_PLAYERS {
+            totals[player as usize]
+        } else {
+            0.0
+        };
+        let strongest_enemy = totals
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != player as usize)
+            .map(|(_, v)| *v)
+            .fold(0.0f64, f64::max);
+        let ship_lead = my_total - strongest_enemy;
+
         Self {
             player,
             cache,
@@ -161,6 +194,7 @@ impl<'a> WorldState<'a> {
             config,
             remaining_overage_time: 0.0,
             rollout_internal: false,
+            ship_lead,
         }
     }
 

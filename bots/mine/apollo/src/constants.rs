@@ -65,6 +65,14 @@ struct AgentConsts {
     capture_min_score: f64,
     score_enemy_capture_bonus: f64,
     default_strategy: i64,
+    // ── Neutral-capture discipline (phase-3 tunables) ───────────────────────
+    // Discourage sinking ships into slow-payback / marginal NEUTRAL captures.
+    // All default to no-ops (the two penalties = 0) so play is unchanged until
+    // tuned. See tuning/PHASE3_DESIGN.md.
+    neutral_payback_turns: f64,
+    neutral_payback_penalty: f64,
+    lead_gate: f64,
+    neutral_capture_penalty: f64,
 }
 
 // [0] = 2p, [1] = 4p.
@@ -111,6 +119,10 @@ fn parse_consts(env_key: &str, default_name: &str) -> AgentConsts {
         capture_min_score: f("capture_min_score"),
         score_enemy_capture_bonus: f("score_enemy_capture_bonus"),
         default_strategy: i("default_strategy"),
+        neutral_payback_turns: f("neutral_payback_turns"),
+        neutral_payback_penalty: f("neutral_payback_penalty"),
+        lead_gate: f("lead_gate"),
+        neutral_capture_penalty: f("neutral_capture_penalty"),
     }
 }
 
@@ -177,6 +189,16 @@ pub fn capture_min_score() -> f64 { agent().capture_min_score } // A winning com
 pub fn score_enemy_capture_bonus() -> f64 { agent().score_enemy_capture_bonus } // Magnitude of an enemy-owned planet in owner_value (1.0 ⇒ the original symmetric 2:1 enemy-vs-neutral capture value).
 #[inline]
 pub fn default_strategy() -> i64 { agent().default_strategy } // Reply-policy strategy run directly by plan() and placed first in the search set: 0 = ScorePerShip, 1 = ScoreFirst.
+
+// Neutral-capture discipline — TUNABLE (phase 3). See tuning/PHASE3_DESIGN.md.
+#[inline]
+pub fn neutral_payback_turns() -> f64 { agent().neutral_payback_turns } // Turns-to-recoup (garrison/production) above which a neutral capture is surcharged.
+#[inline]
+pub fn neutral_payback_penalty() -> f64 { agent().neutral_payback_penalty } // Surcharge steepness per excess payback-turn; 0 = disabled (no-op).
+#[inline]
+pub fn lead_gate() -> f64 { agent().lead_gate } // If our ship lead would stay >= this after the buy, waive the payback surcharge.
+#[inline]
+pub fn neutral_capture_penalty() -> f64 { agent().neutral_capture_penalty } // Flat score penalty on neutral captures (bites marginal neutrals hardest); 0 = no-op.
 
 // Early-game expansion pre-pass (see early_game.rs)
 pub const EARLY_GAME_END: i64 = 0; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.
