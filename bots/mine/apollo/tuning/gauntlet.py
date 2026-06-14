@@ -248,6 +248,26 @@ def summarise(name, by_opp, control_by_opp):
     }
 
 
+def pairwise_deltas(results, names):
+    """Paired per-game score difference (A - B) on identical seeds, for every
+    A<B pair of configs. Returns {f'{a} - {b}': {mean, lo, hi, n, significant}}."""
+    out = {}
+    for ai, a in enumerate(names):
+        for b in names[ai + 1:]:
+            diffs = []
+            for opp, games in results[a].items():
+                gb = results[b].get(opp, {})
+                for seed, g in games.items():
+                    h = gb.get(seed)
+                    if g["score"] is None or h is None or h["score"] is None:
+                        continue
+                    diffs.append(g["score"] - h["score"])
+            lo, mid, hi, n = paired_delta(diffs)
+            out[f"{a} - {b}"] = {"mean": mid, "lo": lo, "hi": hi, "n": n,
+                                 "significant": bool(lo > 0 or hi < 0)}
+    return out
+
+
 def main():
     # Output is ASCII, but force UTF-8 so a redirected console can't raise an
     # encoding error mid-run (Windows default is cp1252).
@@ -269,11 +289,27 @@ def main():
     parser.add_argument("--configs", default=None,
                         help="JSON file of explicit configs to test instead of the study top-k. "
                              "Either a list of config objects, or {name: config}.")
+    parser.add_argument("--opponents", default=None,
+                        help="Comma-separated subset of opponents to use (default: all). "
+                             "e.g. drop owheuristic for a more discriminating A/B.")
     args = parser.parse_args()
 
     apollo_path = bot_entry("apollo")
     if not apollo_path.is_file():
         parser.error(f"apollo not found at {apollo_path}")
+    # Snapshot config.json so the run restores it exactly (it now holds the
+    # adopted tuned config, NOT the old DEFAULT_CONFIG).
+    config_snapshot = json.loads(CONFIG_PATH.read_text())
+
+    if args.opponents:
+        wanted = [o.strip() for o in args.opponents.split(",") if o.strip()]
+        by_name = {o[0]: o for o in OPPONENTS}
+        bad = [w for w in wanted if w not in by_name]
+        if bad:
+            parser.error(f"unknown opponent(s) {bad}; known: {[o[0] for o in OPPONENTS]}")
+        active_opps = [by_name[w] for w in wanted]
+    else:
+        active_opps = list(OPPONENTS)
 
     # Build the candidate list (control first, then configs under test).
     candidates = []
@@ -291,10 +327,10 @@ def main():
         raise SystemExit("no configs selected; check the study name / trials log.")
 
     # Allocate games per opponent and assign each a fixed, shared seed block.
-    alloc = allocate_games(OPPONENTS, args.total_games, args.min_per_opp)
+    alloc = allocate_games(active_opps, args.total_games, args.min_per_opp)
     opp_blocks = []
     cursor = args.seed_base
-    for name, _prio, _wr in OPPONENTS:
+    for name, _prio, _wr in active_opps:
         n = alloc[name]
         opp_path = bot_entry(name)
         if not opp_path.is_file():
@@ -307,7 +343,7 @@ def main():
           f"(CRN, threads={args.threads})")
     print("Game allocation (priority*(1-win_rate), floor "
           f"{args.min_per_opp}):")
-    for name, _p, wr in OPPONENTS:
+    for name, _p, wr in active_opps:
         print(f"  {name:16} {alloc[name]:>4} games   (assumed wr {wr:.0%})")
     print()
 
@@ -328,7 +364,7 @@ def main():
     under_test.sort(key=lambda s: s["win_rate"], reverse=True)
     ordered = ([s for s in summaries if s["name"] == "default"] + under_test)
 
-    opp_names = [o[0] for o in OPPONENTS]
+    opp_names = [o[0] for o in active_opps]
     header = f"{'config':>10} | {'pooled wr (95% CI)':>22} | {'delta vs default (95%CI)':>24} | ms |"
     header += " " + " ".join(f"{o[:6]:>6}" for o in opp_names)
     print("\n" + header)
@@ -337,6 +373,8 @@ def main():
         wr = f"{s['win_rate']*100:5.1f}% [{s['wr_lo']*100:4.1f},{s['wr_hi']*100:4.1f}]"
         if s["name"] == "default":
             delta = f"{'(control)':>24}"
+        elif control_by_opp is None:
+            delta = f"{'(see pairwise)':>24}"
         else:
             sig = "*" if (s["pd_lo"] > 0 or s["pd_hi"] < 0) else " "
             delta = f"{s['paired_delta']*100:+5.1f} [{s['pd_lo']*100:+4.1f},{s['pd_hi']*100:+4.1f}]{sig}"
@@ -347,7 +385,18 @@ def main():
     print("\n(* = paired improvement over default is significant at 95%. delta is mean "
           "per-game score difference on identical seeds; +1 = win flipped from loss.)")
 
-    # Persist full per-seed results + summaries; save the best config.
+    # Direct A-vs-B paired comparison among all arms (the real signal when there
+    # is no single control, e.g. an A/B/C of tuned configs).
+    pw = pairwise_deltas(results, [s["name"] for s in ordered])
+    if pw:
+        print("\nPairwise paired delta (A - B, mean per-game score diff, 95% CI):")
+        for k, v in pw.items():
+            sig = "*" if v["significant"] else " "
+            print(f"  {k:>26}: {v['mean']*100:+5.1f} [{v['lo']*100:+5.1f},{v['hi']*100:+5.1f}]{sig}"
+                  f"  (n={v['n']})")
+        print("  (* = the two configs differ significantly at 95%.)")
+
+    # Persist summaries + pairwise; save the best config.
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_json = OUT_DIR / f"{args.study_name}_gauntlet_{stamp}.json"
     payload = {
@@ -355,26 +404,32 @@ def main():
         "study": args.study_name,
         "total_games": args.total_games,
         "seed_base": args.seed_base,
+        "opponents": [o[0] for o in active_opps],
         "allocation": alloc,
         "configs": {name: cfg for name, cfg in candidates},
         "summaries": [{k: v for k, v in s.items() if k != "per_opp"} | {"per_opp": s["per_opp"]}
                       for s in ordered],
+        "pairwise": pw,
     }
     out_json.write_text(json.dumps(payload, indent=2))
     if under_test:
         winner = under_test[0]
-        best_cfg = dict(candidates)[winner["name"]]
-        best_path = OUT_DIR / f"{args.study_name}_gauntlet_best.json"
-        best_path.write_text(json.dumps(
-            {"name": winner["name"], "win_rate": winner["win_rate"],
-             "paired_delta_vs_default": winner["paired_delta"], "config": best_cfg}, indent=2))
-        print(f"\nWinner: {winner['name']}  ({winner['win_rate']*100:.1f}% pooled, "
-              f"delta {winner['paired_delta']*100:+.1f} vs default)")
-        print(f"Saved: {best_path.name}, {out_json.name}")
+        print(f"\nTop by pooled win rate: {winner['name']} ({winner['win_rate']*100:.1f}%)")
+        # Only update the canonical best-config file for a study top-k run with a
+        # control; a custom A/B (--configs/--no-control) must not clobber it.
+        if not args.no_control and not args.configs:
+            best_cfg = dict(candidates)[winner["name"]]
+            best_path = OUT_DIR / f"{args.study_name}_gauntlet_best.json"
+            best_path.write_text(json.dumps(
+                {"name": winner["name"], "win_rate": winner["win_rate"],
+                 "paired_delta_vs_default": winner["paired_delta"], "config": best_cfg}, indent=2))
+            print(f"Saved: {best_path.name}")
+    print(f"Saved: {out_json.name}")
 
-    # Leave config.json at the committed defaults, not the last config played.
-    write_config(DEFAULT_CONFIG)
-    print("Restored config.json to defaults.")
+    # Restore config.json to exactly what it was before the run (the adopted
+    # tuned config), not the last config played.
+    write_config(config_snapshot)
+    print("Restored config.json.")
 
 
 if __name__ == "__main__":

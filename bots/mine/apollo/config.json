@@ -1,11 +1,11 @@
 {
-  "rotation_look_ahead_turns": 6,
-  "offset_lookahead": 16,
-  "enemy_offset_lookahead": 8,
-  "reinforcement_pressure_turns": 24,
-  "reinforcement_pressure_decay": 0.2892112397142415,
-  "frontier_pressure_ratio": 3.5034305066548312,
-  "ally_pressure_ratio": 0.828105122513934,
+  "rotation_look_ahead_turns": 10,
+  "offset_lookahead": 18,
+  "enemy_offset_lookahead": 10,
+  "reinforcement_pressure_turns": 28,
+  "reinforcement_pressure_decay": 0.25310933822405324,
+  "frontier_pressure_ratio": 3.1992377687381963,
+  "ally_pressure_ratio": 0.794565368894421,
   "horizon": 16,
-  "max_distance": 57.16453449039427
+  "max_distance": 56.91600635470856
 }
