@@ -12,23 +12,23 @@ Bundle layout (flat, everything at the archive root):
   osteo_il_latest.pt         IL checkpoint
   features.py, model.py, constants.py
                              IL support (from experimental_arch/train_transformer)
-  orbit_wars_model.abi3.so   Rust feature encoder (host-built, like triplepoint1)
+  orbit_wars_model.abi3.so   Rust feature encoder (Linux .so built in Docker)
   orbit_wars_engine.abi3.so  Rust engine (for chaos's schema validation + warmup)
 
 torch and gymnasium are NOT bundled — Kaggle's python image ships them.
 
 Build steps:
-  1. cargo-build env_model + env_engine on the host, take the cdylibs.
-  2. docker-build the aphrodite binary inside gcr.io/kaggle-images/python
+  1. docker-build env_model + env_engine into Linux Python extension modules.
+  2. docker-build the aphrodite binary
      (reuses aphrodite/target-docker; pass --skip-docker to reuse an existing
-     binary there).
+     binary and existing extension modules).
   3. Stage everything flat in a temp dir.
   4. SMOKE TEST: import the staged main.py and play one real turn through the
      staged binary + staged .so's. The build fails loudly if anything is off.
   5. tar.gz it.
 
 Usage:
-    python bots/mine/chaos/build_submission.py [--skip-docker]
+    python bots/mine/chaos/build_submission_docker.py [--skip-docker]
 
 Output: bots/mine/chaos/submission.tar.gz
 """
@@ -80,12 +80,28 @@ CONFIGS = [
 # same compatibility guarantee. (musl cross-builds are NOT safe — they died
 # silently on the Kaggle worker; see aphrodite/build_submission.py.)
 BUILD_IMAGE = "rust:1-slim-bullseye"
+KAGGLE_IMAGE = "gcr.io/kaggle-images/python:latest"
 BIN_OUT = APHRODITE / "target-docker" / "release" / "aphrodite"
 DOCKER_BUILD_SCRIPT = r"""
 set -euo pipefail
 export CARGO_HOME=/io/.cargo-home-bullseye
 export CARGO_TARGET_DIR=/io/target-docker
 cargo build --release --bin aphrodite
+"""
+DOCKER_CDYLIB_SCRIPT = r"""
+set -euo pipefail
+export CARGO_HOME=/io/.cargo-home-kaggle
+export RUSTUP_HOME=/io/.rustup-home-kaggle
+export PATH=$CARGO_HOME/bin:$PATH
+if ! command -v cargo >/dev/null; then
+    curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+fi
+cd /io/experimental_arch/env_model
+export CARGO_TARGET_DIR=/io/experimental_arch/env_model/target-docker
+cargo build --release
+cd /io/experimental_arch/env_engine
+export CARGO_TARGET_DIR=/io/experimental_arch/env_engine/target-docker
+cargo build --release
 """
 
 
@@ -94,20 +110,48 @@ def _run(cmd: list[str], **kw) -> None:
     subprocess.run(cmd, check=True, **kw)
 
 
-def _build_cdylibs() -> dict[str, Path]:
-    cargo = shutil.which("cargo")
-    if not cargo:
-        sys.exit("cargo not found; cannot build orbit_wars_model/engine")
-    out = {}
-    for crate, lib, name in (
-        (ENV_MODEL, "liborbit_wars_model.so", "orbit_wars_model.abi3.so"),
-        (ENV_ENGINE, "liborbit_wars_engine.so", "orbit_wars_engine.abi3.so"),
-    ):
-        _run([cargo, "build", "--release"], cwd=crate)
-        src = crate / "target" / "release" / lib
-        if not src.is_file():
-            sys.exit(f"build succeeded but cdylib missing: {src}")
-        out[name] = src
+def _cdylib_outputs() -> dict[str, Path]:
+    return {
+        "orbit_wars_model.abi3.so": ENV_MODEL
+        / "target-docker"
+        / "release"
+        / "liborbit_wars_model.so",
+        "orbit_wars_engine.abi3.so": ENV_ENGINE
+        / "target-docker"
+        / "release"
+        / "liborbit_wars_engine.so",
+    }
+
+
+def _build_cdylibs(skip_docker: bool) -> dict[str, Path]:
+    out = _cdylib_outputs()
+    if skip_docker:
+        missing = [str(path) for path in out.values() if not path.is_file()]
+        if missing:
+            sys.exit("--skip-docker but cdylib(s) missing:\n  " + "\n  ".join(missing))
+        for name, src in out.items():
+            print(f"  reusing existing docker-built cdylib: {src} -> {name}")
+        return out
+
+    print(f"Building orbit_wars_model + orbit_wars_engine inside {KAGGLE_IMAGE}...")
+    _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{REPO_ROOT}:/io",
+            "-w",
+            "/io",
+            KAGGLE_IMAGE,
+            "bash",
+            "-c",
+            DOCKER_CDYLIB_SCRIPT,
+        ],
+    )
+    missing = [str(path) for path in out.values() if not path.is_file()]
+    if missing:
+        sys.exit("docker build succeeded but cdylib(s) missing:\n  " + "\n  ".join(missing))
     return out
 
 
@@ -199,19 +243,29 @@ print("[smoke] OK", file=sys.stderr)
 
 
 def _smoke_test(td: Path) -> None:
-    print("Smoke-testing staged bundle (import + one real turn)...")
-    env = dict(os.environ)
-    env.pop("OSTEO_ORBIT_WARS_ROOT", None)
-    env["OW_DEBUG"] = "1"
-    subprocess.run(
-        [sys.executable, "-c", SMOKE_SCRIPT], cwd=td, env=env, check=True
+    print(f"Smoke-testing staged Linux bundle inside {KAGGLE_IMAGE}...")
+    _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{td}:/tmp/chaos_bundle",
+            "-w",
+            "/tmp/chaos_bundle",
+            "-e",
+            "OW_DEBUG=1",
+            KAGGLE_IMAGE,
+            "python",
+            "-c",
+            SMOKE_SCRIPT,
+        ],
     )
 
 
 def main() -> int:
     skip_docker = "--skip-docker" in sys.argv
-    print("Building orbit_wars_model + orbit_wars_engine cdylibs...")
-    cdylibs = _build_cdylibs()
+    cdylibs = _build_cdylibs(skip_docker)
     _build_binary(skip_docker)
     BUNDLE.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as tmp:

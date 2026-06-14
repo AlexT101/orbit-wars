@@ -9,24 +9,23 @@ Per turn:
      policy's suggestions.
 
 The aphrodite engine and subprocess management are reused from
-bots/mine/aphrodite (same binary — the `il_candidates` field is optional and
-aphrodite's own wrapper never sends it). If the IL model cannot be loaded or
-fails at any turn, chaos degrades to pure aphrodite rather than crashing.
+bots/mine/aphrodite (same binary - the `il_candidates` field is optional and
+aphrodite's own wrapper never sends it).
 
 Time budgeting is dynamic per turn: Kaggle gives 1s/turn + a 60s overage pool
 on unknown hardware, so the wrapper measures its own IL pass each turn and
 sends the binary `budget_ms` = turn target minus elapsed. The target is a
-conservative 700ms — well under the 1s act timeout, leaving the overage pool
-untouched as a pure safety margin across the 500-turn game.
+conservative 700ms in dev and 1000ms in submission builds. The Rust side still
+clamps the effective budget to 900ms when the remaining overage pool is low.
 
 Failures are LOUD by design: a missing checkpoint, stale `orbit_wars_model`
-schema, or IL runtime error raises and kills the bot. No silent degradation —
+schema, or IL runtime error raises and kills the bot. No silent degradation -
 if chaos is running, the IL injection is running.
 
 Env knobs:
   CHAOS_IL_K            max IL candidates injected per turn (default 5)
   CHAOS_IL_MIN_PROB     drop IL suggestions below this policy prob (default 0.02)
-  CHAOS_TURN_TARGET_MS  total per-turn wall target (default 700)
+  CHAOS_TURN_TARGET_MS  total per-turn wall target (default 700 dev / 1000 prod)
   CHAOS_IL_CHECKPOINT   override the IL checkpoint path
 """
 
@@ -97,9 +96,11 @@ _spec.loader.exec_module(_aph)
 
 warnings.filterwarnings("ignore", message="enable_nested_tensor is True.*")
 
-# Total per-turn wall target (IL pass + search). Conservative: well under
-# Kaggle's 1s act timeout, so the 60s overage pool stays a pure safety margin.
-_TURN_TARGET_MS = 700
+# Total per-turn wall target (IL pass + search). Submission builds flip
+# _USE_PROD_LIMITS to match aphrodite's production budget policy.
+_DEV_TURN_TARGET_MS = 700
+_SUBMISSION_TURN_TARGET_MS = 1000
+_USE_PROD_LIMITS = False
 # Never squeeze the search below this, no matter how slow the IL pass was.
 _MIN_SEARCH_MS = 250
 # Margin between (target - il_elapsed) and the budget we hand the binary,
@@ -108,7 +109,8 @@ _DISPATCH_MARGIN_MS = 30
 
 
 def _turn_target_ms() -> int:
-    return int(os.environ.get("CHAOS_TURN_TARGET_MS", _TURN_TARGET_MS))
+    default = _SUBMISSION_TURN_TARGET_MS if _USE_PROD_LIMITS else _DEV_TURN_TARGET_MS
+    return int(os.environ.get("CHAOS_TURN_TARGET_MS", default))
 
 
 def _il_k() -> int:

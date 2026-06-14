@@ -33,10 +33,11 @@ IL runtime error, or dead binary raises immediately. If chaos is playing, the
 IL injection is provably active.
 
 **Time budgeting** is dynamic per turn: the wrapper times its IL pass and
-sends the binary `budget_ms = 700 - il_elapsed - 30` (floor 250ms) in the
-payload, overriding the binary's env budget. 700ms total stays well under
-Kaggle's 1s act timeout so the 60s overage pool remains a pure safety margin
-for all 500 turns.
+sends the binary `budget_ms = target - il_elapsed - 30` (floor 250ms) in the
+payload, overriding the binary's env budget. The source default is a
+conservative 700ms target for dev runs; `build_submission.py` flips prod limits
+on, giving Chaos a 1000ms target while Aphrodite's Rust panic clamp still caps
+the effective search budget at 900ms when the remaining overage pool is low.
 
 ## Requirements
 
@@ -54,7 +55,7 @@ for all 500 turns.
 |---|---|---|
 | `CHAOS_IL_K` | 5 | max IL candidates injected per turn |
 | `CHAOS_IL_MIN_PROB` | 0.02 | drop IL suggestions below this policy prob |
-| `CHAOS_TURN_TARGET_MS` | 700 | total per-turn wall target (IL + search) |
+| `CHAOS_TURN_TARGET_MS` | 700 dev / 1000 submission | total per-turn wall target (IL + search) |
 | `CHAOS_IL_CHECKPOINT` | repo checkpoint | override IL checkpoint path |
 
 `OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL ms + candidates) and

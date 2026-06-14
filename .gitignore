@@ -184,8 +184,11 @@ cython_debug/
 .claude
 
 
-.cargo-home
-.rustup-home
+.cargo-home/
+.rustup-home/
+.cargo-home-kaggle/
+.rustup-home-kaggle/
+.cargo-home-bullseye/
 
 node_modules/
 .pnpm-store/
