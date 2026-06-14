@@ -1,10 +1,11 @@
 """Final gauntlet for the tuned apollo configs.
 
-Takes the top-K configs from a tuning study plus the current default config (as a
-control), and plays them all against a fixed opponent set on the SAME held-out
-seeds (common random numbers), so configs are compared *paired* per seed — the
-biggest variance reduction available. Reports pooled win rate with confidence
-intervals and each config's paired improvement over the default.
+Takes the top-K configs from a tuning study plus the current adopted config (a
+snapshot of config.json, as the control), and plays them all against a fixed
+opponent set on the SAME held-out seeds (common random numbers), so configs are
+compared *paired* per seed — the biggest variance reduction available. Reports
+each config's pooled POINTS rate (win=1, draw=0.5, matching the tuner objective)
+with confidence intervals and its paired improvement over the control.
 
 Game allocation
 ---------------
@@ -53,18 +54,11 @@ from tune import (  # noqa: E402
     write_config,
 )
 
-# The committed default config (the control). Keep in sync with config.json.
-DEFAULT_CONFIG = {
-    "rotation_look_ahead_turns": 10,
-    "offset_lookahead": 15,
-    "enemy_offset_lookahead": 5,
-    "reinforcement_pressure_turns": 20,
-    "reinforcement_pressure_decay": 0.5,
-    "frontier_pressure_ratio": 1.4,
-    "ally_pressure_ratio": 0.8,
-    "horizon": 30,
-    "max_distance": 38.0,
-}
+# The control is the CURRENT adopted config (a snapshot of config.json taken at
+# startup), so the gauntlet always measures candidates against whatever the bot
+# ships today — for phase 2 that's the phase-1 constants + identity scoring
+# defaults (the anchor). A hardcoded default would drift out of sync (and would
+# be the wrong baseline once any tuning is adopted).
 
 # Opponent universe (confirmed-stable bots only). priority = relevance/strength
 # tier; win_rate = apollo's approximate current win rate vs that bot (used only
@@ -73,6 +67,7 @@ DEFAULT_CONFIG = {
 OPPONENTS = [
     ("producer_v2",     1.00, 0.60),
     ("apollo_baseline", 1.00, 0.50),
+    ("apollo_tuned",    1.00, 0.50),  # near-mirror; most discriminating for scoring tweaks
     ("producer",        0.60, 0.75),
     ("simpleagent",     0.50, 0.85),
     ("owheuristic",     0.25, 0.90),
@@ -89,6 +84,23 @@ def wilson(wins, n, z=1.96):
     centre = p + z * z / (2 * n)
     margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
     return ((centre - margin) / denom, p, (centre + margin) / denom)
+
+
+def score_ci(wins, losses, draws, z=1.96):
+    """(low, mid, high) for the POINTS rate (win=1, draw=0.5, loss=0), matching
+    the tuner's objective. Uses the exact mean/variance of the 3-point per-game
+    score distribution (a draw has 0 variance, unlike a Bernoulli), so it's more
+    faithful than a Wilson interval that would have to treat draws as half-wins.
+    Errors are excluded by the caller (not passed in)."""
+    n = wins + losses + draws
+    if n == 0:
+        return (0.0, 0.0, 0.0)
+    mean = (wins + 0.5 * draws) / n
+    # E[x^2] over scores {1 (win), 0.25 (draw), 0 (loss)}.
+    ex2 = (wins + 0.25 * draws) / n
+    var = max(ex2 - mean * mean, 0.0)
+    se = math.sqrt(var / n)
+    return (max(mean - z * se, 0.0), mean, min(mean + z * se, 1.0))
 
 
 def paired_delta(diffs, z=1.96):
@@ -179,7 +191,8 @@ def allocate_games(opponents, total, min_per):
 
 def select_top_configs(study_name, k):
     """Top-k completed configs from the trials log, ranked by the LOWER bound of
-    their win-rate CI (so we don't promote lucky high-variance trials)."""
+    their POINTS-rate CI (win=1, draw=0.5), matching the tuner objective, so we
+    don't promote lucky high-variance trials."""
     path = OUT_DIR / f"{study_name}_trials.jsonl"
     if not path.exists():
         raise SystemExit(f"no trials log at {path}")
@@ -188,8 +201,8 @@ def select_top_configs(study_name, k):
         r = json.loads(line)
         if r.get("status") != "complete":
             continue
-        wins, n = r["cum"]["wins"], r["cum_games"]
-        lcb = wilson(wins, n)[0]
+        c = r["cum"]
+        lcb = score_ci(c["wins"], c["losses"], c["draws"])[0]
         key = json.dumps(r["config"], sort_keys=True)
         if key not in best or lcb > best[key][0]:
             best[key] = (lcb, r["trial"], r["config"], r["win_rate"])
@@ -217,14 +230,15 @@ def summarise(name, by_opp, control_by_opp):
                 rec["draws"] += 1
             if g["ms"] is not None:
                 ms_vals.append(g["ms"])
-        decided = rec["wins"] + rec["losses"]
         rec["games"] = sum(rec[k] for k in ("wins", "losses", "draws", "errors"))
-        rec["win_rate"] = (rec["wins"] / decided) if decided else None
+        # Points rate (win=1, draw=0.5), matching the tuner objective.
+        rec["win_rate"] = score_ci(rec["wins"], rec["losses"], rec["draws"])[1] \
+            if (rec["wins"] + rec["losses"] + rec["draws"]) else None
         per_opp[opp] = rec
         for kk in ("wins", "losses", "draws", "errors"):
             pooled[kk] += rec[kk]
     decided = pooled["wins"] + pooled["losses"]
-    lo, mid, hi = wilson(pooled["wins"], decided)
+    lo, mid, hi = score_ci(pooled["wins"], pooled["losses"], pooled["draws"])
 
     diffs = []
     if control_by_opp is not None:
@@ -314,7 +328,8 @@ def main():
     # Build the candidate list (control first, then configs under test).
     candidates = []
     if not args.no_control:
-        candidates.append(("default", DEFAULT_CONFIG))
+        # Control = the current adopted config (snapshot of config.json).
+        candidates.append(("default", config_snapshot))
     if args.configs:
         raw = json.loads(Path(args.configs).read_text())
         items = raw.items() if isinstance(raw, dict) else enumerate(raw)
