@@ -315,6 +315,9 @@ def main():
                              "aggressive (e.g. 65).")
     parser.add_argument("--prune-startup", type=int, default=10,
                         help="Trials to observe before the percentile pruner activates.")
+    parser.add_argument("--no-enqueue-current", action="store_true",
+                        help="Skip warm-starting a fresh study with the current "
+                             "config.json values (the identity/anchor trial).")
     args = parser.parse_args()
 
     if args.stage_games:
@@ -341,6 +344,7 @@ def main():
     seed_range = (args.seed_low, args.seed_high)
 
     intervals = load_intervals()
+    enqueue_current = not args.no_enqueue_current
     study = optuna.create_study(
         study_name=args.study_name,
         direction="maximize",
@@ -360,6 +364,23 @@ def main():
     print(f"Floors: {STAGE_MIN_WINS} | prune<{args.prune_percentile:.0f}pct "
           f"(startup {args.prune_startup}) | max_ms={args.max_ms}")
     print(f"Logs: {trials_log.name}, {val_log.name}; storage {args.study_name}.db")
+
+    # Warm-start a FRESH study with the current config.json values for the
+    # tunable keys (the identity/anchor trial) so the search measures current
+    # behavior as a baseline. Skipped on resume (study already has trials).
+    if enqueue_current and not study.trials:
+        base_cfg = json.loads(CONFIG_PATH.read_text())
+        anchor = {}
+        for k, spec in intervals.items():
+            if k not in base_cfg:
+                continue
+            anchor[k] = int(base_cfg[k]) if spec["type"] == "int" else float(base_cfg[k])
+        if len(anchor) == len(intervals):
+            study.enqueue_trial(anchor)
+            print(f"Warm-start: enqueued current config as anchor trial: {anchor}")
+        else:
+            missing = [k for k in intervals if k not in anchor]
+            print(f"Warm-start SKIPPED (config.json missing tunable keys: {missing})")
 
     # Track the best so we only validate on genuine improvements.
     try:
