@@ -5,7 +5,7 @@
   "enemy_offset_lookahead":    { "type": "int",   "min": 0,    "max": 20   },
   "reinforcement_pressure_turns": { "type": "int","min": 4,    "max": 50   },
   "reinforcement_pressure_decay": { "type": "float","min": 0.05,"max": 0.95 },
-  "frontier_pressure_ratio":   { "type": "float", "min": 0.8,  "max": 4.0  },
+  "frontier_pressure_ratio":   { "type": "float", "min": 0.8,  "max": 5.0  },
   "ally_pressure_ratio":       { "type": "float", "min": 0.2,  "max": 2.5  },
   "horizon":                   { "type": "int",   "min": 12,   "max": 55   },
   "max_distance":              { "type": "float", "min": 22.0, "max": 65.0 }
