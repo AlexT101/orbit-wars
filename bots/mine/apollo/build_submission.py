@@ -74,12 +74,21 @@ def main() -> int:
     so_out.write_bytes(so_bytes)
     print(f"Extracted: {so_out.name}")
 
-    # 4. Bundle main.py + the .so into a tar.gz, both at the archive root.
+    # 4. Bundle main.py + the .so + the runtime config files into a tar.gz, all
+    #    at the archive root. The native module reads config.json / config_4p.json
+    #    at runtime (main.py points APOLLO_CONFIG[_4P] at these), so they MUST be
+    #    shipped — without them apollo panics on its first move on Kaggle.
+    configs = ["config.json", "config_4p.json"]
+    for cfg in configs:
+        if not (HERE / cfg).is_file():
+            sys.exit(f"Missing required runtime config: {HERE / cfg}")
     bundle = HERE / "submission.tar.gz"
     with tarfile.open(bundle, "w:gz") as tar:
         tar.add(HERE / "main.py", arcname="main.py")
         tar.add(so_out, arcname=so_out.name)
-    print(f"Wrote {bundle}")
+        for cfg in configs:
+            tar.add(HERE / cfg, arcname=cfg)
+    print(f"Wrote {bundle} (bundled: main.py, {so_out.name}, {', '.join(configs)})")
     print(
         "Submit with:\n"
         f"  kaggle competitions submit orbit-wars -f {bundle} -m 'apollo v1'"

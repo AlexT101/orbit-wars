@@ -19,6 +19,14 @@ else:
     _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 
+# The native module loads its tunable constants from config.json / config_4p.json
+# at runtime. Its built-in fallback path is CARGO_MANIFEST_DIR, which on Kaggle is
+# the (nonexistent) Docker build dir — so point it explicitly at the JSON files
+# bundled next to this main.py. `setdefault` keeps any explicit override (e.g. the
+# tuner sets APOLLO_CONFIG) authoritative locally.
+os.environ.setdefault("APOLLO_CONFIG", os.path.join(_HERE, "config.json"))
+os.environ.setdefault("APOLLO_CONFIG_4P", os.path.join(_HERE, "config_4p.json"))
+
 import apollo_native
 
 _BOT = apollo_native.Bot()
