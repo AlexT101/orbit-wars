@@ -184,6 +184,11 @@ impl Bot {
     fn compute_moves(&mut self, obs: &Bound<'_, PyDict>) -> PyResult<Vec<(i64, f64, i64)>> {
         let obs = Observation::from_dict(obs)?;
         self.refresh_cache(&obs);
+        // Pick the 2p/4p agent config for the rest of this turn.
+        crate::constants::set_mode_for_alive(crate::helpers::count_alive_players(
+            &obs.planets,
+            &obs.fleets,
+        ));
         // Step-scoped L1 aim cache, shared across every model built this step.
         // Declared before `world` so it outlives the borrow `world` takes on it.
         let shot_l1 = crate::world::ShotL1::default();
@@ -232,6 +237,11 @@ impl Bot {
             .map(|m| m + 1)
             .unwrap_or(0);
         let num_players = crate::helpers::count_players(&obs.planets, &obs.fleets);
+        // Pick the 2p/4p agent config for the rest of this turn.
+        crate::constants::set_mode_for_alive(crate::helpers::count_alive_players(
+            &obs.planets,
+            &obs.fleets,
+        ));
         let player = obs.player;
         let initial_state = EngineState::from_observation_parts(
             self.current_turn,

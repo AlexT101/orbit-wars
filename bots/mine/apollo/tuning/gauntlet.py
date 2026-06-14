@@ -132,14 +132,27 @@ def play_block(executor, apollo_path, opp_path, seeds):
     return out
 
 
+# Cap games per worker pool so apollo's per-process native memory is reclaimed
+# when the pool is torn down. A long-lived pool accumulates over hundreds of
+# matches and OOMs; `max_tasks_per_child` recycling deadlocks under that memory
+# pressure on Windows. Short-lived pools (~CHUNK_GAMES each, then fully torn
+# down) keep per-worker matches tiny and reclaim reliably. Fresh workers re-read
+# the constant-within-config config.json, so this is safe w.r.t. the LazyLock.
+CHUNK_GAMES = 60
+
+
 def play_config(apollo_path, cfg, opp_blocks, threads):
-    """Write cfg, then play every opponent's seed block. A fresh pool per config
-    is required (apollo caches config.json per-process via LazyLock)."""
+    """Write cfg, then play every opponent's seed block in CHUNK_GAMES-sized
+    chunks, each on its own short-lived pool (bounds native memory)."""
     write_config(cfg)
     by_opp = {}
-    with ProcessPoolExecutor(max_workers=threads) as ex:
-        for opp_name, opp_path, seeds in opp_blocks:
-            by_opp[opp_name] = play_block(ex, apollo_path, opp_path, seeds)
+    for opp_name, opp_path, seeds in opp_blocks:
+        results = {}
+        for i in range(0, len(seeds), CHUNK_GAMES):
+            chunk = seeds[i:i + CHUNK_GAMES]
+            with ProcessPoolExecutor(max_workers=threads) as ex:
+                results.update(play_block(ex, apollo_path, opp_path, chunk))
+        by_opp[opp_name] = results
     return by_opp
 
 
@@ -236,6 +249,12 @@ def summarise(name, by_opp, control_by_opp):
 
 
 def main():
+    # Output is ASCII, but force UTF-8 so a redirected console can't raise an
+    # encoding error mid-run (Windows default is cp1252).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="Final paired gauntlet for tuned apollo configs.")
     parser.add_argument("--study-name", default="apollo_v2")
     parser.add_argument("--top", type=int, default=5, help="Top configs from the study.")
@@ -310,7 +329,7 @@ def main():
     ordered = ([s for s in summaries if s["name"] == "default"] + under_test)
 
     opp_names = [o[0] for o in OPPONENTS]
-    header = f"{'config':>10} | {'pooled wr (95% CI)':>22} | {'Δ vs default (95% CI)':>24} | ms |"
+    header = f"{'config':>10} | {'pooled wr (95% CI)':>22} | {'delta vs default (95%CI)':>24} | ms |"
     header += " " + " ".join(f"{o[:6]:>6}" for o in opp_names)
     print("\n" + header)
     print("-" * len(header))
@@ -325,7 +344,7 @@ def main():
             (f"{(s['per_opp'][o]['win_rate'] or 0)*100:5.0f}%" if o in s["per_opp"] else "   -  ")
             for o in opp_names)
         print(f"{s['name']:>10} | {wr:>22} | {delta:>24} | {s['avg_ms']:3.0f} | {cells}")
-    print("\n(* = paired improvement over default is significant at 95%. Δ is mean "
+    print("\n(* = paired improvement over default is significant at 95%. delta is mean "
           "per-game score difference on identical seeds; +1 = win flipped from loss.)")
 
     # Persist full per-seed results + summaries; save the best config.
@@ -350,7 +369,7 @@ def main():
             {"name": winner["name"], "win_rate": winner["win_rate"],
              "paired_delta_vs_default": winner["paired_delta"], "config": best_cfg}, indent=2))
         print(f"\nWinner: {winner['name']}  ({winner['win_rate']*100:.1f}% pooled, "
-              f"Δ {winner['paired_delta']*100:+.1f} vs default)")
+              f"delta {winner['paired_delta']*100:+.1f} vs default)")
         print(f"Saved: {best_path.name}, {out_json.name}")
 
     # Leave config.json at the committed defaults, not the last config played.
