@@ -358,6 +358,8 @@ def main():
     args = p.parse_args()
     if args.features == "v3" and args.players != 4:
         raise SystemExit("--features v3 is the 4p redesign; pass --players 4")
+    # Relational features are always the exponential-decay definition now (the
+    # APHRODITE_VALUE_DECAY toggle was removed from value_net.rs).
     build(args.zip, args.out, args.workers, args.limit, args.players, args.keep_players, args.features)
 
 

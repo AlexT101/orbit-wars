@@ -5,22 +5,27 @@ Each zip in --replays-dir is one calendar day (e.g. `replays_5_14.zip`).
 Extracting every day at once is too much to hold in memory, so this driver
 processes one day per subprocess (memory is freed when each exits):
 
-  for each zip (oldest -> newest):
-      build_from_zip.py        zip            -> raw_<day>.npz
-      filter_top10_..(--filter-only)          -> top_<day>.npz   (small)
-      delete raw_<day>.npz
-  combine_npz.py  top_*.npz (chronological)   -> combined.npz   (`source` = day rank)
-  filter_top10_..(--no-filter --recency-halflife H)  -> model.json
+  for each zip (oldest -> newest, within --from-day/--to-day):
+      elo_topn.py      zip (outcomes only)     -> topn_<day>.json  (top-N by Elo, THIS day)
+      build_from_zip.py --keep-players topn     -> gated_<day>.npz  (only those players)
+  combine_npz.py  gated_*.npz (chronological)   -> combined.npz   (`source` = day rank)
+  train_xgb.py (--no-filter, Elo-weighted)      -> model.json
+
+The default gate is **elo-topn**: per day, keep only the top --top-n players by
+that day's Bradley-Terry Elo, then extract just their rows (so the costly Rust
+extraction never touches discarded rows). `--gate none` keeps every player and
+relies on the train-time Elo weight instead. (There is no win-rate gate.)
 
 Because the per-day files are combined oldest->newest, combine_npz's `source`
 column is the day rank, and --recency-halflife turns it into a per-sample
 weight (newest day = 1.0, halving every H days).
 
-Example (2p, top-10 per day, 7-day half-life):
+Example (2p, top-20 by Elo per day, last week, 7-day half-life):
 
     python train/build_ladder.py \
         --replays-dir ladder_replays --players 2 \
-        --recency-halflife 7 \
+        --gate elo-topn --top-n 20 --from-day 6_07 --to-day 6_13 \
+        --recency-halflife 7 --keep-temp \
         --model-out train/weights/xgb_2p.json
 """
 
@@ -55,17 +60,6 @@ def zip_date(path: Path, year: int) -> date:
     return date(year, int(m.group(1)), int(m.group(2)))
 
 
-def ramp_top_n(day: date, oldest: date, newest: date, n_start: int, n_end: int) -> int:
-    """Linearly interpolate top-N by calendar date: oldest day -> n_start,
-    newest day -> n_end (rounded). Gaps between zips are respected because the
-    interpolation is by actual days, not file index."""
-    span = (newest - oldest).days
-    if span <= 0:
-        return n_end
-    frac = (day - oldest).days / span
-    return int(round(n_start + frac * (n_end - n_start)))
-
-
 def run(cmd: list[str]) -> None:
     print(f"\n$ {' '.join(str(c) for c in cmd)}", flush=True)
     env = dict(os.environ, PYTHONUTF8="1")  # UTF-8 stdout in every child (emoji player names)
@@ -79,23 +73,28 @@ def main() -> None:
     p.add_argument("--model-out", required=True, type=Path)
     p.add_argument("--recency-halflife", type=float, default=0.0,
                    help="down-weight older days by 0.5 per this many days (0 = uniform)")
-    p.add_argument("--gate", choices=("both-topn", "strong-topn", "strong-median", "none"),
-                   default="none",
-                   help="per-day extraction gate. none (default): keep ALL players' rows and weight by "
-                        "Elo at train time (see --quality-floor). strong-topn / strong-median / both-topn: "
-                        "legacy top-N win-rate gates that drop rows before training.")
+    p.add_argument("--gate", choices=("elo-topn", "none"), default="elo-topn",
+                   help="per-day extraction gate. elo-topn (default): per day, keep only the "
+                        "top --top-n players by Bradley-Terry Elo (computed on THAT day alone via "
+                        "elo_topn.py), then extract just their rows (build_from_zip --keep-players). "
+                        "none: keep ALL players' rows and rely on the train-time Elo weight instead.")
+    p.add_argument("--top-n", type=int, default=20,
+                   help="elo-topn gate: top-N players by Elo to keep PER DAY (default 20).")
+    p.add_argument("--prior-strength", type=float, default=3.0,
+                   help="elo_topn Bradley-Terry Gamma-prior strength (shrinks few-game players).")
+    p.add_argument("--features", choices=("v2", "v3", "auto"), default="auto",
+                   help="feature extractor. auto (default): v2 for 2p, v3 for 4p. "
+                        "(v3 = 145-d summary_v3 + decisiveness aux; v2 = 65-d summary_v2.)")
+    p.add_argument("--from-day", default=None, metavar="M_DD",
+                   help="only process zips on/after this day (e.g. 6_07). Default: oldest available.")
+    p.add_argument("--to-day", default=None, metavar="M_DD",
+                   help="only process zips on/before this day (e.g. 6_13). Default: newest available.")
     p.add_argument("--quality-weight", action="store_true", default=True,
-                   help="soft-weight rows by player Elo at train time (default on). With --gate none this "
-                        "uses a Bradley-Terry rating fit over all players (--quality-metric rating).")
+                   help="soft-weight rows by player Elo at train time (default on); uses a "
+                        "Bradley-Terry rating fit (--quality-metric rating).")
     p.add_argument("--no-quality-weight", dest="quality_weight", action="store_false")
     p.add_argument("--quality-floor", type=float, default=0.05,
-                   help="weakest player's Elo weight (strongest = 1.0); exponential-decay shape.")
-    p.add_argument("--top-n-start", type=int, default=10,
-                   help="top-N for the OLDEST day (stricter on stale data)")
-    p.add_argument("--top-n-end", type=int, default=15,
-                   help="top-N for the NEWEST day; linearly ramped by date between the two")
-    p.add_argument("--top-n", type=int, default=None,
-                   help="force a constant top-N for every day (overrides the start/end ramp)")
+                   help="weakest kept player's Elo weight (strongest = 1.0); exponential-decay shape.")
     p.add_argument("--min-games", type=int, default=5)
     p.add_argument("--rounds", type=int, default=2000, help="max XGBoost boosting rounds (early stopping picks the real count)")
     p.add_argument("--early-stopping", type=int, default=50,
@@ -117,46 +116,62 @@ def main() -> None:
     if not zips:
         raise SystemExit(f"no zips found in {args.replays_dir}")
 
+    # Optional inclusive date-range filter (e.g. --from-day 6_07 --to-day 6_13).
+    def parse_day(s: str) -> date:
+        m = DATE_RE.search(s)
+        if not m:
+            raise SystemExit(f"cannot parse --from/--to-day '{s}' (expected M_DD)")
+        return date(args.year, int(m.group(1)), int(m.group(2)))
+
+    if args.from_day:
+        lo = parse_day(args.from_day)
+        zips = [z for z in zips if zip_date(z, args.year) >= lo]
+    if args.to_day:
+        hi = parse_day(args.to_day)
+        zips = [z for z in zips if zip_date(z, args.year) <= hi]
+    if not zips:
+        raise SystemExit("no zips left after the --from-day/--to-day filter")
+
     workdir = args.workdir or (HERE / "data" / f"{args.players}p" / "_ladder_work")
     workdir.mkdir(parents=True, exist_ok=True)
     py = sys.executable
 
-    oldest, newest = zip_date(zips[0], args.year), zip_date(zips[-1], args.year)
-    if args.top_n is not None:
-        n_start = n_end = args.top_n
-    else:
-        n_start, n_end = args.top_n_start, args.top_n_end
-    top_n_desc = f"{n_start}" if n_start == n_end else f"{n_start}->{n_end} (oldest->newest)"
+    gate_desc = f"elo-topn top-{args.top_n}/day" if args.gate == "elo-topn" else "none (all players)"
     print(f"ladder: {len(zips)} day(s) {zips[0].stem} .. {zips[-1].stem}  "
-          f"players={args.players}  top_n={top_n_desc}  halflife={args.recency_halflife}d")
+          f"players={args.players}  gate={gate_desc}  halflife={args.recency_halflife}d")
 
-    filtering = args.gate != "none"
+    elo_gate = args.gate == "elo-topn"
+    feats = args.features if args.features != "auto" else ("v3" if args.players == 4 else "v2")
+    print(f"  features={feats}  (relational decay always on)")
     per_day: list[Path] = []  # in chronological order -> source == day rank
     for z in zips:
-        out = workdir / (("gated_" if filtering else "raw_") + z.stem + ".npz")
+        out = workdir / (("gated_" if elo_gate else "raw_") + z.stem + ".npz")
         if args.resume and out.exists():
             print(f"[resume] {out.name} exists, skipping {z.name}")
             per_day.append(out)
             continue
 
-        n_day = ramp_top_n(zip_date(z, args.year), oldest, newest, n_start, n_end)
-        raw = workdir / ("raw_" + z.stem + ".npz")
-        build = [py, HERE / "build_from_zip.py", "--players", args.players,
-                 "--zip", z, "--out", raw]
+        if elo_gate:
+            # Phase 1: cheap outcome-only scan of THIS day's zip -> top-N by Elo.
+            topn_json = workdir / f"topn_{z.stem}.json"
+            elo_cmd = [py, HERE / "elo_topn.py", "--zip", z, "--players", args.players,
+                       "--top-n", args.top_n, "--min-games", args.min_games,
+                       "--prior-strength", args.prior_strength, "--out", topn_json]
+            if args.workers:
+                elo_cmd += ["--workers", args.workers]
+            run(elo_cmd)
+            # Phase 2: extract features for those players only.
+            build = [py, HERE / "build_from_zip.py", "--players", args.players,
+                     "--zip", z, "--out", out, "--keep-players", topn_json]
+        else:
+            build = [py, HERE / "build_from_zip.py", "--players", args.players,
+                     "--zip", z, "--out", out]
+        build += ["--features", feats]
         if args.workers:
             build += ["--workers", args.workers]
         if args.limit:
             build += ["--limit", args.limit]
         run(build)
-
-        if filtering:
-            print(f"[gate] {z.stem}: {args.gate} top-{n_day}")
-            run([py, HERE / "train_xgb.py",
-                 "--input", raw, "--top10-out", out, "--filter-only",
-                 "--gate", args.gate, "--top-n", n_day, "--min-games", args.min_games])
-            raw.unlink(missing_ok=True)
-        else:
-            raw.replace(out)
         per_day.append(out)
 
     combined = workdir / "combined.npz"
@@ -168,11 +183,10 @@ def main() -> None:
     if args.recency_halflife > 0:
         train += ["--recency-halflife", args.recency_halflife]
     if args.quality_weight:
-        train += ["--quality-weight", "--quality-floor", args.quality_floor]
-        # All-players flow (gate none): weight by Bradley-Terry Elo over every
-        # player, not the win_rate column (which only a strong-* gate records).
-        if not filtering:
-            train += ["--quality-metric", "rating"]
+        # Neither flow records a win_rate column anymore, so weight by a
+        # Bradley-Terry rating fit (over the kept rows' games) in all cases.
+        train += ["--quality-weight", "--quality-floor", args.quality_floor,
+                  "--quality-metric", "rating"]
     run(train)
 
     if not args.keep_temp:
