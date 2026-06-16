@@ -23,6 +23,7 @@ use crate::apollo::strategy;
 use crate::apollo::world::WorldState;
 use crate::sim::Action;
 use crate::{GameState, Planet, CENTER_X, CENTER_Y};
+use std::f64::consts::PI;
 
 fn to_apollo_planet_current(p: &Planet) -> APlanet {
     APlanet {
@@ -89,6 +90,13 @@ fn to_apollo_comets(state: &GameState) -> (Vec<ACometGroup>, Vec<i64>) {
         })
         .collect();
     (comets, comet_planet_ids)
+}
+
+#[inline]
+fn angular_distance(a: f64, b: f64) -> f64 {
+    let two_pi = 2.0 * PI;
+    let d = (a - b).rem_euclid(two_pi);
+    d.min(two_pi - d)
 }
 
 /// Build an apollo `EntityCache` from the leaf state. Orbiter geometry is fixed
@@ -283,7 +291,7 @@ fn recover_target(model: &strategy::HellburnerModel, from_id: i64, angle: f64, s
             continue;
         }
         if let Some((a, _, _, _, _)) = model.plan_shot(from_id, c, ships, 0) {
-            let d = (a - angle).abs();
+            let d = angular_distance(a, angle);
             if best.map_or(true, |(bd, _)| d < bd) {
                 best = Some((d, c));
             }
@@ -351,4 +359,17 @@ pub fn redirect_actions(state: &GameState, player: i32, actions: Vec<Action>) ->
         .collect();
     out.extend(passthrough);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::angular_distance;
+    use std::f64::consts::PI;
+
+    #[test]
+    fn angular_distance_treats_wrapped_angles_as_equal() {
+        let a = -PI + 1e-9;
+        let b = PI + 1e-9;
+        assert!(angular_distance(a, b) < 1e-12);
+    }
 }

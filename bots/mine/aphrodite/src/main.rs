@@ -58,6 +58,8 @@ fn main() -> io::Result<()> {
             }
         };
         let state = parse_state(&v);
+        // REQUIRED to make sure we set 4p mode correctly before any apollo code runs
+        aphrodite::apollo::constants::set_mode_for_alive(aphrodite::sim::alive_players(&state));
         if v.get("__cmd").and_then(Value::as_str) == Some("value") {
             let cache = aphrodite::apollo_bridge::rollout_cache(&state);
             let value = value_net::predict_with_cache(&state, state.player, &cache, None);

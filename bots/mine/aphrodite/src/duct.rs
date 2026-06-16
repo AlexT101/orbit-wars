@@ -820,6 +820,8 @@ pub fn best_move(
     overage_remaining_ms: f64,
     il_candidates: &[Action],
 ) -> Vec<Action> {
+    // REQUIRED to make sure we set 4p mode correctly before any apollo code runs
+    crate::apollo::constants::set_mode_for_alive(alive_players(state));
     // Build/refresh the persistent shared apollo cache before any candidate
     // generation or rollout reads it.
     refresh_cache(state);

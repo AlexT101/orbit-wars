@@ -371,17 +371,20 @@ pub fn predict_with_cache(
     Some(y as f64)
 }
 
-/// v2 summary feature set per user spec:
+/// v2 summary feature set (65-d, assembled in `extract_with_cache`):
 ///   per-player (×2 for me + enemy):
-///     [10 current]: ships_on_planets, ships_flying, n_static, n_orbit,
-///                   n_comet, prod_static, prod_orbit, prod_comet,
-///                   n_neutrals_closer_to_me, n_enemies_closer_to_me
-///     [ 9 extrap ]: same as above minus ships_flying
-///   neutral block (8 features):
+///     [9 current]: ships_on_planets, ships_flying, n_static, n_orbit,
+///                  n_comet, prod_static, prod_orbit,
+///                  n_neutrals_closer_to_me, n_enemies_closer_to_me
+///     [8 extrap ]: same as current minus ships_flying
+///       (prod_comet is omitted from both — comets always have production 1, so
+///       it duplicated n_comet; see `current_player_block`.)
+///   neutral block (7 features):
 ///     n_ships, n_static, n_orbit, n_comet,
-///     prod_static, prod_orbit, prod_comet, comet_time_before_gone
+///     prod_static, prod_orbit, comet_time_before_gone
+///   relational block (24 features): see `relational_block`.
 ///
-/// Total: 10 + 10 + 9 + 9 + 8 = 46.
+/// Total: 9 + 9 + 8 + 8 + 7 + 24 = 65 (= `DIM`).
 ///
 /// "Enemy" = any owner that is not me AND not -1 (handles 2P and 4P).
 /// Distances use the planet's current position (`planet.x`, `planet.y`)

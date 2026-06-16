@@ -157,11 +157,12 @@ impl<'a> WorldState<'a> {
         // Per-player ship totals (planets + in-flight fleets) → our lead over the
         // strongest single enemy. Neutral (owner -1) is excluded.
         let mut totals = [0.0f64; crate::apollo::constants::MAX_PLAYERS];
-        let add = |totals: &mut [f64; crate::apollo::constants::MAX_PLAYERS], owner: i64, ships: i64| {
-            if owner >= 0 && (owner as usize) < crate::apollo::constants::MAX_PLAYERS {
-                totals[owner as usize] += ships.max(0) as f64;
-            }
-        };
+        let add =
+            |totals: &mut [f64; crate::apollo::constants::MAX_PLAYERS], owner: i64, ships: i64| {
+                if owner >= 0 && (owner as usize) < crate::apollo::constants::MAX_PLAYERS {
+                    totals[owner as usize] += ships.max(0) as f64;
+                }
+            };
         for planet in &planets {
             add(&mut totals, planet.owner, planet.ships);
         }

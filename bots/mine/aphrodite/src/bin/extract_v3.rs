@@ -33,6 +33,10 @@ fn main() -> io::Result<()> {
             Err(_) => continue,
         };
         let state = parse_state(&v);
+        // Match the inference path: pressure features read `offset_lookahead`
+        // via the apollo MODE, so set it from the live player count here too
+        // (otherwise extraction would always use the 2p config).
+        aphrodite::apollo::constants::set_mode_for_alive(aphrodite::sim::alive_players(&state));
         let (feats, aux) = value_net::summary_features_v3::extract_with_aux(&state, state.player);
         out.write_all(&state.step.to_le_bytes())?;
         out.write_all(&state.player.to_le_bytes())?;
