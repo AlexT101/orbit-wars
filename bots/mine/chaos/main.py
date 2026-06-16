@@ -25,6 +25,7 @@ if chaos is running, the IL injection is running.
 Env knobs:
   CHAOS_IL_K            max IL candidates injected per turn (default 5)
   CHAOS_IL_MIN_PROB     drop IL suggestions below this policy prob (default 0.02)
+  CHAOS_IL_PLAYERS      comma-separated player counts to inject in (default 2)
   CHAOS_TURN_TARGET_MS  total per-turn wall target (default 700 dev / 1000 prod)
   CHAOS_IL_CHECKPOINT   override the IL checkpoint path
 """
@@ -121,6 +122,23 @@ def _il_min_prob() -> float:
     return float(os.environ.get("CHAOS_IL_MIN_PROB", "0.02"))
 
 
+def _il_players() -> set[int]:
+    raw = os.environ.get("CHAOS_IL_PLAYERS", "2")
+    out: set[int] = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            players = int(part)
+        except ValueError as exc:
+            raise ValueError(f"invalid CHAOS_IL_PLAYERS entry {part!r}; expected 2 or 4") from exc
+        if players not in (2, 4):
+            raise ValueError(f"invalid CHAOS_IL_PLAYERS entry {players}; expected 2 or 4")
+        out.add(players)
+    return out or {2}
+
+
 class _ILPolicy:
     """Loads the osteo IL transformer and yields top-k decoded actions."""
 
@@ -139,7 +157,8 @@ class _ILPolicy:
 
         # Same live-schema check as osteo-il-latest: a stale orbit_wars_model
         # build silently produces garbage features, so fail (soft) instead.
-        engine = OrbitWarsEngine(num_players=2)
+        warmup_players = 4 if 4 in _il_players() else 2
+        engine = OrbitWarsEngine(num_players=warmup_players)
         sample = engine.reset(seed=1)["observations"][0]
         feat = raw_encode_obs(sample, 0)
         tokens_shape = tuple(int(x) for x in feat.get("tokens_shape", ()))
@@ -232,9 +251,10 @@ def agent(obs, config=None):
             p["config"] = cfg
 
     t0 = time.perf_counter()
-    # The IL net is 2p-trained; 4p games run as pure aphrodite. Any IL error
-    # raises (fail loud) — no fallback.
-    if _aph._infer_num_players(p) == 2:
+    # The bundled checkpoint is 2p-trained. 4p injection is opt-in via
+    # CHAOS_IL_PLAYERS=4 or 2,4 so a 2p policy is not used in 4p by accident.
+    num_players = _aph._infer_num_players(p)
+    if num_players in _il_players():
         cands = _il().top_actions(p, _il_k(), _il_min_prob())
         if cands:
             p["il_candidates"] = cands

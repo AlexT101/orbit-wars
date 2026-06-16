@@ -25,8 +25,10 @@ keeps reused-subtree `children` indices valid.
 The field is optional: aphrodite's own wrapper never sends it, so the shared
 binary behaves identically for aphrodite.
 
-Scope (v1): root node only (per-node IL is ~1000x too slow), my side only,
-2p games only (the IL net is 2p-trained; 4p runs as pure aphrodite).
+Scope (v1): root node only (per-node IL is ~1000x too slow), my side only.
+The bundled checkpoint is 2p-trained, so Chaos injects IL in 2p by default.
+4p injection is supported only when you provide a 4p-trained checkpoint and set
+`CHAOS_IL_PLAYERS=4` or `CHAOS_IL_PLAYERS=2,4`.
 
 **Failures are loud:** a missing checkpoint, stale `orbit_wars_model` schema,
 IL runtime error, or dead binary raises immediately. If chaos is playing, the
@@ -55,11 +57,19 @@ the effective search budget at 900ms when the remaining overage pool is low.
 |---|---|---|
 | `CHAOS_IL_K` | 5 | max IL candidates injected per turn |
 | `CHAOS_IL_MIN_PROB` | 0.02 | drop IL suggestions below this policy prob |
+| `CHAOS_IL_PLAYERS` | 2 | comma-separated player counts where IL injection is enabled |
 | `CHAOS_TURN_TARGET_MS` | 700 dev / 1000 submission | total per-turn wall target (IL + search) |
 | `CHAOS_IL_CHECKPOINT` | repo checkpoint | override IL checkpoint path |
 
 `OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL ms + candidates) and
 `[chaos-il]` (Rust: offered/added/root_K) lines to stderr.
+
+## 4p IL training
+
+The policy IL tooling lives under `experimental_arch/imitation_learning`.
+`build_dataset_from_zips.py` can stream `ladder_replays/*.zip` into the chunked
+manifest format consumed by `train.py`; see that directory's README for the
+full 4p workflow.
 
 ## Future work
 

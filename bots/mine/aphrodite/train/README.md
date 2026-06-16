@@ -3,14 +3,18 @@
 We train **per-format XGBoost value nets** that aphrodite's DUCT search uses
 for leaf evaluation:
 
-- `weights/xgb_2p.json` — 2-player model (deployed)
-- `weights/xgb_4p.json` — 4-player model (deployed)
-- `weights/xgb_2p_old_top10.json` — legacy 2p model, kept only as the
-  last-resort fallback in `main.py` (never reached when the above exist)
+- `weights/xgb_2p_6_08_6_14.json` - current 2-player deployed model
+  (`main.py`'s `_WEIGHTS_2P_NAME`)
+- `weights/xgb_4p_6_08_6_14.json` - current 4-player deployed model
+  (`main.py`'s `_WEIGHTS_4P_NAME`)
+- `weights/xgb_2p.json` / `weights/xgb_4p.json` - convenient training/eval
+  aliases used by the commands below; promote a candidate by updating
+  `main.py`'s weight-name constants or by copying it to the active dated name.
 
-Each model is a `binary:logistic` gbtree over the 46-d **SummaryV2** features,
-trained on Kaggle ladder replays with **recency** and **player-strength**
-sample weighting. The whole flow is driven by `build_ladder.py`.
+Each model is a `binary:logistic` gbtree: 2p uses 65-d **SummaryV2** features,
+and the current 4p deployed model uses 145-d **SummaryV3** features. Training
+uses Kaggle ladder replays with **recency** and **player-strength** sample
+weighting. The whole flow is driven by `build_ladder.py`.
 
 All commands below run from the **repo root**. On Windows use the project venv
 interpreter `./venv/Scripts/python.exe`; on POSIX use `.venv/bin/python`.
@@ -223,21 +227,21 @@ budget you're oversubscribed (contention), which understates strength. Use
 
 ## 4. Promote a model
 
-`main.py` auto-selects weights by player count at runtime: `xgb_2p.json` for
-2p, `xgb_4p.json` for 4p, else the `xgb_2p_old_top10.json` fallback. So a
-trained model goes live simply by living at `weights/xgb_<2p|4p>.json`.
+`main.py` auto-selects weights by player count at runtime using its
+`_WEIGHTS_2P_NAME` and `_WEIGHTS_4P_NAME` constants. At the moment those point
+to `xgb_2p_6_08_6_14.json` and `xgb_4p_6_08_6_14.json`.
 
 Convention when replacing a deployed model: archive the old one under a
-descriptive name first, e.g.
+descriptive name first, then update the wrapper constant or copy the candidate
+to the active dated filename, e.g.
 
 ```bash
 cd bots/mine/aphrodite/train/weights
-mv xgb_2p.json xgb_2p_fast.json       # archive the outgoing model
-mv xgb_2p_candidate.json xgb_2p.json  # promote the winner
+cp xgb_2p_candidate.json xgb_2p_6_08_6_14.json
 ```
 
-`build_submission.py` bundles `xgb_2p.json` / `xgb_4p.json` (plus the fallback)
-into the Kaggle tarball.
+`build_submission.py` imports the filenames from `main.py` and bundles those
+active weights, plus `config.json` and `config_4p.json`, into the Kaggle tarball.
 
 ---
 
@@ -255,8 +259,9 @@ the 2p model:
 - **On by default at runtime**: `main.py` sets `APHRODITE_VALUE_NET_PATH_2P` to
   the resolved 2p net for every game. In a 2p game it just matches the primary
   (no behavior change); in 4p it engages once a position is down to two players.
-- Both nets consume the same 46-d SummaryV2 features, so no feature/extraction
-  changes are involved — only which booster scores the row.
+- The secondary 2p net can have a different supported feature width from the
+  primary 4p net; the Rust scorer detects the loaded model's input dimension and
+  extracts the matching feature set.
 
 To exercise it in eval, pass `--weights-2p` (see the 4p example in §3); the
 daemon sets the env var for that match. Without `--weights-2p`, eval runs the

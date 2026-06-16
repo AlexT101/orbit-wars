@@ -308,40 +308,28 @@ pub fn is_ready() -> bool {
     weights().is_some()
 }
 
-/// Number of players with at least one planet or in-flight fleet. Mirrors
-/// `apollo::helpers::count_alive_players`, but over the crate `GameState`
-/// types the value net works with.
-fn count_alive_players(state: &GameState) -> usize {
-    let mut alive = [false; 8];
-    for p in &state.planets {
-        if p.owner >= 0 && (p.owner as usize) < alive.len() {
-            alive[p.owner as usize] = true;
-        }
-    }
-    for f in &state.fleets {
-        if f.owner >= 0 && (f.owner as usize) < alive.len() {
-            alive[f.owner as usize] = true;
-        }
-    }
-    alive.iter().filter(|&&a| a).count()
-}
-
 /// Run the value net on `state` from `me`'s perspective, reusing a prebuilt
 /// apollo `EntityCache` (e.g. duct's per-search shared cache) for any aim-based
 /// features. Caller must have set the cache's current turn to `state.step`
 /// (duct's `with_cache_at` does this). Returns `None` if no weights are loaded.
 /// Output is in `[-1, 1]` — MY perspective.
+///
+/// `alive` is the number of players with at least one planet or in-flight fleet
+/// in `state` (e.g. `sim::alive_players`). Passed in rather than recomputed
+/// because hot callers already have it (they set the 2p/4p mode from the same
+/// count); it only selects the 2p value net, so any equivalent count works.
 pub fn predict_with_cache(
     state: &GameState,
     me: i32,
     cache: &EntityCache,
     l1: Option<&ShotL1>,
+    alive: usize,
 ) -> Option<f64> {
     // Once only two players are alive the position is effectively 2-player, so
     // score it with the dedicated 2p net when one is loaded. The count comes
     // from the evaluated state, so a 4p game's late 2-survivor leaves switch to
     // the 2p model automatically. Falls back to the primary net if no 2p net.
-    let two_left = count_alive_players(state) == 2;
+    let two_left = alive == 2;
     let m = if two_left {
         weights_2p().or_else(weights)
     } else {

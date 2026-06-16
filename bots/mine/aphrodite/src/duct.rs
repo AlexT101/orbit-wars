@@ -23,7 +23,15 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 const EXPLORATION: f64 = 0.3;
-const TERMINAL_STEP: i64 = 500;
+// A node is terminal once no further agent decision will be processed. The
+// engine processes moves for an incoming step S, ticks, then ends the game when
+// `S >= episodeSteps - 2` (498 for episodeSteps = 500) — see
+// kaggle_environments orbit_wars.py and rust_engine `step_with_actions`. So the
+// bot's last decided step is 498; `tick` advances that to step 499, which is the
+// scored terminal state. Search nodes are compared by their own (post-tick)
+// step, so the terminal threshold is 499: step-498 nodes are still decision
+// nodes (the final move), and their step-499 children are terminal.
+const TERMINAL_STEP: i64 = 499;
 const K_ROOT_DEFAULT: usize = 5;
 const K_NON_ROOT_DEFAULT: usize = 4;
 
@@ -559,6 +567,12 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     } else {
         K_NON_ROOT_DEFAULT
     };
+    // Track 2p/4p mode from THIS node's alive count, not the root's, so apollo
+    // candidate generation (offset_lookahead, reinforcement/pressure ratios,
+    // scoring) uses the config tuned for the node's actual player count: a 4p
+    // node that has collapsed to 1v1 generates with the 2p config. Mirrors the
+    // per-state mode the offline feature extractors set (extract_v2/v3).
+    crate::apollo::constants::set_mode_for_alive(alive_players(&node.state));
     let opp = dominant_enemy(&node.state, me).unwrap_or(1 - me);
     // Only the genuine root expansion runs apollo's early-game opening DFS;
     // every non-root node suppresses it (rollout_internal), mirroring apollo's
@@ -650,13 +664,20 @@ pub(crate) fn evaluate(state: &GameState, me: i32) -> f64 {
 }
 
 fn evaluate_inner(state: &GameState, me: i32) -> f64 {
+    // Score this leaf under the mode tuned for ITS alive count (not the root's),
+    // matching how the value net's training rows were featurized — extract_v2/v3
+    // call set_mode_for_alive per state. A 4p game collapsed to two survivors is
+    // thus scored with the 2p config/features it was trained under. The same
+    // count selects the 2p value net below, so compute it once here.
+    let alive = alive_players(state);
+    crate::apollo::constants::set_mode_for_alive(alive);
     maybe_dump_leaf(state, me);
     let __vn_t0 = std::time::Instant::now();
     // Reuse the persistent per-search EntityCache (geometry/aim) for value-net
     // feature extraction instead of building one per leaf. `with_cache_at` sets
     // the cache's current turn to this leaf's step before scoring.
     let __pred = with_cache_at(state.step, |cache| {
-        EVAL_L1.with(|l1| crate::value_net::predict_with_cache(state, me, cache, Some(l1)))
+        EVAL_L1.with(|l1| crate::value_net::predict_with_cache(state, me, cache, Some(l1), alive))
     });
     crate::profiling::add(&crate::profiling::VALUE_NET_NS, __vn_t0);
     crate::profiling::inc(&crate::profiling::VALUE_NET_CALLS);
@@ -665,9 +686,53 @@ fn evaluate_inner(state: &GameState, me: i32) -> f64 {
     __pred.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(0.0)
 }
 
+fn terminal_value(state: &GameState, me: i32) -> Option<f64> {
+    // Terminal conditions mirror the engine (rust_engine `step_with_actions`):
+    // a position is terminal once one or zero players remain OR the step horizon
+    // is reached. Players are scored by total ship count (planets + in-flight
+    // fleets).
+    //
+    // The OUTCOME, however, deliberately diverges from the engine's raw reward.
+    // The engine awards +1.0 to every co-leader (a tie for the lead is a shared
+    // win); we instead value a SOLE lead as a win (+1.0), a TIE for the lead as
+    // a draw (0.0), and anything else as a loss (-1.0). Rationale: a tie ranks
+    // below a clean win in the competition standings, so treating a guaranteed
+    // tie as neutral keeps the search pressing for a sole lead rather than
+    // settling. A board with no ships anywhere is a loss for all (best <= 0).
+    if alive_players(state) > 1 && state.step < TERMINAL_STEP {
+        return None;
+    }
+
+    let mut totals = [0i64; 32];
+    for p in &state.planets {
+        if p.owner >= 0 && p.owner < 32 {
+            totals[p.owner as usize] += p.ships.max(0);
+        }
+    }
+    for f in &state.fleets {
+        if f.owner >= 0 && f.owner < 32 {
+            totals[f.owner as usize] += f.ships.max(0);
+        }
+    }
+
+    let best = totals.iter().copied().max().unwrap_or(0);
+    if best <= 0 {
+        return Some(-1.0);
+    }
+    let my = if me >= 0 && me < 32 {
+        totals[me as usize]
+    } else {
+        0
+    };
+    if my != best {
+        return Some(-1.0);
+    }
+    let leaders = totals.iter().filter(|&&t| t == best).count();
+    Some(if leaders == 1 { 1.0 } else { 0.0 })
+}
+
 fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
-    if node.state.step >= TERMINAL_STEP || alive_players(&node.state) <= 1 {
-        let v = evaluate(&node.state, me);
+    if let Some(v) = terminal_value(&node.state, me) {
         node.visits += 1;
         return v;
     }
@@ -694,7 +759,7 @@ fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
         tick(&mut s);
         crate::profiling::add(&crate::profiling::TICK_NS, __tick_t0);
         crate::profiling::inc(&crate::profiling::TICK_CALLS);
-        let rollout_value = evaluate(&s, me);
+        let rollout_value = terminal_value(&s, me).unwrap_or_else(|| evaluate(&s, me));
         let __tree_t1 = std::time::Instant::now();
         let child = Node {
             state: s,
@@ -1069,4 +1134,87 @@ pub fn best_move(
         });
     }
     chosen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GameState, Planet};
+
+    fn planet(id: i64, owner: i32, ships: i64) -> Planet {
+        Planet {
+            id,
+            owner,
+            x: 10.0 + id as f64,
+            y: 10.0,
+            radius: 1.0,
+            ships,
+            production: 1,
+            orbital_radius: 0.0,
+            initial_angle: 0.0,
+            is_orbiting: false,
+            is_comet: false,
+        }
+    }
+
+    fn state(step: i64, planets: Vec<Planet>) -> GameState {
+        GameState {
+            player: 0,
+            step,
+            planets,
+            fleets: Vec::new(),
+            angular_velocity: 0.03,
+            comets: Vec::new(),
+            max_speed: 6.0,
+            comet_speed: 4.0,
+        }
+    }
+
+    #[test]
+    fn terminal_value_hard_scores_elimination() {
+        assert_eq!(
+            terminal_value(&state(42, vec![planet(0, 0, 10)]), 0),
+            Some(1.0)
+        );
+        assert_eq!(
+            terminal_value(&state(42, vec![planet(1, 1, 10)]), 0),
+            Some(-1.0)
+        );
+    }
+
+    #[test]
+    fn terminal_value_scores_final_step_by_ship_lead() {
+        // Strict lead wins, strictly behind loses.
+        assert_eq!(
+            terminal_value(
+                &state(TERMINAL_STEP, vec![planet(0, 0, 12), planet(1, 1, 8)]),
+                0
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            terminal_value(
+                &state(TERMINAL_STEP, vec![planet(0, 0, 8), planet(1, 1, 12)]),
+                0
+            ),
+            Some(-1.0)
+        );
+        // A tie for the lead is a draw (0.0): we deliberately value a sole lead
+        // above a shared one, unlike the engine's raw +1.0-to-all-co-leaders.
+        assert_eq!(
+            terminal_value(
+                &state(TERMINAL_STEP, vec![planet(0, 0, 10), planet(1, 1, 10)]),
+                0
+            ),
+            Some(0.0)
+        );
+        // A board with no ships at the horizon is a loss for everyone.
+        assert_eq!(
+            terminal_value(
+                &state(TERMINAL_STEP, vec![planet(0, 0, 0), planet(1, 1, 0)]),
+                0
+            ),
+            Some(-1.0)
+        );
+    }
 }

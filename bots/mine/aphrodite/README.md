@@ -6,10 +6,12 @@ generator and final redirect pass, with a fixed-extrapolation XGBoost value net.
 ## Runtime
 
 `main.py` is the Kaggle/dev wrapper. It launches the Rust `aphrodite` daemon
-and pins leaf evaluation to the fixed XGB model:
+and pins leaf evaluation to the current fixed XGB models:
 
-- `APHRODITE_VALUE_NET_PATH` -> `train/weights/xgb_2p.json`,
-  `train/weights/xgb_4p.json`, or fallback `train/weights/xgb_2p_old_top10.json`
+- 2p: `train/weights/xgb_2p_6_08_6_14.json`
+- 4p: `train/weights/xgb_4p_6_08_6_14.json`
+- 4p late 1v1 leaves also get `APHRODITE_VALUE_NET_PATH_2P` pointing at the
+  2p model.
 
 The corrected fleet extrapolation is now the Rust default.
 
@@ -32,22 +34,16 @@ The bundle contains only:
 
 - `main.py`
 - `aphrodite`
-- `xgb_2p_old_top10.json`
-- optional `xgb_2p.json` / `xgb_4p.json`
+- `xgb_2p_6_08_6_14.json`
+- `xgb_4p_6_08_6_14.json`
+- `config.json`
+- `config_4p.json`
 
 ## Training
 
 The remaining training tree is focused on replay/data collection, SummaryV2
-feature extraction, and training/rebuilding `xgb_2p_old_top10.json`.
-
-Typical fixed-XGB rebuild path:
-
-```bash
-python train/train_xgb.py \
-  --input train/data/2p/old_top10.npz \
-  --top10-out train/data/2p/old_top10_rebuilt.npz \
-  --model-out train/weights/xgb_2p_old_top10.json
-```
+feature extraction for 2p, SummaryV3 feature extraction for 4p, and XGBoost
+training. See `train/README.md` for the full ladder pipeline.
 
 Train from an already-combined/gated dataset (full preprocessing):
 
@@ -59,8 +55,8 @@ python train/train_xgb.py \
   --rounds 2000 --model-out train/weights/xgb_2p.json
 ```
 
-For 4p replay extraction, pass `--players 4` to `build_from_zip.py`,
-`from_replays_fast.py`, or `collect.py`, then train `train/weights/xgb_4p.json`.
+For 4p replay extraction, pass `--players 4` to `build_from_zip.py` or
+`collect.py`, then train the 4p model.
 
-Useful support scripts include `collect.py`, `from_replays_fast.py`,
-`build_from_zip.py`, and `feature_importance.py`.
+Useful support scripts include `collect.py`, `build_from_zip.py`,
+`build_ladder.py`, `eval.py`, and `feature_importance.py`.

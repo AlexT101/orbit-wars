@@ -313,6 +313,9 @@ pub fn redirect_actions(state: &GameState, player: i32, actions: Vec<Action>) ->
     if actions.is_empty() {
         return actions;
     }
+    // The search left MODE at whatever its last leaf's alive count was; restamp
+    // from the real root state so apollo's redirect uses the right 2p/4p config.
+    crate::apollo::constants::set_mode_for_alive(crate::sim::alive_players(state));
     let mut cache = rollout_cache(state);
     cache.set_current_turn(state.step);
 
