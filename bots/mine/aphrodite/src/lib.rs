@@ -3,7 +3,6 @@
 pub mod apollo;
 pub mod apollo_bridge;
 pub mod duct;
-pub mod ow2_plan;
 pub mod pathing;
 pub mod profiling;
 pub mod sim;
@@ -138,13 +137,13 @@ pub fn as_i64(v: &Value) -> Option<i64> {
 }
 
 pub fn parse_state(v: &Value) -> GameState {
-    let player = v["player"].as_i64().unwrap_or(0) as i32;
-    let step = v["step"].as_i64().unwrap_or(0);
+    let player = as_i64(&v["player"]).unwrap_or(0) as i32;
+    let step = as_i64(&v["step"]).unwrap_or(0);
     let angular_velocity = v["angular_velocity"].as_f64().unwrap_or(0.0);
 
     let comet_ids: std::collections::HashSet<i64> = v["comet_planet_ids"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+        .map(|a| a.iter().filter_map(as_i64).collect())
         .unwrap_or_default();
 
     let initial_pos: HashMap<i64, (f64, f64)> = v["initial_planets"]
@@ -153,7 +152,7 @@ pub fn parse_state(v: &Value) -> GameState {
             a.iter()
                 .filter_map(|p| {
                     let arr = p.as_array()?;
-                    let id = arr.get(0)?.as_i64()?;
+                    let id = as_i64(arr.get(0)?)?;
                     let x = as_f64(arr.get(2)?);
                     let y = as_f64(arr.get(3)?);
                     Some((id, (x, y)))
@@ -228,7 +227,7 @@ pub fn parse_state(v: &Value) -> GameState {
                     let pids = g["planet_ids"]
                         .as_array()?
                         .iter()
-                        .filter_map(|x| x.as_i64())
+                        .filter_map(as_i64)
                         .collect();
                     let paths = g["paths"]
                         .as_array()?
@@ -245,7 +244,7 @@ pub fn parse_state(v: &Value) -> GameState {
                             )
                         })
                         .collect();
-                    let path_index = g["path_index"].as_i64()?;
+                    let path_index = as_i64(&g["path_index"])?;
                     Some(CometGroup {
                         planet_ids: pids,
                         paths,
@@ -275,5 +274,49 @@ pub fn parse_state(v: &Value) -> GameState {
         comets,
         max_speed,
         comet_speed,
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_state_accepts_float_shaped_integer_metadata() {
+        let v = json!({
+            "player": 1.0,
+            "step": 12.0,
+            "angular_velocity": 0.03,
+            "comet_planet_ids": [33.0],
+            "initial_planets": [
+                [0.0, 0.0, 60.0, 50.0, 1.5, 10.0, 1.0],
+                [33.0, -1.0, 5.0, 6.0, 1.0, 1.0, 1.0]
+            ],
+            "planets": [
+                [0.0, 0.0, 50.0, 60.0, 1.5, 10.0, 1.0],
+                [33.0, -1.0, 5.0, 6.0, 1.0, 1.0, 1.0]
+            ],
+            "fleets": [],
+            "comets": [{
+                "planet_ids": [33.0],
+                "paths": [[[5.0, 6.0], [7.0, 8.0]]],
+                "path_index": 1.0
+            }]
+        });
+
+        let state = parse_state(&v);
+        assert_eq!(state.player, 1);
+        assert_eq!(state.step, 12);
+
+        let orbiting = state.planets.iter().find(|p| p.id == 0).unwrap();
+        assert!((orbiting.orbital_radius - 10.0).abs() < 1e-9);
+        assert!(orbiting.initial_angle.abs() < 1e-9);
+
+        let comet = state.planets.iter().find(|p| p.id == 33).unwrap();
+        assert!(comet.is_comet);
+        assert_eq!(state.comets.len(), 1);
+        assert_eq!(state.comets[0].planet_ids, vec![33]);
+        assert_eq!(state.comets[0].path_index, 1);
     }
 }

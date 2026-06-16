@@ -35,7 +35,7 @@
 
 use crate::apollo::cache::EntityCache;
 use crate::apollo::world::ShotL1;
-use crate::ow2_plan::cached_predict_fleet_collision;
+use crate::pathing::predict_fleet_collision;
 use crate::{GameState, Planet};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -108,7 +108,7 @@ fn pack_object(
 pub fn extrapolate_fleets(state: &GameState) -> HashMap<i64, (i32, i64)> {
     let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
     for fleet in &state.fleets {
-        if let Some((pid, dt)) = cached_predict_fleet_collision(fleet, state) {
+        if let Some((pid, dt)) = predict_fleet_collision(fleet, state) {
             arrivals
                 .entry(pid)
                 .or_default()
@@ -463,7 +463,7 @@ pub mod summary_features_v2 {
         // In-flight fleet arrivals: dest planet id -> (owner, ships, eta).
         let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::new();
         for f in &state.fleets {
-            if let Some((pid, dt)) = cached_predict_fleet_collision(f, state) {
+            if let Some((pid, dt)) = predict_fleet_collision(f, state) {
                 arrivals
                     .entry(pid)
                     .or_default()
@@ -1318,7 +1318,7 @@ pub mod summary_features_v3 {
         // (static pressure from each owner's planets + ETA-weighted inbound fleets).
         let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::new();
         for f in &state.fleets {
-            if let Some((pid, dt)) = cached_predict_fleet_collision(f, state) {
+            if let Some((pid, dt)) = predict_fleet_collision(f, state) {
                 arrivals
                     .entry(pid)
                     .or_default()
@@ -1416,7 +1416,7 @@ pub mod summary_features_v3 {
                 continue;
             }
             total_inflight += f.ships as f32;
-            if let Some((pid, _dt)) = cached_predict_fleet_collision(f, state) {
+            if let Some((pid, _dt)) = predict_fleet_collision(f, state) {
                 let towner = extrap_owner_target(planets, pid);
                 let dst = if towner >= 0 && (towner as usize) < NP {
                     towner as usize

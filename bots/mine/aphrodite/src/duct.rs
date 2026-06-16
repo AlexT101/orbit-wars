@@ -14,7 +14,7 @@
 //!   - Tree depth is half (no MyTurn/EnemyTurn alternation)
 
 use crate::sim::{alive_players, apply_launches, tick, Action};
-use crate::{ow2_plan, GameState};
+use crate::GameState;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
@@ -303,6 +303,11 @@ struct Node {
     /// (my_idx, opp_idx) -> joint child subtree
     children: HashMap<(usize, usize), Box<Node>>,
     candidates_initialized: bool,
+    /// Whether the current candidate arrays were generated with root-only
+    /// policy enabled (`K_ROOT_DEFAULT`, opening DFS allowed). A searched child
+    /// can become next turn's real root through tree reuse; in that case we must
+    /// rebuild candidates as root candidates rather than keep its non-root set.
+    candidates_root: bool,
 }
 
 fn rank_prior(rank: usize, total: usize) -> f64 {
@@ -311,53 +316,13 @@ fn rank_prior(rank: usize, total: usize) -> f64 {
     raw / z
 }
 
-fn enumerate_alternatives_strong(state: &GameState, player: i32, k: usize) -> Vec<Vec<Action>> {
-    let greedy = ow2_plan::plan(state, player, false);
-    let mut out: Vec<Vec<Action>> = vec![greedy];
-    for tgt in &state.planets {
-        if tgt.owner == player {
-            continue;
-        }
-        if out.len() >= k {
-            break;
-        }
-        let alt = ow2_plan::plan_with_exclusion(state, player, false, Some(tgt.id));
-        if !out.iter().any(|a| actions_equal(a, &alt)) {
-            out.push(alt);
-        }
-    }
-    if out.len() < k && !out.iter().any(|a| a.is_empty()) {
-        out.push(Vec::new());
-    }
-    out
-}
-
-fn enumerate_alternatives(
-    state: &GameState,
-    player: i32,
-    k: usize,
-    rollout_internal: bool,
-) -> Vec<Vec<Action>> {
-    let __apollo_t0 = std::time::Instant::now();
-    let mut alts = with_cache_at(state.step, |cache| {
-        crate::apollo_bridge::apollo_candidates(state, player, cache, rollout_internal)
-    });
-    crate::profiling::add(&crate::profiling::APOLLO_CANDIDATES_NS, __apollo_t0);
-    crate::profiling::inc(&crate::profiling::APOLLO_CANDIDATES_CALLS);
-    if !alts.is_empty() {
-        alts.truncate(k);
-        return alts;
-    }
-    enumerate_alternatives_strong(state, player, k)
-}
-
 /// Candidate sets for both players at `state`. Fast path: when apollo candidates
 /// are the active generator for both (the default — no focused override), build
 /// the player-agnostic `Simulator` + arrival ledger once and derive both sets
 /// from it via [`crate::apollo_bridge::apollo_candidates_pair`], so the
-/// `HORIZON`-turn ledger walk is paid once instead of per player. Falls back to
-/// the per-player [`enumerate_alternatives`] when focused candidates are enabled
-/// or apollo yields nothing for a side.
+/// `HORIZON`-turn ledger walk is paid once instead of per player. Apollo's
+/// generator is expected to emit at least a no-op candidate; if an unexpected
+/// empty side slips through, use no-op rather than the old ow2 fallback.
 ///
 /// `rollout_internal` is forwarded to apollo so the early-game opening DFS only
 /// runs at the genuine root node and stands down at every non-root expansion
@@ -372,17 +337,15 @@ fn enumerate_pair(
     let (mut my, mut op) = with_cache_at(state.step, |cache| {
         crate::apollo_bridge::apollo_candidates_pair(state, me, opp, cache, rollout_internal)
     });
-    if !my.is_empty() && !op.is_empty() {
-        my.truncate(k);
-        op.truncate(k);
-        return (my, op);
+    if my.is_empty() {
+        my.push(Vec::new());
     }
-    // One side empty: fall back to per-player generation so the ow2 fallback can
-    // fill the missing side.
-    (
-        enumerate_alternatives(state, me, k, rollout_internal),
-        enumerate_alternatives(state, opp, k, rollout_internal),
-    )
+    if op.is_empty() {
+        op.push(Vec::new());
+    }
+    my.truncate(k);
+    op.truncate(k);
+    (my, op)
 }
 
 /// Splice externally supplied single-launch candidates (the chaos IL policy's
@@ -523,10 +486,73 @@ fn select_opp(node: &Node) -> usize {
     best_i
 }
 
+fn remap_candidate_state(
+    old_my_candidates: Vec<Vec<Action>>,
+    old_my_stats: Vec<ActionStats>,
+    old_opp_candidates: Vec<Vec<Action>>,
+    old_opp_stats: Vec<ActionStats>,
+    old_children: HashMap<(usize, usize), Box<Node>>,
+    new_my_candidates: &[Vec<Action>],
+    new_my_stats: &mut [ActionStats],
+    new_opp_candidates: &[Vec<Action>],
+    new_opp_stats: &mut [ActionStats],
+) -> (HashMap<(usize, usize), Box<Node>>, u32) {
+    let mut my_map: Vec<Option<usize>> = vec![None; old_my_candidates.len()];
+    for (old_i, old) in old_my_candidates.iter().enumerate() {
+        if let Some(new_i) = new_my_candidates
+            .iter()
+            .position(|new| actions_equal(old, new))
+        {
+            my_map[old_i] = Some(new_i);
+            if let Some(st) = old_my_stats.get(old_i) {
+                new_my_stats[new_i] = st.clone();
+            }
+        }
+    }
+
+    let mut opp_map: Vec<Option<usize>> = vec![None; old_opp_candidates.len()];
+    for (old_i, old) in old_opp_candidates.iter().enumerate() {
+        if let Some(new_i) = new_opp_candidates
+            .iter()
+            .position(|new| actions_equal(old, new))
+        {
+            opp_map[old_i] = Some(new_i);
+            if let Some(st) = old_opp_stats.get(old_i) {
+                new_opp_stats[new_i] = st.clone();
+            }
+        }
+    }
+
+    let mut new_children = HashMap::new();
+    for ((old_my, old_opp), child) in old_children {
+        let Some(Some(new_my)) = my_map.get(old_my) else {
+            continue;
+        };
+        let Some(Some(new_opp)) = opp_map.get(old_opp) else {
+            continue;
+        };
+        new_children.insert((*new_my, *new_opp), child);
+    }
+
+    let visits = new_my_stats.iter().map(|st| st.visits).sum();
+    (new_children, visits)
+}
+
 fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
-    if node.candidates_initialized {
+    if node.candidates_initialized && (!root || node.candidates_root) {
         return;
     }
+    let old = if node.candidates_initialized {
+        Some((
+            std::mem::take(&mut node.my_candidates),
+            std::mem::take(&mut node.my_stats),
+            std::mem::take(&mut node.opp_candidates),
+            std::mem::take(&mut node.opp_stats),
+            std::mem::take(&mut node.children),
+        ))
+    } else {
+        None
+    };
     let __ec_t0 = std::time::Instant::now();
     let k = if root {
         K_ROOT_DEFAULT
@@ -556,21 +582,41 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     let opp_n = opp_alts.len();
     node.my_priors = (0..my_n).map(|i| rank_prior(i, my_n)).collect();
     node.opp_priors = (0..opp_n).map(|i| rank_prior(i, opp_n)).collect();
-    node.my_stats = (0..my_n)
+    let mut my_stats: Vec<ActionStats> = (0..my_n)
         .map(|_| ActionStats {
             visits: 0,
             sum_value: 0.0,
         })
         .collect();
-    node.opp_stats = (0..opp_n)
+    let mut opp_stats: Vec<ActionStats> = (0..opp_n)
         .map(|_| ActionStats {
             visits: 0,
             sum_value: 0.0,
         })
         .collect();
+    if let Some((old_my, old_my_stats, old_opp, old_opp_stats, old_children)) = old {
+        let (children, visits) = remap_candidate_state(
+            old_my,
+            old_my_stats,
+            old_opp,
+            old_opp_stats,
+            old_children,
+            &my_alts,
+            &mut my_stats,
+            &opp_alts,
+            &mut opp_stats,
+        );
+        node.children = children;
+        node.visits = visits;
+    } else {
+        node.children.clear();
+    }
+    node.my_stats = my_stats;
+    node.opp_stats = opp_stats;
     node.my_candidates = my_alts;
     node.opp_candidates = opp_alts;
     node.candidates_initialized = true;
+    node.candidates_root = root;
     crate::profiling::add(&crate::profiling::ENSURE_CANDIDATES_NS, __ec_t0);
     crate::profiling::inc(&crate::profiling::ENSURE_CANDIDATES_CALLS);
 }
@@ -662,6 +708,7 @@ fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
             other_launches: Vec::new(),
             children: HashMap::new(),
             candidates_initialized: false,
+            candidates_root: false,
         };
         node.children.insert((my_idx, opp_idx), Box::new(child));
         crate::profiling::add(&crate::profiling::TREE_OPS_NS, __tree_t1);
@@ -809,6 +856,7 @@ pub fn best_move(
             other_launches: Vec::new(),
             children: HashMap::new(),
             candidates_initialized: false,
+            candidates_root: false,
         },
     };
     ensure_candidates(&mut root, me, true);

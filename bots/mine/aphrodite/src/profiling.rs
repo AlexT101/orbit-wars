@@ -6,10 +6,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-pub static FOCUSED_CANDIDATES_NS: AtomicU64 = AtomicU64::new(0);
-pub static FOCUSED_CANDIDATES_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static PLAN_FOR_TARGET_NS: AtomicU64 = AtomicU64::new(0);
-pub static PLAN_FOR_TARGET_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static APPLY_LAUNCHES_NS: AtomicU64 = AtomicU64::new(0);
 pub static TICK_NS: AtomicU64 = AtomicU64::new(0);
 pub static TICK_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -33,10 +29,6 @@ pub static ITERATIONS: AtomicU64 = AtomicU64::new(0);
 
 pub fn reset() {
     for c in [
-        &FOCUSED_CANDIDATES_NS,
-        &FOCUSED_CANDIDATES_CALLS,
-        &PLAN_FOR_TARGET_NS,
-        &PLAN_FOR_TARGET_CALLS,
         &APPLY_LAUNCHES_NS,
         &TICK_NS,
         &TICK_CALLS,
@@ -84,11 +76,6 @@ pub fn dump(step: i64, player: i32) {
         }
     };
 
-    let fc = (
-        load(&FOCUSED_CANDIDATES_NS),
-        load(&FOCUSED_CANDIDATES_CALLS),
-    );
-    let pft = (load(&PLAN_FOR_TARGET_NS), load(&PLAN_FOR_TARGET_CALLS));
     let al = load(&APPLY_LAUNCHES_NS);
     let tick = (load(&TICK_NS), load(&TICK_CALLS));
     let vn = (load(&VALUE_NET_NS), load(&VALUE_NET_CALLS));
@@ -107,8 +94,6 @@ pub fn dump(step: i64, player: i32) {
         "[prof p{} step={} iters={}] total={:.1}ms  \
          ensure_cands={:.1}ms({:.1}%, n={})  \
          apollo_cands={:.1}ms({:.1}%, n={})  \
-         focused_cands={:.1}ms({:.1}%, n={})  \
-         plan_for_target={:.1}ms({:.1}%, n={})  \
          selection={:.1}ms({:.1}%, n={})  \
          tree_ops={:.1}ms({:.1}%, n={})  \
          apply_launches={:.1}ms({:.1}%)  \
@@ -127,12 +112,6 @@ pub fn dump(step: i64, player: i32) {
         ms(ac.0),
         pct(ac.0),
         ac.1,
-        ms(fc.0),
-        pct(fc.0),
-        fc.1,
-        ms(pft.0),
-        pct(pft.0),
-        pft.1,
         ms(sel.0),
         pct(sel.0),
         sel.1,
