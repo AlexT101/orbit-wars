@@ -684,6 +684,7 @@ fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
 }
 
 fn state_hash(state: &GameState) -> u64 {
+    let q = |v: f64| (v * 10_000.0).round() as i64;
     let mut h: u64 = state.step as u64;
     for p in &state.planets {
         h = h.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(p.id as u64);
@@ -704,6 +705,15 @@ fn state_hash(state: &GameState) -> u64 {
         h = h
             .wrapping_mul(0x9e3779b97f4a7c15)
             .wrapping_add(f.ships as u64);
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(q(f.x) as u64);
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(q(f.y) as u64);
+        h = h
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(q(f.angle) as u64);
     }
     h
 }
