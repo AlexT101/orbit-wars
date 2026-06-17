@@ -34,6 +34,9 @@ const EXPLORATION: f64 = 0.3;
 const TERMINAL_STEP: i64 = 499;
 const K_ROOT_DEFAULT: usize = 5;
 const K_NON_ROOT_DEFAULT: usize = 4;
+/// Minimum root expansions to spend on each newly-added IL candidate, by IL
+/// rank. Change to e.g. `&[4, 2, 1]` to seed the third injected candidate too.
+const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
 
 // ── overage-time budgeting ────────────────────────────────────────────────
 // When enabled (a nonzero `overage_remaining_ms` is passed into `best_move`, DUCT may
@@ -364,7 +367,7 @@ fn enumerate_pair(
 /// per virtual slot (apollo#0, il#0, apollo#1, il#1, …), which preserves the
 /// apollo candidates' existing 0.5-per-rank ratios exactly while giving il#j
 /// the geometric mean of apollo#j and apollo#j+1.
-fn inject_root_candidates(node: &mut Node, extra: &[Action]) -> usize {
+fn inject_root_candidates(node: &mut Node, extra: &[Action]) -> (usize, usize) {
     let base_n = node.my_candidates.len();
     for &a in extra {
         let plan = vec![a];
@@ -379,7 +382,7 @@ fn inject_root_candidates(node: &mut Node, extra: &[Action]) -> usize {
     }
     let added = node.my_candidates.len() - base_n;
     if added == 0 {
-        return 0;
+        return (base_n, 0);
     }
     let half = std::f64::consts::FRAC_1_SQRT_2;
     let mut raw: Vec<f64> = Vec::with_capacity(node.my_candidates.len());
@@ -391,7 +394,7 @@ fn inject_root_candidates(node: &mut Node, extra: &[Action]) -> usize {
     }
     let z: f64 = raw.iter().sum();
     node.my_priors = raw.into_iter().map(|w| w / z).collect();
-    added
+    (base_n, added)
 }
 
 fn actions_equal(a: &[Action], b: &[Action]) -> bool {
@@ -732,13 +735,24 @@ fn terminal_value(state: &GameState, me: i32) -> Option<f64> {
 }
 
 fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
+    select_and_expand_forced_my(node, me, is_root, None)
+}
+
+fn select_and_expand_forced_my(
+    node: &mut Node,
+    me: i32,
+    is_root: bool,
+    forced_my_idx: Option<usize>,
+) -> f64 {
     if let Some(v) = terminal_value(&node.state, me) {
         node.visits += 1;
         return v;
     }
     ensure_candidates(node, me, is_root);
     let __sel_t0 = std::time::Instant::now();
-    let my_idx = select_my(node);
+    let my_idx = forced_my_idx
+        .filter(|&i| i < node.my_candidates.len())
+        .unwrap_or_else(|| select_my(node));
     let opp_idx = select_opp(node);
     crate::profiling::add(&crate::profiling::SELECTION_NS, __sel_t0);
     crate::profiling::inc(&crate::profiling::SELECTION_CALLS);
@@ -793,6 +807,34 @@ fn select_and_expand(node: &mut Node, me: i32, is_root: bool) -> f64 {
     crate::profiling::add(&crate::profiling::BACKPROP_NS, __bp_t0);
     crate::profiling::inc(&crate::profiling::BACKPROP_CALLS);
     value
+}
+
+fn run_forced_root_visits(
+    root: &mut Node,
+    me: i32,
+    first_il_idx: usize,
+    il_added: usize,
+    deadline: Instant,
+    iters: &mut u32,
+    max_iters: u32,
+) -> u32 {
+    let mut forced = 0u32;
+    for (rank, &target_visits) in IL_FORCED_VISITS.iter().enumerate().take(il_added) {
+        let idx = first_il_idx + rank;
+        while root
+            .my_stats
+            .get(idx)
+            .map(|st| st.visits < target_visits)
+            .unwrap_or(false)
+            && Instant::now() < deadline
+            && *iters < max_iters
+        {
+            select_and_expand_forced_my(root, me, true, Some(idx));
+            *iters += 1;
+            forced += 1;
+        }
+    }
+    forced
 }
 
 fn state_hash(state: &GameState) -> u64 {
@@ -927,15 +969,17 @@ pub fn best_move(
         },
     };
     ensure_candidates(&mut root, me, true);
+    let mut il_first_idx = 0usize;
+    let mut il_added = 0usize;
     if !il_candidates.is_empty() {
-        let added = inject_root_candidates(&mut root, il_candidates);
+        (il_first_idx, il_added) = inject_root_candidates(&mut root, il_candidates);
         if std::env::var("OW_DEBUG").is_ok() {
             eprintln!(
                 "[chaos-il] step={} player={} il_offered={} il_added={} root_K={}",
                 state.step,
                 me,
                 il_candidates.len(),
-                added,
+                il_added,
                 root.my_candidates.len()
             );
         }
@@ -951,6 +995,25 @@ pub fn best_move(
     LEAVES_THIS_SEARCH.with(|c| c.set(0));
     let deadline = Instant::now() + std::time::Duration::from_millis(budget_ms);
     let mut iters = 0u32;
+    let il_forced_iters = if il_added > 0 {
+        run_forced_root_visits(
+            &mut root,
+            me,
+            il_first_idx,
+            il_added,
+            deadline,
+            &mut iters,
+            100_000,
+        )
+    } else {
+        0
+    };
+    if il_forced_iters > 0 && std::env::var("OW_DEBUG").is_ok() {
+        eprintln!(
+            "[chaos-il-seed] step={} player={} forced_iters={} schedule={:?}",
+            state.step, me, il_forced_iters, IL_FORCED_VISITS
+        );
+    }
     while Instant::now() < deadline {
         select_and_expand(&mut root, me, true);
         iters += 1;
