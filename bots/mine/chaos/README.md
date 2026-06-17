@@ -26,9 +26,10 @@ The field is optional: aphrodite's own wrapper never sends it, so the shared
 binary behaves identically for aphrodite.
 
 Scope (v1): root node only (per-node IL is ~1000x too slow), my side only.
-The source default injects IL in 2p only. Submission builds can enable both 2p
-and 4p by default and bundle separate checkpoints for each player count, so the
-4p Isaiah policy is not used in 2p games.
+IL injection runs in 2p games only. A native 4p game plays as pure aphrodite (no
+IL); if it decays to two surviving players, the 2p checkpoint loads lazily on
+that turn and IL resumes. (4p IL was tried and regressed chaos, so the 4p Isaiah
+policy is no longer bundled or loaded.)
 
 **Failures are loud:** a missing checkpoint, stale `orbit_wars_model` schema,
 IL runtime error, or dead binary raises immediately. If chaos is playing, the
@@ -57,21 +58,41 @@ the effective search budget at 900ms when the remaining overage pool is low.
 |---|---|---|
 | `CHAOS_IL_K` | 5 | max IL candidates injected per turn |
 | `CHAOS_IL_MIN_PROB` | 0.02 | drop IL suggestions below this policy prob |
-| `CHAOS_IL_PLAYERS` | 2 | comma-separated player counts where IL injection is enabled; 4p test bundles default this to `2,4` |
-| `CHAOS_TURN_TARGET_MS` | mode-specific | total per-turn wall target (IL + search) |
-| `CHAOS_TURN_TARGET_MS_2P` / `CHAOS_TURN_TARGET_MS_4P` | 1000 / 1000 in submission | per-player-count wall target |
-| `CHAOS_IL_CHECKPOINT` | per-mode defaults | override IL checkpoint path for all enabled modes |
-| `CHAOS_IL_CHECKPOINT_2P` / `CHAOS_IL_CHECKPOINT_4P` | per-mode defaults | override one checkpoint path |
+| `CHAOS_IL_SKIP_TURNS` | 1 | skip IL injection on the first N turns (default skips only turn 0) |
+| `CHAOS_TORCH_THREADS` | 2 | torch / OpenMP intra-op threads |
+| `CHAOS_TURN_TARGET_MS` | 700 dev / 1000 submission | total per-turn wall target (IL + search) |
+| `CHAOS_IL_CHECKPOINT` | repo 2p checkpoint | override the 2p IL checkpoint path |
 
 `OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL mode, ms + candidates) and
 `[chaos-il]` (Rust: offered/added/root_K) lines to stderr.
+
+## Opening shortcuts (why IL / eval might look "disabled")
+
+Two independent knobs deliberately bypass IL and/or DUCT on the first few turns.
+If injection or search looks like it isn't running early in a game, check both
+before assuming a bug — they live in **different layers**:
+
+| Knob | Layer | Default | Effect |
+|---|---|---|---|
+| `CHAOS_IL_SKIP_TURNS` | this wrapper (env var, `main.py`) | 1 | skip the IL forward + injection for steps `< N` (default skips only turn 0, where the binary spawn already lands). `0` = inject from step 0. |
+| `APOLLO_ONLY_FIRST_TURNS` | aphrodite binary (`const` in `src/duct.rs`) | 0 | skip DUCT search + leaf eval for steps `< N` and play apollo's top candidate directly. **Compile-time constant — needs a rebuild, not an env var.** `0` = search from step 0. |
+
+They are **not** coupled. If you set `APOLLO_ONLY_FIRST_TURNS = N`, the binary
+returns apollo's top move instantly on those turns, but the wrapper still runs
+its (now-ignored) IL forward unless you also set `CHAOS_IL_SKIP_TURNS=N`. To skip
+both IL and search on the opening, set both to the same `N`.
+
+With `OW_DEBUG=1`, an apollo-only turn prints `[duck-apollo-only]` (instead of
+`[duck]`) and an IL-skipped turn shows `il=2p:skip` in the `[chaos]` line.
 
 ## 4p IL training
 
 The policy IL tooling lives under `experimental_arch/imitation_learning`.
 `build_dataset_from_zips.py` can stream `ladder_replays/*.zip` into the chunked
 manifest format consumed by `train.py`; see that directory's README for the
-full 4p workflow.
+full 4p workflow. Note: a 4p IL policy was trained and wired into chaos but
+regressed it, so chaos no longer bundles or loads a 4p checkpoint — this tooling
+remains for future retraining only.
 
 ## Future work
 

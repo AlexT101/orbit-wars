@@ -34,6 +34,11 @@ const EXPLORATION: f64 = 0.3;
 const TERMINAL_STEP: i64 = 499;
 const K_ROOT_DEFAULT: usize = 5;
 const K_NON_ROOT_DEFAULT: usize = 4;
+/// Apollo-only opening: for the first `APOLLO_ONLY_FIRST_TURNS` steps, skip DUCT
+/// search + leaf eval entirely and just play apollo's top-ranked plan
+/// (`my_candidates[0]`, what pure apollo would play). 0 disables this — normal
+/// search runs from step 0, i.e. previous behavior.
+const APOLLO_ONLY_FIRST_TURNS: i64 = 5;
 /// Minimum root expansions to spend on each newly-added IL candidate, by IL
 /// rank. Change to e.g. `&[4, 2, 1]` to seed the third injected candidate too.
 const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
@@ -969,6 +974,28 @@ pub fn best_move(
         },
     };
     ensure_candidates(&mut root, me, true);
+
+    // Apollo-only opening: skip DUCT search + leaf eval for the first
+    // `APOLLO_ONLY_FIRST_TURNS` steps and play apollo's top-ranked plan directly.
+    // `my_candidates[0]` is apollo's primary subset (best-first from
+    // `search_candidates_subsets`), so this returns exactly what pure apollo
+    // would. We return before IL injection / the search loop, so no tree is
+    // stashed for reuse — the first searched turn rebuilds from scratch.
+    if APOLLO_ONLY_FIRST_TURNS > 0 && state.step < APOLLO_ONLY_FIRST_TURNS {
+        if std::env::var("OW_DEBUG").is_ok() {
+            eprintln!(
+                "[duck-apollo-only] step={} player={} my_K={} -> apollo#0",
+                state.step,
+                me,
+                root.my_candidates.len()
+            );
+        }
+        if root.my_candidates.is_empty() {
+            return Vec::new();
+        }
+        return root.my_candidates[0].clone();
+    }
+
     let mut il_first_idx = 0usize;
     let mut il_added = 0usize;
     if !il_candidates.is_empty() {

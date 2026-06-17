@@ -10,7 +10,6 @@ Bundle layout (flat, everything at the archive root):
   xgb_*.json                 value-net weights (names from aphrodite's main.py)
   config*.json               apollo runtime configs read by the aphrodite binary
   osteo_il_2p_latest.pt      2p IL checkpoint
-  isaiah_4p_il_best.pt       4p Isaiah launch-only IL checkpoint
   features.py, model.py, constants.py
                              IL support (from experimental_arch/train_transformer)
   orbit_wars_model.abi3.so   Rust feature encoder (Linux .so built in Docker)
@@ -57,14 +56,6 @@ CHECKPOINT_2P = (
     / "checkpoints"
     / "osteo_bc_transformer"
     / "latest.pt"
-)
-CHECKPOINT_4P = (
-    REPO_ROOT
-    / "experimental_arch"
-    / "imitation_learning"
-    / "checkpoints"
-    / "isaiah_tufa_labs_4p_launches"
-    / "best.pt"
 )
 BUNDLE = HERE / "submission.tar.gz"
 
@@ -189,19 +180,10 @@ def _with_prod_limits(src: Path, label: str) -> str:
     return text.replace(old_line, new_line)
 
 
-def _with_4p_il_enabled(text: str) -> str:
-    old_line = '    raw = os.environ.get("CHAOS_IL_PLAYERS", "2")'
-    new_line = '    raw = os.environ.get("CHAOS_IL_PLAYERS", "2,4")'
-    if text.count(old_line) != 1:
-        sys.exit(f"expected exactly one {old_line!r} in chaos main.py")
-    print("  submission tweak: CHAOS_IL_PLAYERS default -> 2,4")
-    return text.replace(old_line, new_line)
-
-
 def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
     staged = []
     (td / "main.py").write_text(
-        _with_4p_il_enabled(_with_prod_limits(HERE / "main.py", "chaos")),
+        _with_prod_limits(HERE / "main.py", "chaos"),
         encoding="utf-8",
     )
     staged.append("main.py")
@@ -214,7 +196,6 @@ def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
     files: list[tuple[Path, str]] = [
         (BIN_OUT, "aphrodite"),
         (CHECKPOINT_2P, "osteo_il_2p_latest.pt"),
-        (CHECKPOINT_4P, "isaiah_4p_il_best.pt"),
         (TRAIN_DIR / "features.py", "features.py"),
         (TRAIN_DIR / "model.py", "model.py"),
         (TRAIN_DIR / "constants.py", "constants.py"),
