@@ -9,7 +9,8 @@ Bundle layout (flat, everything at the archive root):
   aphrodite                  Linux glibc binary built inside Kaggle's own image
   xgb_*.json                 value-net weights (names from aphrodite's main.py)
   config*.json               apollo runtime configs read by the aphrodite binary
-  osteo_il_latest.pt         IL checkpoint
+  osteo_il_2p_latest.pt      2p IL checkpoint
+  isaiah_4p_il_best.pt       4p Isaiah launch-only IL checkpoint
   features.py, model.py, constants.py
                              IL support (from experimental_arch/train_transformer)
   orbit_wars_model.abi3.so   Rust feature encoder (host-built, like triplepoint1)
@@ -49,13 +50,21 @@ APHRODITE = REPO_ROOT / "bots" / "mine" / "aphrodite"
 TRAIN_DIR = REPO_ROOT / "experimental_arch" / "train_transformer"
 ENV_MODEL = REPO_ROOT / "experimental_arch" / "env_model"
 ENV_ENGINE = REPO_ROOT / "experimental_arch" / "env_engine"
-CHECKPOINT = (
+CHECKPOINT_2P = (
     REPO_ROOT
     / "experimental_arch"
     / "imitation_learning"
     / "checkpoints"
     / "osteo_bc_transformer"
     / "latest.pt"
+)
+CHECKPOINT_4P = (
+    REPO_ROOT
+    / "experimental_arch"
+    / "imitation_learning"
+    / "checkpoints"
+    / "isaiah_tufa_labs_4p_launches"
+    / "best.pt"
 )
 BUNDLE = HERE / "submission.tar.gz"
 
@@ -136,10 +145,19 @@ def _with_prod_limits(src: Path, label: str) -> str:
     return text.replace(old_line, new_line)
 
 
+def _with_4p_il_enabled(text: str) -> str:
+    old_line = '    raw = os.environ.get("CHAOS_IL_PLAYERS", "2")'
+    new_line = '    raw = os.environ.get("CHAOS_IL_PLAYERS", "2,4")'
+    if text.count(old_line) != 1:
+        sys.exit(f"expected exactly one {old_line!r} in chaos main.py")
+    print("  submission tweak: CHAOS_IL_PLAYERS default -> 2,4")
+    return text.replace(old_line, new_line)
+
+
 def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
     staged = []
     (td / "main.py").write_text(
-        _with_prod_limits(HERE / "main.py", "chaos"),
+        _with_4p_il_enabled(_with_prod_limits(HERE / "main.py", "chaos")),
         encoding="utf-8",
     )
     staged.append("main.py")
@@ -151,7 +169,8 @@ def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
 
     files: list[tuple[Path, str]] = [
         (BIN_OUT, "aphrodite"),
-        (CHECKPOINT, "osteo_il_latest.pt"),
+        (CHECKPOINT_2P, "osteo_il_2p_latest.pt"),
+        (CHECKPOINT_4P, "isaiah_4p_il_best.pt"),
         (TRAIN_DIR / "features.py", "features.py"),
         (TRAIN_DIR / "model.py", "model.py"),
         (TRAIN_DIR / "constants.py", "constants.py"),
@@ -194,6 +213,23 @@ for turn in range(3):
     if turn > 0:
         assert dt < 1100, f"steady-state turn took {dt:.0f}ms — unexpectedly slow"
     state = eng.step([moves, []])
+proc = getattr(main._aph, "_PROC", None)
+if proc is not None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        proc.kill()
+    main._aph._PROC = None
+eng4 = OrbitWarsEngine(num_players=4)
+state4 = eng4.reset(seed=456)
+obs4 = state4["observations"][0]
+obs4.setdefault("player", 0)
+t0 = time.perf_counter()
+moves4 = main.agent(obs4, {"actTimeout": 1, "episodeSteps": 500})
+dt4 = (time.perf_counter() - t0) * 1000
+print(f"[smoke] 4p turn0: {dt4:.0f}ms moves={json.dumps(moves4)}", file=sys.stderr)
+assert isinstance(moves4, list), f"4p agent returned {type(moves4)}"
 print("[smoke] OK", file=sys.stderr)
 """
 

@@ -13,7 +13,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 import torch
 from torch.distributions import Categorical
@@ -27,19 +27,43 @@ BOTS_DIR = REPO_ROOT / "bots"
 DEFAULT_CHECKPOINT = IL_DIR / "checkpoints" / "osteo_bc_transformer" / "latest.pt"
 LATEST_CHECKPOINT_ALIASES = {"latest", "latest.pt", "latest-training", "training-latest"}
 
-PLAYERS = 2
+DEFAULT_PLAYERS = 2
 MAX_STEPS = 500
 
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
 
-from features import decode_move, encode_obs  # noqa: E402
-from model import build_policy  # noqa: E402
-from orbit_wars_model import encode_obs as raw_encode_obs  # noqa: E402
-from orbit_wars_engine import OrbitWarsEngine  # noqa: E402
+decode_move: Callable[[dict[str, Any], int], list[list[float]]]
+encode_obs: Callable[..., Any]
+build_policy: Callable[..., torch.nn.Module]
+raw_encode_obs: Callable[[dict[str, Any], int], dict[str, Any]]
+OrbitWarsEngine: Any
+_RUNTIME_DEPS_LOADED = False
 
-with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-    from kaggle_environments import make  # noqa: E402
+
+def load_runtime_deps() -> None:
+    global decode_move, encode_obs, build_policy, raw_encode_obs, OrbitWarsEngine, _RUNTIME_DEPS_LOADED
+    if _RUNTIME_DEPS_LOADED:
+        return
+    try:
+        from features import decode_move as feature_decode_move, encode_obs as feature_encode_obs  # noqa: E402
+        from model import build_policy as feature_build_policy  # noqa: E402
+        from orbit_wars_engine import OrbitWarsEngine as feature_engine  # noqa: E402
+        from orbit_wars_model import encode_obs as feature_raw_encode_obs  # noqa: E402
+    except ModuleNotFoundError as exc:
+        if exc.name == "orbit_wars_model":
+            raise ModuleNotFoundError(
+                "orbit_wars_model is required to play IL checkpoints. "
+                "Build and install experimental_arch/env_model first."
+            ) from exc
+        raise
+
+    decode_move = feature_decode_move
+    encode_obs = feature_encode_obs
+    build_policy = feature_build_policy
+    raw_encode_obs = feature_raw_encode_obs
+    OrbitWarsEngine = feature_engine
+    _RUNTIME_DEPS_LOADED = True
 
 
 class Agent(Protocol):
@@ -63,6 +87,7 @@ class GameResult:
 
 class CheckpointAgent:
     def __init__(self, checkpoint: Path, *, deterministic: bool, device: str):
+        load_runtime_deps()
         self.checkpoint = checkpoint
         self.name = checkpoint.stem
         self.deterministic = deterministic
@@ -86,6 +111,7 @@ class CheckpointAgent:
         return None
 
     def act(self, obs: dict) -> list[list[float]]:
+        load_runtime_deps()
         encoded = encode_obs(obs, player=int(obs.get("player", 0)))
         batch = {
             "planets": torch.as_tensor(encoded.planets, dtype=torch.float32, device=self.device).unsqueeze(0),
@@ -118,8 +144,9 @@ class CheckpointAgent:
         return decode_move(obs, int(action.item()))
 
 
-def validate_live_feature_schema() -> None:
-    engine = OrbitWarsEngine(num_players=PLAYERS)
+def validate_live_feature_schema(players: int) -> None:
+    load_runtime_deps()
+    engine = OrbitWarsEngine(num_players=players)
     obs = engine.reset(seed=1)["observations"][0]
     feat = raw_encode_obs(obs, 0)
     tokens_shape = tuple(int(x) for x in feat.get("tokens_shape", ()))
@@ -212,7 +239,7 @@ def make_agent(ref: str, *, checkpoint: Path, deterministic: bool, device: str) 
     return PythonAgent(bot_main(ref))
 
 
-def scores_from_state(state: dict, num_players: int = PLAYERS) -> list[int]:
+def scores_from_state(state: dict, num_players: int) -> list[int]:
     scores = [0] * num_players
     for planet in state.get("planets", []):
         owner = int(planet[1])
@@ -228,29 +255,36 @@ def scores_from_state(state: dict, num_players: int = PLAYERS) -> list[int]:
 def play_game(
     *,
     hero: Agent,
-    opponent: Agent,
+    opponents: list[Agent],
+    players: int,
     seed: int,
     max_steps: int,
     render_out: Path | None,
     replay_index: int,
     replay_total: int,
 ) -> GameResult:
+    load_runtime_deps()
     hero.reset()
-    opponent.reset()
+    for opponent in opponents:
+        opponent.reset()
 
-    engine = OrbitWarsEngine(num_players=PLAYERS)
+    engine = OrbitWarsEngine(num_players=players)
     eng_obs = engine.reset(seed=seed)["observations"]
     kenv = None
     if render_out is not None:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            from kaggle_environments import make
+
         kenv = make("orbit_wars", configuration={"seed": seed}, debug=False)
-        kenv.reset(PLAYERS)
+        kenv.reset(players)
 
     reward = 0.0
     steps = 0
     for _ in range(max_steps):
         if kenv is not None and kenv.done:
             break
-        actions = [hero.act(eng_obs[0]), opponent.act(eng_obs[1])]
+        agents = [hero, *opponents]
+        actions = [agent.act(eng_obs[i]) for i, agent in enumerate(agents)]
         if kenv is not None:
             kenv.step(actions)
         result = engine.step(actions)
@@ -261,13 +295,10 @@ def play_game(
             break
 
     state = engine.get_state()
-    scores = scores_from_state(state)
-    if scores[0] > scores[1]:
-        winner = 0
-    elif scores[1] > scores[0]:
-        winner = 1
-    else:
-        winner = None
+    scores = scores_from_state(state, players)
+    best = max(scores)
+    winners = [i for i, score in enumerate(scores) if score == best]
+    winner = winners[0] if len(winners) == 1 else None
 
     if render_out is not None:
         assert kenv is not None
@@ -379,7 +410,16 @@ def parse_args() -> argparse.Namespace:
         default="latest",
         help="IL .pt checkpoint, or 'latest' for the latest training checkpoint; defaults to latest",
     )
-    parser.add_argument("--opponent", default="hellburner", help="'self', a bot name like hellburner, a .py agent, or a .pt checkpoint")
+    parser.add_argument("--players", type=int, choices=(2, 4), default=DEFAULT_PLAYERS, help="game player count")
+    parser.add_argument(
+        "--opponent",
+        nargs="+",
+        default=["hellburner"],
+        help=(
+            "'self', a bot name like hellburner, a .py agent, or a .pt checkpoint. "
+            "Pass one opponent to reuse it for every non-hero seat, or players-1 refs."
+        ),
+    )
     parser.add_argument("-n", "--num-games", "--games", dest="games", type=int, default=1, help="number of games to run serially")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default="cpu")
@@ -409,19 +449,25 @@ def main() -> int:
     args = parse_args()
     if args.games < 1:
         raise ValueError("--num-games/-n must be at least 1")
-    validate_live_feature_schema()
+    if len(args.opponent) not in (1, args.players - 1):
+        raise ValueError(f"--opponent expects one ref or {args.players - 1} refs for --players {args.players}")
+    validate_live_feature_schema(args.players)
     checkpoint = resolve_checkpoint_ref(args.checkpoint)
     if not checkpoint.exists():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
     out_path = args.out if args.out is not None else IL_DIR / "replays"
 
     hero = CheckpointAgent(checkpoint, deterministic=args.deterministic, device=args.device)
-    opponent = make_agent(
-        args.opponent,
-        checkpoint=checkpoint,
-        deterministic=args.opponent_deterministic,
-        device=args.device,
-    )
+    opponent_refs = args.opponent * (args.players - 1) if len(args.opponent) == 1 else args.opponent
+    opponents = [
+        make_agent(
+            opponent_ref,
+            checkpoint=checkpoint,
+            deterministic=args.opponent_deterministic,
+            device=args.device,
+        )
+        for opponent_ref in opponent_refs
+    ]
 
     wins = ties = losses = 0
     total_steps = 0
@@ -429,21 +475,23 @@ def main() -> int:
     rendered_paths: list[Path] = []
     print(f"checkpoint: {checkpoint}")
     print(f"checkpoint_step: {hero.global_step} epoch: {hero.epoch}")
-    print(f"opponent: {args.opponent} ({opponent.name})")
+    print(f"players: {args.players}")
+    print(f"opponents: {', '.join(f'{ref} ({agent.name})' for ref, agent in zip(opponent_refs, opponents))}")
     print(f"device: {args.device}")
     print(f"hero_policy: {'argmax' if args.deterministic else 'sample'}")
     for i in range(args.games):
         render_out = replay_path(out_path, i + 1, args.games) if args.render else None
         result = play_game(
             hero=hero,
-            opponent=opponent,
+            opponents=opponents,
+            players=args.players,
             seed=args.seed + i,
             max_steps=args.max_steps,
             render_out=render_out,
             replay_index=i + 1,
             replay_total=args.games,
         )
-        diff = result.scores[0] - result.scores[1]
+        diff = result.scores[0] - max(result.scores[1:])
         score_diffs.append(diff)
         total_steps += result.steps
         if result.winner == 0:
@@ -454,8 +502,8 @@ def main() -> int:
             ties += 1
         print(
             f"game {i + 1:03d} seed={result.seed} steps={result.steps} "
-            f"score={result.scores[0]}-{result.scores[1]} diff={diff:+d} "
-            f"result={'win' if result.winner == 0 else 'loss' if result.winner == 1 else 'tie'}"
+            f"score={'/'.join(str(score) for score in result.scores)} diff={diff:+d} "
+            f"result={'win' if result.winner == 0 else 'tie' if result.winner is None else 'loss'}"
         )
         if render_out is not None:
             rendered_paths.append(render_out.resolve())

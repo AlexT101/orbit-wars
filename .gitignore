@@ -207,6 +207,7 @@ wandb/
 *.npz
 *.pt
 !bots/mine/triplepoint1/osteo_il_latest.pt
+!experimental_arch/imitation_learning/checkpoints/isaiah_tufa_labs_4p_launches/best.pt
 
 # Training NPZ datasets — too big to track in git, rebuildable via
 # bots/mine/alphaow/train/build_from_zip.py + extras_v{3,4}_build.py.

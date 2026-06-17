@@ -26,9 +26,9 @@ The field is optional: aphrodite's own wrapper never sends it, so the shared
 binary behaves identically for aphrodite.
 
 Scope (v1): root node only (per-node IL is ~1000x too slow), my side only.
-The bundled checkpoint is 2p-trained, so Chaos injects IL in 2p by default.
-4p injection is supported only when you provide a 4p-trained checkpoint and set
-`CHAOS_IL_PLAYERS=4` or `CHAOS_IL_PLAYERS=2,4`.
+The source default injects IL in 2p only. Submission builds can enable both 2p
+and 4p by default and bundle separate checkpoints for each player count, so the
+4p Isaiah policy is not used in 2p games.
 
 **Failures are loud:** a missing checkpoint, stale `orbit_wars_model` schema,
 IL runtime error, or dead binary raises immediately. If chaos is playing, the
@@ -57,11 +57,13 @@ the effective search budget at 900ms when the remaining overage pool is low.
 |---|---|---|
 | `CHAOS_IL_K` | 5 | max IL candidates injected per turn |
 | `CHAOS_IL_MIN_PROB` | 0.02 | drop IL suggestions below this policy prob |
-| `CHAOS_IL_PLAYERS` | 2 | comma-separated player counts where IL injection is enabled |
-| `CHAOS_TURN_TARGET_MS` | 700 dev / 1000 submission | total per-turn wall target (IL + search) |
-| `CHAOS_IL_CHECKPOINT` | repo checkpoint | override IL checkpoint path |
+| `CHAOS_IL_PLAYERS` | 2 | comma-separated player counts where IL injection is enabled; 4p test bundles default this to `2,4` |
+| `CHAOS_TURN_TARGET_MS` | mode-specific | total per-turn wall target (IL + search) |
+| `CHAOS_TURN_TARGET_MS_2P` / `CHAOS_TURN_TARGET_MS_4P` | 1000 / 1000 in submission | per-player-count wall target |
+| `CHAOS_IL_CHECKPOINT` | per-mode defaults | override IL checkpoint path for all enabled modes |
+| `CHAOS_IL_CHECKPOINT_2P` / `CHAOS_IL_CHECKPOINT_4P` | per-mode defaults | override one checkpoint path |
 
-`OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL ms + candidates) and
+`OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL mode, ms + candidates) and
 `[chaos-il]` (Rust: offered/added/root_K) lines to stderr.
 
 ## 4p IL training
