@@ -89,7 +89,7 @@ export PATH=$CARGO_HOME/bin:$PATH
 if ! command -v cargo >/dev/null; then
     curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 fi
-cargo build --release --bin aphrodite
+cargo build --release --features submission --bin aphrodite
 """
 
 

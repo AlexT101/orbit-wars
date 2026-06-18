@@ -22,6 +22,9 @@ path = "src/bin/xgb_parity.rs"
 [features]
 # Mirrors the vendored apollo engine: cfg-gates its per-section timers.
 profile = []
+# Enabled only by the build_submission scripts: per-turn stderr log of the
+# chosen move (apollo vs il candidate). Off for dev/eval builds.
+submission = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

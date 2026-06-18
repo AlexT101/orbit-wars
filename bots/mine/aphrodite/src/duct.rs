@@ -1394,6 +1394,38 @@ pub fn best_move(
             best_i = i;
         }
     }
+    #[cfg(feature = "submission")]
+    {
+        let chosen_source = if best_i >= il_first_idx && best_i < il_first_idx + il_added {
+            "il"
+        } else {
+            "apollo"
+        };
+        let chosen_label = root
+            .my_labels
+            .get(best_i)
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        // IL ranks that also proposed the chosen plan. Non-empty on an
+        // apollo-sourced pick means IL independently agreed with apollo.
+        let chosen_overlap = root
+            .my_candidates
+            .get(best_i)
+            .map(|actions| overlap_il_ranks(actions, il_candidates))
+            .unwrap_or_default();
+        eprintln!(
+            "[aphrodite] step={} player={} chose {} idx={} label={} avg={:.4} il_overlap_ranks={:?} (my_k={} il_added={})",
+            state.step,
+            me,
+            chosen_source,
+            best_i,
+            chosen_label,
+            best_val,
+            chosen_overlap,
+            root.my_candidates.len(),
+            il_added,
+        );
+    }
     maybe_dump_candidate_decision(
         state,
         me,
