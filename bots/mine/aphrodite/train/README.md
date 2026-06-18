@@ -3,9 +3,9 @@
 We train **per-format XGBoost value nets** that aphrodite's DUCT search uses
 for leaf evaluation:
 
-- `weights/xgb_2p_6_08_6_14.json` - current 2-player deployed model
+- `weights/xgb_2p_qsweep_r3_top20_floor050_dropdec.json` - current 2-player deployed model
   (`main.py`'s `_WEIGHTS_2P_NAME`)
-- `weights/xgb_4p_6_08_6_14.json` - current 4-player deployed model
+- `weights/xgb_4p_qsweep_top20_floor050_dropdec.json` - current 4-player deployed model
   (`main.py`'s `_WEIGHTS_4P_NAME`)
 - `weights/xgb_2p.json` / `weights/xgb_4p.json` - convenient training/eval
   aliases used by the commands below; promote a candidate by updating
@@ -229,7 +229,7 @@ budget you're oversubscribed (contention), which understates strength. Use
 
 `main.py` auto-selects weights by player count at runtime using its
 `_WEIGHTS_2P_NAME` and `_WEIGHTS_4P_NAME` constants. At the moment those point
-to `xgb_2p_6_08_6_14.json` and `xgb_4p_6_08_6_14.json`.
+to `xgb_2p_qsweep_r3_top20_floor050_dropdec.json` and `xgb_4p_qsweep_top20_floor050_dropdec.json`.
 
 Convention when replacing a deployed model: archive the old one under a
 descriptive name first, then update the wrapper constant or copy the candidate

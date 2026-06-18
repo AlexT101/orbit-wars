@@ -55,7 +55,7 @@ const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
 // between them (we stop early once one move clearly separates). All in ms.
 
 /// Hard cap on overage spent beyond the base budget on any single turn.
-const OVERAGE_PER_TURN_CAP_MS: u64 = 2000;
+const OVERAGE_PER_TURN_CAP_MS: u64 = 1000;
 /// Safety reserve to keep untouched in the engine's overage pool, computed as
 /// a base amount plus a per-turn multiplier
 const OVERAGE_SAFETY_BASE_MS: f64 = 2000.0;
@@ -411,6 +411,23 @@ fn enumerate_pair_labeled(
     (my_actions, my_labels, opp_actions, opp_labels)
 }
 
+fn enumerate_player_labeled(
+    state: &GameState,
+    player: i32,
+    k: usize,
+    rollout_internal: bool,
+) -> (Vec<Vec<Action>>, Vec<String>) {
+    let mut candidates = with_cache_at(state.step, |cache| {
+        crate::apollo_bridge::apollo_candidates_labeled(state, player, cache, rollout_internal)
+    });
+    if candidates.is_empty() {
+        candidates.push(("apollo:fallback_noop".to_string(), Vec::new()));
+    }
+    candidates.truncate(k);
+    let (labels, actions): (Vec<_>, Vec<_>) = candidates.into_iter().unzip();
+    (actions, labels)
+}
+
 /// Splice externally supplied single-launch candidates (the chaos IL policy's
 /// top-k moves) into the root's MY candidate set. Entries are appended, never
 /// interleaved in place: `children` is keyed by candidate index, so existing
@@ -485,13 +502,10 @@ fn actions_equal(a: &[Action], b: &[Action]) -> bool {
     ax == bx
 }
 
-/// Alive players (planet/fleet owners) other than `me` and `opp`, sorted for
-/// determinism. In a 2p game this is empty. These are the minor players whose
-/// replies DUCT does not branch over but instead fixes to a single greedy plan.
-fn other_players(state: &GameState, me: i32, opp: i32) -> Vec<i32> {
+fn opponent_players(state: &GameState, me: i32) -> Vec<i32> {
     let mut seen: u32 = 0;
     let mut note = |p: i32| {
-        if p >= 0 && p < 32 && p != me && p != opp {
+        if p >= 0 && p < 32 && p != me {
             seen |= 1 << p;
         }
     };
@@ -502,6 +516,135 @@ fn other_players(state: &GameState, me: i32, opp: i32) -> Vec<i32> {
         note(f.owner);
     }
     (0..32).filter(|i| seen & (1 << i) != 0).collect()
+}
+
+fn minor_players(state: &GameState, me: i32, opp: i32) -> Vec<i32> {
+    opponent_players(state, me)
+        .into_iter()
+        .filter(|&p| p != opp)
+        .collect()
+}
+
+fn subset_rank_count(label: &str) -> Option<usize> {
+    let rest = label.strip_prefix("apollo:subset:ranks=")?;
+    let ranks = rest.split(":ids=").next().unwrap_or(rest);
+    if ranks == "none" {
+        Some(0)
+    } else {
+        Some(ranks.split('+').filter(|s| !s.is_empty()).count())
+    }
+}
+
+fn push_unique_candidate(
+    out: &mut Vec<(String, Vec<Action>)>,
+    label: String,
+    actions: Vec<Action>,
+) {
+    if !out.iter().any(|(_, prev)| actions_equal(prev, &actions)) {
+        out.push((label, actions));
+    }
+}
+
+fn deterministic_idx(state: &GameState, player: i32, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let h = state_hash(state)
+        .wrapping_mul(0x9e3779b97f4a7c15)
+        .wrapping_add((player as u64).wrapping_mul(0xbf58476d1ce4e5b9))
+        .wrapping_add((state.step as u64).wrapping_mul(0x94d049bb133111eb));
+    (h as usize) % len
+}
+
+fn opponent_branch_choices(
+    state: &GameState,
+    player: i32,
+    rollout_internal: bool,
+    include_fallback_alongside_preferred: bool,
+) -> Vec<(String, Vec<Action>)> {
+    let mut labeled = with_cache_at(state.step, |cache| {
+        crate::apollo_bridge::apollo_candidates_labeled(state, player, cache, rollout_internal)
+    });
+    if labeled.is_empty() {
+        labeled.push(("apollo:fallback_noop".to_string(), Vec::new()));
+    }
+    let greedy = labeled[0].clone();
+
+    let mut preferred: Vec<(String, Vec<Action>)> = Vec::new();
+    let mut fallback: Vec<(String, Vec<Action>)> = Vec::new();
+    for (label, actions) in labeled.into_iter().skip(1) {
+        if actions_equal(&greedy.1, &actions) {
+            continue;
+        }
+        match subset_rank_count(&label) {
+            Some(1 | 2) => push_unique_candidate(&mut preferred, label, actions),
+            Some(0) => push_unique_candidate(&mut fallback, label, actions),
+            _ => {}
+        }
+    }
+
+    let preferred_alt = if !preferred.is_empty() {
+        let idx = deterministic_idx(state, player, preferred.len());
+        Some(preferred.swap_remove(idx))
+    } else {
+        None
+    };
+    let fallback_alt = if !fallback.is_empty() {
+        let idx = deterministic_idx(state, player, fallback.len());
+        Some(fallback.swap_remove(idx))
+    } else {
+        None
+    };
+
+    let mut out = vec![(format!("p{}:{}", player, greedy.0), greedy.1)];
+    if let Some((label, actions)) = preferred_alt {
+        push_unique_candidate(&mut out, format!("p{}:{}", player, label), actions);
+    }
+    if include_fallback_alongside_preferred || out.len() == 1 {
+        if let Some((label, actions)) = fallback_alt {
+            push_unique_candidate(&mut out, format!("p{}:{}", player, label), actions);
+        }
+    }
+    out
+}
+
+fn joint_opponent_candidates(
+    state: &GameState,
+    me: i32,
+    rollout_internal: bool,
+) -> (Vec<Vec<Action>>, Vec<String>) {
+    let opponents = opponent_players(state, me);
+    if opponents.is_empty() {
+        return (vec![Vec::new()], vec!["opp:noop".to_string()]);
+    }
+
+    let mut joint: Vec<(String, Vec<Action>)> = vec![("".to_string(), Vec::new())];
+    let include_rank0_as_third_choice = opponents.len() == 2;
+    for player in opponents {
+        let choices = opponent_branch_choices(
+            state,
+            player,
+            rollout_internal,
+            include_rank0_as_third_choice,
+        );
+        let mut next: Vec<(String, Vec<Action>)> = Vec::new();
+        for (prefix, base_actions) in &joint {
+            for (label, actions) in &choices {
+                let mut combined = base_actions.clone();
+                combined.extend(actions.iter().copied());
+                let combined_label = if prefix.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{}|{}", prefix, label)
+                };
+                push_unique_candidate(&mut next, combined_label, combined);
+            }
+        }
+        joint = next;
+    }
+
+    let (labels, actions): (Vec<_>, Vec<_>) = joint.into_iter().unzip();
+    (actions, labels)
 }
 
 pub(crate) fn dominant_enemy(state: &GameState, me: i32) -> Option<i32> {
@@ -651,12 +794,17 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     // scoring) uses the config tuned for the node's actual player count: a 4p
     // node that has collapsed to 1v1 generates with the 2p config. Mirrors the
     // per-state mode the offline feature extractors set (extract_v2/v3).
-    crate::apollo::constants::set_mode_for_alive(alive_players(&node.state));
+    let alive = alive_players(&node.state);
+    crate::apollo::constants::set_mode_for_alive(alive);
     let opp = dominant_enemy(&node.state, me).unwrap_or(1 - me);
     // Only the genuine root expansion runs apollo's early-game opening DFS;
     // every non-root node suppresses it (rollout_internal), mirroring apollo's
     // in-rollout reply policy.
-    let (my_alts, my_labels, opp_alts, opp_labels) = if root {
+    let (my_alts, my_labels, opp_alts, opp_labels) = if alive >= 3 && root {
+        let (my_alts, my_labels) = enumerate_player_labeled(&node.state, me, k, false);
+        let (opp_alts, opp_labels) = joint_opponent_candidates(&node.state, me, true);
+        (my_alts, my_labels, opp_alts, opp_labels)
+    } else if root {
         enumerate_pair_labeled(&node.state, me, opp, k, !root)
     } else {
         let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k, !root);
@@ -668,10 +816,13 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
             .collect();
         (my_alts, my_labels, opp_alts, opp_labels)
     };
-    // Fix each minor player's reply to their single apollo greedy plan, computed
-    // once here from the node state (empty in 2p). Replayed at every expansion.
-    node.other_launches = {
-        let others = other_players(&node.state, me, opp);
+    // In the real 4p root, `opp_candidates` is a joint action list over all
+    // opponents. Below the root we keep the old cheaper model: branch the
+    // dominant enemy and fix minor players to their greedy replies.
+    node.other_launches = if alive >= 3 && root {
+        Vec::new()
+    } else {
+        let others = minor_players(&node.state, me, opp);
         let mut launches: Vec<Action> = Vec::new();
         if !others.is_empty() {
             with_cache_at(node.state.step, |cache| {

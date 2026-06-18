@@ -13,11 +13,11 @@ import threading
 
 # Update these contants if training new weights
 _WEIGHTS_2P_NAME = "xgb_2p_qsweep_r3_top20_floor050_dropdec.json"
-_WEIGHTS_4P_NAME = "xgb_4p_6_08_6_14.json"
+_WEIGHTS_4P_NAME = "xgb_4p_qsweep_top20_floor050_dropdec.json"
 
 # Local testing uses lower limits for speed
-_DEV_BUDGET_MS = "700"
-_SUBMISSION_BUDGET_MS = "1000"
+_DEV_BUDGET_MS = "600"
+_SUBMISSION_BUDGET_MS = "900"
 
 # Set to true if testing higher time limits (also lets bot use remaining overage time)
 _USE_PROD_LIMITS = False

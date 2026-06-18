@@ -284,6 +284,44 @@ pub fn apollo_candidates(
         .collect()
 }
 
+pub fn apollo_candidates_labeled(
+    state: &GameState,
+    player: i32,
+    cache: &EntityCache,
+    rollout_internal: bool,
+) -> Vec<(String, Vec<Action>)> {
+    let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
+    let initial_planets: Vec<APlanet> =
+        state.planets.iter().map(to_apollo_planet_initial).collect();
+    let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
+    let (comets, comet_planet_ids) = to_apollo_comets(state);
+    let mut world = WorldState::build(
+        player as i64,
+        state.step,
+        planets,
+        fleets,
+        initial_planets,
+        comets,
+        comet_planet_ids,
+        state.angular_velocity,
+        cache,
+    );
+    world.rollout_internal = rollout_internal;
+
+    strategy::search_candidates_subsets_labeled(&world)
+        .into_iter()
+        .map(|(label, orders)| {
+            (
+                label,
+                orders
+                    .into_iter()
+                    .map(|m| (m.from_id, m.angle, m.ships, player))
+                    .collect::<Vec<Action>>(),
+            )
+        })
+        .collect()
+}
+
 /// Apollo's single greedy `ScorePerShip` plan for `player` (apollo's
 /// `STRATEGIES[0]`, via [`strategy::plan`]), converted to aphrodite launches.
 /// This is the cheap "assumed reply" used for the non-branched minor players in
