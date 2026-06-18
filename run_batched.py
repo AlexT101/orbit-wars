@@ -82,23 +82,39 @@ def load_agent(main_path: Path, mod_name: str):
 
 
 def cleanup_agent_module(module):
-    proc = getattr(module, "_PROC", None)
-    if proc is None:
-        return
-    try:
-        if proc.poll() is None:
-            proc.terminate()
+    executor = getattr(module, "_IL_EXEC", None)
+    if executor is not None:
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
             try:
-                proc.wait(timeout=1.0)
+                executor.shutdown(wait=False)
             except Exception:
-                proc.kill()
-                proc.wait(timeout=1.0)
-    except Exception:
-        pass
-    try:
-        module._PROC = None
-    except Exception:
-        pass
+                pass
+        except Exception:
+            pass
+    owners = [module]
+    nested = getattr(module, "_aph", None)
+    if nested is not None:
+        owners.append(nested)
+    for owner in owners:
+        proc = getattr(owner, "_PROC", None)
+        if proc is None:
+            continue
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            owner._PROC = None
+        except Exception:
+            pass
 
 
 def run_one_match(bot_paths, seed, match_idx):
