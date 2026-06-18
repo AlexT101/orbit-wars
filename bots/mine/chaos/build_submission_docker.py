@@ -86,7 +86,7 @@ DOCKER_BUILD_SCRIPT = r"""
 set -euo pipefail
 export CARGO_HOME=/io/.cargo-home-bullseye
 export CARGO_TARGET_DIR=/io/target-docker
-cargo build --release --bin aphrodite
+cargo build --release --features submission --bin aphrodite
 """
 DOCKER_CDYLIB_SCRIPT = r"""
 set -euo pipefail
