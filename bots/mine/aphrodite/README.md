@@ -8,7 +8,7 @@ generator and final redirect pass, with a fixed-extrapolation XGBoost value net.
 `main.py` is the Kaggle/dev wrapper. It launches the Rust `aphrodite` daemon
 and pins leaf evaluation to the current fixed XGB models:
 
-- 2p: `train/weights/xgb_2p_6_08_6_14.json`
+- 2p: `train/weights/xgb_2p_qsweep_r3_top20_floor050_dropdec.json`
 - 4p: `train/weights/xgb_4p_6_08_6_14.json`
 - 4p late 1v1 leaves also get `APHRODITE_VALUE_NET_PATH_2P` pointing at the
   2p model.
@@ -44,7 +44,7 @@ The bundle contains only:
 
 - `main.py`
 - `aphrodite`
-- `xgb_2p_6_08_6_14.json`
+- `xgb_2p_qsweep_r3_top20_floor050_dropdec.json`
 - `xgb_4p_6_08_6_14.json`
 - `config.json`
 - `config_4p.json`
