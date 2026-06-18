@@ -155,7 +155,7 @@ def _il_skip_turns() -> int:
     # already eats the one-time binary spawn + XGB weight parse; deferring the
     # first checkpoint load off it keeps those costs on separate turns' budgets
     # instead of stacking on the one turn most likely to spill into overage.
-    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "5")))
+    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "8")))
 
 
 def _checkpoint_path() -> Path:
@@ -193,7 +193,7 @@ class _ILPolicy:
         # warm, the first top_actions() forward for this checkpoint is ~10ms even
         # when this policy is built mid-game (a 4p board decaying to two players).
 
-    def top_actions(self, obs: dict, k: int, min_prob: float) -> list[list[float]]:
+    def top_actions(self, obs: dict, k: int, min_prob: float) -> list[dict]:
         torch = self._torch
         from features import decode_move, encode_obs
         from model import tensorize
@@ -204,7 +204,7 @@ class _ILPolicy:
             probs = torch.softmax(logits[0], dim=-1)
             # Oversample: some top entries decode to noop/dupes and get dropped.
             top = torch.topk(probs, min(k + 4, probs.numel()))
-        actions: list[list[float]] = []
+        actions: list[dict] = []
         seen: set[tuple] = set()
         for idx, prob in zip(top.indices.tolist(), top.values.tolist()):
             if len(actions) >= k or prob < min_prob:
@@ -217,7 +217,13 @@ class _ILPolicy:
             if key in seen:
                 continue
             seen.add(key)
-            actions.append([int(src), float(angle), int(ships)])
+            actions.append(
+                {
+                    "action": [int(src), float(angle), int(ships)],
+                    "prob": float(prob),
+                    "logit": int(idx),
+                }
+            )
         return actions
 
 
@@ -284,11 +290,11 @@ _IL_EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chaos-il")
 _IL_FUTURE = None  # in-flight task from a turn whose IL deadline expired
 
 
-def _il_candidates(obs: dict) -> list[list[float]]:
+def _il_candidates(obs: dict) -> list[dict]:
     return _il().top_actions(obs, _il_k(), _il_min_prob())
 
 
-def _il_pass(obs: dict, t0: float) -> tuple[list[list[float]] | None, str]:
+def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
     """Run the IL forward under a wall-clock deadline; return (candidates, desc).
 
     The deadline is whatever the turn target leaves after reserving the search
@@ -342,7 +348,9 @@ def agent(obs, config=None):
     if num_players == 2 and p["step"] >= _il_skip_turns():
         cands, il_desc = _il_pass(p, t0)
         if cands:
-            p["il_candidates"] = cands
+            p["il_candidates"] = [c["action"] for c in cands]
+            p["il_candidate_probs"] = [c["prob"] for c in cands]
+            p["il_candidate_logits"] = [c["logit"] for c in cands]
     else:
         cands = None
         il_desc = "2p:skip" if num_players == 2 else None

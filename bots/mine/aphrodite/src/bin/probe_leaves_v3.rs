@@ -37,7 +37,7 @@ fn main() -> io::Result<()> {
             Err(_) => continue,
         };
         let state = parse_state(&v);
-        let _ = duct::best_move(&state, state.player, budget, 0.0, &[]);
+        let _ = duct::best_move(&state, state.player, budget, 0.0, &[], &[], &[]);
         n += 1;
         if n % 25 == 0 {
             eprintln!("  ran {n} searches",);

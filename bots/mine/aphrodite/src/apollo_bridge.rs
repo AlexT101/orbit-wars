@@ -180,6 +180,30 @@ fn candidates_from_ledger(
         .collect()
 }
 
+#[inline]
+fn candidates_from_ledger_labeled(
+    sim: &Simulator,
+    ledger: &ArrivalLedger,
+    player: i32,
+    cache: &EntityCache,
+    rollout_internal: bool,
+) -> Vec<(String, Vec<Action>)> {
+    let mut world = WorldState::from_simulator_with_ledger(player as i64, sim, ledger, cache);
+    world.rollout_internal = rollout_internal;
+    strategy::search_candidates_subsets_labeled(&world)
+        .into_iter()
+        .map(|(label, orders)| {
+            (
+                label,
+                orders
+                    .into_iter()
+                    .map(|m| (m.from_id, m.angle, m.ships, player))
+                    .collect::<Vec<Action>>(),
+            )
+        })
+        .collect()
+}
+
 /// Hellburner child candidates for `me` and `opp` from a single shared
 /// `Simulator` + `ArrivalLedger` (one `HORIZON`-turn walk for both players).
 /// Caller must `cache.set_current_turn(state.step)` first. `rollout_internal`
@@ -199,6 +223,23 @@ pub fn apollo_candidates_pair(
     (
         candidates_from_ledger(&sim, &ledger, me, cache, rollout_internal),
         candidates_from_ledger(&sim, &ledger, opp, cache, rollout_internal),
+    )
+}
+
+pub fn apollo_candidates_pair_labeled(
+    state: &GameState,
+    me: i32,
+    opp: i32,
+    cache: &EntityCache,
+    rollout_internal: bool,
+) -> (Vec<(String, Vec<Action>)>, Vec<(String, Vec<Action>)>) {
+    let engine = build_engine(state);
+    let sim = Simulator::new(&engine);
+    let horizon = Config::for_alive(count_alive_players(sim.planets(), sim.fleets())).horizon;
+    let ledger = ArrivalLedger::build(&sim, horizon, cache);
+    (
+        candidates_from_ledger_labeled(&sim, &ledger, me, cache, rollout_internal),
+        candidates_from_ledger_labeled(&sim, &ledger, opp, cache, rollout_internal),
     )
 }
 
@@ -362,6 +403,69 @@ pub fn redirect_actions(state: &GameState, player: i32, actions: Vec<Action>) ->
         .collect();
     out.extend(passthrough);
     out
+}
+
+/// Expand Chaos IL's one-launch candidates before DUCT sees them. IL launches
+/// aimed at an ally are already reinforcement-style moves and are left as-is.
+/// IL launches aimed at a neutral/enemy get Apollo's normal reinforcement tail
+/// appended, using the same target recovery and PlanState accounting as the
+/// final redirect pass.
+pub fn il_candidates_with_reinforcements(
+    state: &GameState,
+    player: i32,
+    actions: &[Action],
+) -> Vec<Vec<Action>> {
+    if actions.is_empty() {
+        return Vec::new();
+    }
+    crate::apollo::constants::set_mode_for_alive(crate::sim::alive_players(state));
+    let mut cache = rollout_cache(state);
+    cache.set_current_turn(state.step);
+
+    let planets: Vec<APlanet> = state.planets.iter().map(to_apollo_planet_current).collect();
+    let initial_planets: Vec<APlanet> =
+        state.planets.iter().map(to_apollo_planet_initial).collect();
+    let fleets: Vec<AFleet> = state.fleets.iter().map(to_apollo_fleet).collect();
+    let (comets, comet_planet_ids) = to_apollo_comets(state);
+    let world = WorldState::build(
+        player as i64,
+        state.step,
+        planets,
+        fleets,
+        initial_planets,
+        comets,
+        comet_planet_ids,
+        state.angular_velocity,
+        &cache,
+    );
+    let model = strategy::HellburnerModel::build(&world);
+
+    actions
+        .iter()
+        .map(|&a| {
+            let (from_id, angle, ships, owner) = a;
+            if owner != player {
+                return vec![a];
+            }
+            let target = recover_target(&model, from_id, angle, ships);
+            if target < 0 || world.planet(target).owner == player as i64 {
+                return vec![a];
+            }
+            strategy::add_reinforcements_after_external_plan(
+                &world,
+                &model,
+                vec![MoveAction {
+                    from_id,
+                    angle,
+                    ships,
+                    target,
+                }],
+            )
+            .into_iter()
+            .map(|m| (m.from_id, m.angle, m.ships, player))
+            .collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]

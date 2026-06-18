@@ -1421,6 +1421,31 @@ fn send_reinforcements(
     out
 }
 
+/// Add Apollo's normal reinforcement tail after an externally supplied combat
+/// plan. The external moves are first committed into the same turn-local
+/// [`PlanState`] used by the greedy planner so reinforcement availability sees
+/// those ships as already spent and their arrivals as already planned.
+pub fn add_reinforcements_after_external_plan(
+    world: &WorldState,
+    model: &HellburnerModel,
+    mut moves: Vec<MoveAction>,
+) -> Vec<MoveAction> {
+    if moves.is_empty() {
+        return moves;
+    }
+    let mut plan = PlanState::default();
+    for mv in &moves {
+        if mv.target < 0 || !model.non_comet_ids.contains(&mv.target) {
+            continue;
+        }
+        if let Some((_, turns, _, _, _)) = model.plan_shot(mv.from_id, mv.target, mv.ships, 0) {
+            plan.commit(mv.from_id, mv.target, mv.ships, turns, world.player);
+        }
+    }
+    moves.extend(send_reinforcements(world, model, &plan));
+    moves
+}
+
 // ── Public entry ─────────────────────────────────────────────────────────
 
 /// Debug-only reference for [`run_strategy`]'s per-iteration target selection:
@@ -1929,15 +1954,22 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
 /// subset cap never costs us the aggressive baseline. Reinforcements are appended
 /// to every candidate and duplicates are deduped.
 pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
+    search_candidates_subsets_labeled(world)
+        .into_iter()
+        .map(|(_, moves)| moves)
+        .collect()
+}
+
+pub fn search_candidates_subsets_labeled(world: &WorldState) -> Vec<(String, Vec<MoveAction>)> {
     if world.enemy_planets.is_empty() {
-        return vec![Vec::new()];
+        return vec![("apollo:noop".to_string(), Vec::new())];
     }
     let model = HellburnerModel::build(world);
     let strategy = SelectionStrategy::ScorePerShip;
     let mut scratch = FrontlineScratch::default();
     let candidate_ids = candidate_target_ids(world, &model);
 
-    let mut out: Vec<Vec<MoveAction>> = Vec::new();
+    let mut out: Vec<(String, Vec<MoveAction>)> = Vec::new();
 
     // Opening pre-pass, shared by the baseline so it stays identical to `plan()`.
     let opening = crate::apollo::early_game::plan_opening(&model);
@@ -1945,7 +1977,7 @@ pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
     // Baseline first: the unrestricted greedy (== `plan()`), capturing every
     // winnable target. Mirrors the old `search_candidates` first-entry contract.
     let (full_moves, _) = run_strategy(world, &model, strategy, &opening);
-    out.push(full_moves);
+    out.push(("apollo:full".to_string(), full_moves));
 
     // Seed: evaluate every candidate target once against the empty plan. Every
     // subset run reuses these for its first (empty-plan) pick.
@@ -1975,6 +2007,12 @@ pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
         .map(|(_, tid)| *tid)
         .collect();
     let k = top.len();
+    let top_desc = top
+        .iter()
+        .enumerate()
+        .map(|(i, tid)| format!("{}:{}", i + 1, tid))
+        .collect::<Vec<_>>()
+        .join(",");
 
     // Every subset of the top-k targets, including the empty set. Buffers are
     // reused across masks; the per-subset cache is reseeded from `seed` with
@@ -1984,6 +2022,9 @@ pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
         HashMap::with_capacity_and_hasher(k, Default::default());
     let mut dirty: HashSet<i64> = HashSet::default();
     for mask in 0u32..(1u32 << k) {
+        if k == SUBSET_TOP_TARGETS && mask == (1u32 << k) - 1 {
+            continue;
+        }
         subset_ids.clear();
         for i in 0..k {
             if mask & (1u32 << i) != 0 {
@@ -2007,8 +2048,32 @@ pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
             &mut scratch,
         );
         moves.extend(send_reinforcements(world, &model, &state));
-        if !out.iter().any(|prev| prev == &moves) {
-            out.push(moves);
+        if !out.iter().any(|(_, prev)| prev == &moves) {
+            let ranks = (0..k)
+                .filter(|&i| mask & (1u32 << i) != 0)
+                .map(|i| (i + 1).to_string())
+                .collect::<Vec<_>>();
+            let ranks = if ranks.is_empty() {
+                "none".to_string()
+            } else {
+                ranks.join("+")
+            };
+            let ids = subset_ids
+                .iter()
+                .map(|tid| tid.to_string())
+                .collect::<Vec<_>>();
+            let ids = if ids.is_empty() {
+                "none".to_string()
+            } else {
+                ids.join("+")
+            };
+            out.push((
+                format!(
+                    "apollo:subset:ranks={}:ids={}:mask={:#05b}:top={}",
+                    ranks, ids, mask, top_desc
+                ),
+                moves,
+            ));
         }
     }
 

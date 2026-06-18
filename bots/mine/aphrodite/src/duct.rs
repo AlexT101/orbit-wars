@@ -17,7 +17,7 @@ use crate::sim::{alive_players, apply_launches, tick, Action};
 use crate::GameState;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -38,7 +38,7 @@ const K_NON_ROOT_DEFAULT: usize = 4;
 /// search + leaf eval entirely and just play apollo's top-ranked plan
 /// (`my_candidates[0]`, what pure apollo would play). 0 disables this — normal
 /// search runs from step 0, i.e. previous behavior.
-const APOLLO_ONLY_FIRST_TURNS: i64 = 5;
+const APOLLO_ONLY_FIRST_TURNS: i64 = 8;
 /// Minimum root expansions to spend on each newly-added IL candidate, by IL
 /// rank. Change to e.g. `&[4, 2, 1]` to seed the third injected candidate too.
 const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
@@ -93,6 +93,8 @@ thread_local! {
     /// cross-thread contention. Keyed by `(src,dst,ships,abs_launch)` — entries
     /// for different node steps coexist safely.
     static EVAL_L1: crate::apollo::world::ShotL1 = RefCell::new(Default::default());
+    static CANDIDATE_DECISIONS: RefCell<Option<File>> =
+        RefCell::new(open_append_env_file("CHAOS_CANDIDATE_DECISIONS_PATH"));
 }
 
 /// Fingerprint of a game's fixed geometry: angular velocity plus the static
@@ -203,6 +205,20 @@ fn open_env_file(var: &str) -> Option<File> {
     }
 }
 
+fn open_append_env_file(var: &str) -> Option<File> {
+    let p = std::env::var(var).ok()?;
+    match OpenOptions::new().create(true).append(true).open(&p) {
+        Ok(f) => {
+            eprintln!("[aphrodite] {} -> {}", var, p);
+            Some(f)
+        }
+        Err(e) => {
+            eprintln!("[aphrodite] could not open {} at {}: {}", var, p, e);
+            None
+        }
+    }
+}
+
 fn open_tree_stats() -> Option<File> {
     let mut f = open_env_file("APHRODITE_DUMP_TREE_STATS_PATH")?;
     let _ = writeln!(
@@ -304,9 +320,11 @@ struct Node {
     state: GameState,
     visits: u32,
     my_candidates: Vec<Vec<Action>>,
+    my_labels: Vec<String>,
     my_priors: Vec<f64>,
     my_stats: Vec<ActionStats>,
     opp_candidates: Vec<Vec<Action>>,
+    opp_labels: Vec<String>,
     opp_priors: Vec<f64>,
     opp_stats: Vec<ActionStats>,
     /// Assumed launches for the non-branched minor players (4p only): each
@@ -364,6 +382,35 @@ fn enumerate_pair(
     (my, op)
 }
 
+fn enumerate_pair_labeled(
+    state: &GameState,
+    me: i32,
+    opp: i32,
+    k: usize,
+    rollout_internal: bool,
+) -> (Vec<Vec<Action>>, Vec<String>, Vec<Vec<Action>>, Vec<String>) {
+    let (mut my, mut op) = with_cache_at(state.step, |cache| {
+        crate::apollo_bridge::apollo_candidates_pair_labeled(
+            state,
+            me,
+            opp,
+            cache,
+            rollout_internal,
+        )
+    });
+    if my.is_empty() {
+        my.push(("apollo:fallback_noop".to_string(), Vec::new()));
+    }
+    if op.is_empty() {
+        op.push(("apollo:fallback_noop".to_string(), Vec::new()));
+    }
+    my.truncate(k);
+    op.truncate(k);
+    let (my_labels, my_actions): (Vec<_>, Vec<_>) = my.into_iter().unzip();
+    let (opp_labels, opp_actions): (Vec<_>, Vec<_>) = op.into_iter().unzip();
+    (my_actions, my_labels, opp_actions, opp_labels)
+}
+
 /// Splice externally supplied single-launch candidates (the chaos IL policy's
 /// top-k moves) into the root's MY candidate set. Entries are appended, never
 /// interleaved in place: `children` is keyed by candidate index, so existing
@@ -372,18 +419,42 @@ fn enumerate_pair(
 /// per virtual slot (apollo#0, il#0, apollo#1, il#1, …), which preserves the
 /// apollo candidates' existing 0.5-per-rank ratios exactly while giving il#j
 /// the geometric mean of apollo#j and apollo#j+1.
-fn inject_root_candidates(node: &mut Node, extra: &[Action]) -> (usize, usize) {
+fn inject_root_candidates(
+    node: &mut Node,
+    extra: &[Action],
+    probs: &[f64],
+    logits: &[i64],
+) -> (usize, usize) {
     let base_n = node.my_candidates.len();
-    for &a in extra {
-        let plan = vec![a];
-        if node.my_candidates.iter().any(|c| actions_equal(c, &plan)) {
-            continue;
+    let reinforced_plans = crate::apollo_bridge::il_candidates_with_reinforcements(
+        &node.state,
+        node.state.player,
+        extra,
+    );
+    for (rank, &a) in extra.iter().enumerate() {
+        let mut variants = vec![("solo", vec![a])];
+        if let Some(plan) = reinforced_plans.get(rank) {
+            variants.push(("reinforced", plan.clone()));
         }
-        node.my_candidates.push(plan);
-        node.my_stats.push(ActionStats {
-            visits: 0,
-            sum_value: 0.0,
-        });
+        for (variant, plan) in variants {
+            if node.my_candidates.iter().any(|c| actions_equal(c, &plan)) {
+                continue;
+            }
+            node.my_candidates.push(plan);
+            let prob = probs.get(rank).copied().unwrap_or(f64::NAN);
+            let logit = logits.get(rank).copied().unwrap_or(-1);
+            node.my_labels.push(format!(
+                "il:{}:rank={}:prob={:.6}:logit={}",
+                variant,
+                rank + 1,
+                prob,
+                logit
+            ));
+            node.my_stats.push(ActionStats {
+                visits: 0,
+                sum_value: 0.0,
+            });
+        }
     }
     let added = node.my_candidates.len() - base_n;
     if added == 0 {
@@ -585,7 +656,18 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     // Only the genuine root expansion runs apollo's early-game opening DFS;
     // every non-root node suppresses it (rollout_internal), mirroring apollo's
     // in-rollout reply policy.
-    let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k, !root);
+    let (my_alts, my_labels, opp_alts, opp_labels) = if root {
+        enumerate_pair_labeled(&node.state, me, opp, k, !root)
+    } else {
+        let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k, !root);
+        let my_labels = (0..my_alts.len())
+            .map(|i| format!("apollo:nonroot:{}", i))
+            .collect();
+        let opp_labels = (0..opp_alts.len())
+            .map(|i| format!("apollo:nonroot:{}", i))
+            .collect();
+        (my_alts, my_labels, opp_alts, opp_labels)
+    };
     // Fix each minor player's reply to their single apollo greedy plan, computed
     // once here from the node state (empty in 2p). Replayed at every expansion.
     node.other_launches = {
@@ -636,7 +718,9 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     node.my_stats = my_stats;
     node.opp_stats = opp_stats;
     node.my_candidates = my_alts;
+    node.my_labels = my_labels;
     node.opp_candidates = opp_alts;
+    node.opp_labels = opp_labels;
     node.candidates_initialized = true;
     node.candidates_root = root;
     crate::profiling::add(&crate::profiling::ENSURE_CANDIDATES_NS, __ec_t0);
@@ -784,9 +868,11 @@ fn select_and_expand_forced_my(
             state: s,
             visits: 1,
             my_candidates: Vec::new(),
+            my_labels: Vec::new(),
             my_priors: Vec::new(),
             my_stats: Vec::new(),
             opp_candidates: Vec::new(),
+            opp_labels: Vec::new(),
             opp_priors: Vec::new(),
             opp_stats: Vec::new(),
             other_launches: Vec::new(),
@@ -922,6 +1008,92 @@ fn root_top2_gap(root: &Node) -> f64 {
     avgs[0] - avgs[1]
 }
 
+fn overlap_il_ranks(candidate: &[Action], il_candidates: &[Action]) -> Vec<usize> {
+    il_candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, &a)| {
+            if actions_equal(candidate, &[a]) {
+                Some(rank + 1)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn maybe_dump_candidate_decision(
+    state: &GameState,
+    me: i32,
+    root: &Node,
+    best_i: usize,
+    best_val: f64,
+    iters: u32,
+    overage_used_ms: u64,
+    il_first_idx: usize,
+    il_added: usize,
+    il_candidates: &[Action],
+    il_candidate_probs: &[f64],
+    il_candidate_logits: &[i64],
+) {
+    CANDIDATE_DECISIONS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(f) = slot.as_mut() else {
+            return;
+        };
+        let candidates = root
+            .my_candidates
+            .iter()
+            .enumerate()
+            .map(|(i, actions)| {
+                let st = &root.my_stats[i];
+                let avg = if st.visits > 0 {
+                    Some(st.sum_value / st.visits as f64)
+                } else {
+                    None
+                };
+                serde_json::json!({
+                    "idx": i,
+                    "source": if i >= il_first_idx && i < il_first_idx + il_added { "il" } else { "apollo" },
+                    "label": root.my_labels.get(i).map(String::as_str).unwrap_or("unknown"),
+                    "prior": root.my_priors.get(i).copied().unwrap_or(0.0),
+                    "visits": st.visits,
+                    "avg": avg,
+                    "actions": actions.len(),
+                    "overlap_il_ranks": overlap_il_ranks(actions, il_candidates),
+                })
+            })
+            .collect::<Vec<_>>();
+        let chosen_overlaps = root
+            .my_candidates
+            .get(best_i)
+            .map(|actions| overlap_il_ranks(actions, il_candidates))
+            .unwrap_or_default();
+        let record = serde_json::json!({
+            "pid": std::process::id(),
+            "step": state.step,
+            "player": me,
+            "iters": iters,
+            "overage_ms": overage_used_ms,
+            "root_visits": root.visits,
+            "my_k": root.my_candidates.len(),
+            "opp_k": root.opp_candidates.len(),
+            "chosen_idx": best_i,
+            "chosen_source": if best_i >= il_first_idx && best_i < il_first_idx + il_added { "il" } else { "apollo" },
+            "chosen_label": root.my_labels.get(best_i).map(String::as_str).unwrap_or("unknown"),
+            "chosen_avg": if best_val.is_finite() { Some(best_val) } else { None },
+            "chosen_overlap_il_ranks": chosen_overlaps,
+            "il_offered": il_candidates.len(),
+            "il_added": il_added,
+            "il_probs": il_candidate_probs,
+            "il_logits": il_candidate_logits,
+            "candidates": candidates,
+        });
+        let _ = writeln!(f, "{}", record);
+        let _ = f.flush();
+    });
+}
+
 /// `overage_remaining_ms` is the engine's `remainingOverageTime` (seconds,
 /// converted to ms by the caller) for THIS turn, or 0.0 when overage use is
 /// disabled (dev) — in which case the extension below is skipped entirely.
@@ -931,6 +1103,8 @@ pub fn best_move(
     budget_ms: u64,
     overage_remaining_ms: f64,
     il_candidates: &[Action],
+    il_candidate_probs: &[f64],
+    il_candidate_logits: &[i64],
 ) -> Vec<Action> {
     // REQUIRED to make sure we set 4p mode correctly before any apollo code runs
     crate::apollo::constants::set_mode_for_alive(alive_players(state));
@@ -962,9 +1136,11 @@ pub fn best_move(
             state: state.clone(),
             visits: 0,
             my_candidates: Vec::new(),
+            my_labels: Vec::new(),
             my_priors: Vec::new(),
             my_stats: Vec::new(),
             opp_candidates: Vec::new(),
+            opp_labels: Vec::new(),
             opp_priors: Vec::new(),
             opp_stats: Vec::new(),
             other_launches: Vec::new(),
@@ -999,7 +1175,12 @@ pub fn best_move(
     let mut il_first_idx = 0usize;
     let mut il_added = 0usize;
     if !il_candidates.is_empty() {
-        (il_first_idx, il_added) = inject_root_candidates(&mut root, il_candidates);
+        (il_first_idx, il_added) = inject_root_candidates(
+            &mut root,
+            il_candidates,
+            il_candidate_probs,
+            il_candidate_logits,
+        );
         if std::env::var("OW_DEBUG").is_ok() {
             eprintln!(
                 "[chaos-il] step={} player={} il_offered={} il_added={} root_K={}",
@@ -1213,6 +1394,20 @@ pub fn best_move(
             best_i = i;
         }
     }
+    maybe_dump_candidate_decision(
+        state,
+        me,
+        &root,
+        best_i,
+        best_val,
+        iters,
+        overage_used_ms,
+        il_first_idx,
+        il_added,
+        il_candidates,
+        il_candidate_probs,
+        il_candidate_logits,
+    );
     let chosen = root.my_candidates[best_i].clone();
 
     // Stash root for next turn's reuse (so we can match observed state to
