@@ -2,7 +2,9 @@
 A thin Python wrapper that delegates the entire turn to a native Rust extension.
 
 Build the native extension first:
+    cd bots/mine/apollo
     maturin develop --release
+    cd ../../..
     
 Note you MUST rebuild the Rust module after changing the code or you will be running an old version of the bot.
 """

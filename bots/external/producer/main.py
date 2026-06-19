@@ -6,6 +6,12 @@ import os
 import sys
 from dataclasses import dataclass
 
+# Producer uses many small CPU tensor ops; letting Torch fan each bot call
+# across the host CPU is much slower when many matches run in parallel.
+_TORCH_THREADS = os.environ.get("PRODUCER_TORCH_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", _TORCH_THREADS)
+os.environ.setdefault("MKL_NUM_THREADS", _TORCH_THREADS)
+
 # Make the sibling ``orbit_lite`` package importable wherever this file runs:
 # loaded in place, dropped at a submission-archive root, or exec'd by
 # kaggle_environments with no ``__file__`` (fall back to the working dir).
@@ -18,6 +24,12 @@ if _HERE not in sys.path:
 
 import torch
 from torch import Tensor
+
+torch.set_num_threads(max(1, int(_TORCH_THREADS)))
+try:
+    torch.set_num_interop_threads(max(1, int(_TORCH_THREADS)))
+except RuntimeError:
+    pass
 
 from orbit_lite.geometry import fleet_speed
 from orbit_lite.intercept_aim import intercept_angle
