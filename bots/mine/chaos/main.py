@@ -22,12 +22,14 @@ Failures are LOUD by design: a missing checkpoint, stale `orbit_wars_model`
 schema, or IL runtime error raises and kills the bot. No silent degradation -
 if chaos is running, the IL injection is running.
 
-IL injection runs in 2p games only. A native 4p game plays as pure aphrodite
-(no IL); if it decays to two surviving players the 2p checkpoint loads lazily on
-that turn. Startup is split so the costly, reusable part is paid once, with no
-checkpoint loaded: `import torch` + threadpool/kernel warmup + the
-orbit_wars_model schema check happen at module load (`_warm_torch`), while the 2p
-checkpoint loads lazily on the first turn IL is actually used.
+IL injection runs in every live game: the 2p checkpoint feeds 2-player states,
+the 4p checkpoint feeds 3- and 4-player states (a 4p game that decays to two
+survivors switches to the 2p checkpoint automatically). The right checkpoint
+loads lazily on the first turn its player-count is seen. Startup is split so the
+costly, reusable part is paid once, with no checkpoint loaded: `import torch` +
+threadpool/kernel warmup + the orbit_wars_model schema check happen at module
+load (`_warm_torch`); the schema is player-count independent, so one warmup
+covers both checkpoints.
 
 Env knobs:
   CHAOS_IL_K            max IL candidates injected per turn; 0 disables the IL
@@ -41,6 +43,7 @@ Env knobs:
                          `import torch`)
   CHAOS_TURN_TARGET_MS  total per-turn wall target override
   CHAOS_IL_CHECKPOINT   override the 2p IL checkpoint path
+  CHAOS_IL_CHECKPOINT_4P override the 4p IL checkpoint path
 """
 
 from __future__ import annotations
@@ -89,18 +92,14 @@ if _BUNDLE:
     _APH_WRAPPER = HERE / "aphrodite_wrapper.py"
     _IL_SYS_PATH = HERE
     DEFAULT_CHECKPOINT_2P = HERE / "osteo_il_2p_latest.pt"
+    DEFAULT_CHECKPOINT_4P = HERE / "osteo_il_4p_latest.pt"
 else:
     ROOT = _repo_root()
     _APH_WRAPPER = ROOT / "bots" / "mine" / "aphrodite" / "main.py"
     _IL_SYS_PATH = ROOT / "experimental_arch" / "train_transformer"
-    DEFAULT_CHECKPOINT_2P = (
-        ROOT
-        / "experimental_arch"
-        / "imitation_learning"
-        / "checkpoints"
-        / "osteo_bc_transformer"
-        / "latest.pt"
-    )
+    _CHECKPOINT_DIR = ROOT / "experimental_arch" / "imitation_learning" / "checkpoints"
+    DEFAULT_CHECKPOINT_2P = _CHECKPOINT_DIR / "osteo_bc_transformer" / "latest.pt"
+    DEFAULT_CHECKPOINT_4P = _CHECKPOINT_DIR / "osteo_il_4p_latest.pt"
 
 # Reuse aphrodite's wrapper internals (binary location/build, weight selection,
 # daemon lifecycle). Loaded by path because bot dirs are not packages. In the
@@ -164,24 +163,30 @@ def _il_busy_fail_ms() -> int:
     return max(0, int(os.environ.get("CHAOS_IL_BUSY_FAIL_MS", "5000")))
 
 
-def _checkpoint_path() -> Path:
+def _checkpoint_path_2p() -> Path:
     override = os.environ.get("CHAOS_IL_CHECKPOINT")
     if override:
         return Path(override).expanduser().resolve()
     return DEFAULT_CHECKPOINT_2P
 
 
+def _checkpoint_path_4p() -> Path:
+    override = os.environ.get("CHAOS_IL_CHECKPOINT_4P")
+    if override:
+        return Path(override).expanduser().resolve()
+    return DEFAULT_CHECKPOINT_4P
+
+
 class _ILPolicy:
     """Loads the osteo IL transformer and yields top-k decoded actions."""
 
-    def __init__(self) -> None:
+    def __init__(self, path: Path) -> None:
         if str(_IL_SYS_PATH) not in sys.path:
             sys.path.insert(0, str(_IL_SYS_PATH))
         import torch  # already imported + warmed by _warm_torch() at module load
         from model import build_policy
 
         self._torch = torch
-        path = _checkpoint_path()
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         config = checkpoint.get("config", {})
         self.checkpoint_path = path
@@ -235,16 +240,29 @@ class _ILPolicy:
         return actions
 
 
-_IL: _ILPolicy | None = None
+_IL_2P: _ILPolicy | None = None
+_IL_4P: _ILPolicy | None = None
 
 
-def _il() -> _ILPolicy:
+def _il_2p() -> _ILPolicy:
     """Construct the 2p IL policy on first use. Failures propagate — chaos must
     never silently degrade to pure aphrodite."""
-    global _IL
-    if _IL is None:
-        _IL = _ILPolicy()
-    return _IL
+    global _IL_2P
+    if _IL_2P is None:
+        _IL_2P = _ILPolicy(_checkpoint_path_2p())
+    return _IL_2P
+
+
+def _il_4p() -> _ILPolicy:
+    """Construct the 4p IL policy on first use (3- and 4-player states)."""
+    global _IL_4P
+    if _IL_4P is None:
+        _IL_4P = _ILPolicy(_checkpoint_path_4p())
+    return _IL_4P
+
+
+def _il_for(num_players: int) -> _ILPolicy:
+    return _il_2p() if num_players == 2 else _il_4p()
 
 
 def _warm_torch() -> None:
@@ -300,14 +318,14 @@ _IL_FUTURE_STARTED_AT: float | None = None
 _IL_FUTURE_STEP = None
 
 
-def _il_candidates(obs: dict) -> list[dict]:
+def _il_candidates(obs: dict, num_players: int) -> list[dict]:
     k = _il_k()
     if k <= 0:
         return []
-    return _il().top_actions(obs, k, _il_min_prob())
+    return _il_for(num_players).top_actions(obs, k, _il_min_prob())
 
 
-def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
+def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None, str]:
     """Run the IL forward under a wall-clock deadline; return (candidates, desc).
 
     The deadline is whatever the turn target leaves after reserving the search
@@ -316,6 +334,7 @@ def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
     load) the worker keeps running in the background and populates the cache for
     the next turn; we never reuse its result for a later, different obs."""
     global _IL_FUTURE, _IL_FUTURE_STARTED_AT, _IL_FUTURE_STEP
+    tag = "2p" if num_players == 2 else "4p"
     if _IL_FUTURE is not None:
         if _IL_FUTURE.done():
             stale = _IL_FUTURE
@@ -336,13 +355,13 @@ def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
                     f"current_step={obs.get('step')} busy_ms={busy_ms:.0f} "
                     f"limit_ms={limit_ms}"
                 )
-            return None, "2p:busy"  # prior forward still running
+            return None, f"{tag}:busy"  # prior forward still running
 
     deadline_s = (
         _turn_target_ms() - _MIN_SEARCH_MS - _DISPATCH_MARGIN_MS
     ) / 1000.0 - (time.perf_counter() - t0)
     submitted_at = time.perf_counter()
-    fut = _IL_EXEC.submit(_il_candidates, obs)
+    fut = _IL_EXEC.submit(_il_candidates, obs, num_players)
     try:
         cands = fut.result(timeout=max(0.0, deadline_s))
     except _FutureTimeout:
@@ -352,13 +371,13 @@ def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
         # Loud by design: a deadline cut is rare post-warmup (a cold first
         # forward or the 4p->2p checkpoint load), so surface it unconditionally.
         print(
-            f"[chaos] IL deadline cut at step={obs.get('step')} 2p "
+            f"[chaos] IL deadline cut at step={obs.get('step')} {tag} "
             f"deadline_ms={max(0.0, deadline_s) * 1000:.0f}; search runs without "
             f"IL candidates this turn",
             file=sys.stderr,
         )
-        return None, "2p:deferred"
-    return cands, f"2p:{_il().dataset_name}"
+        return None, f"{tag}:deferred"
+    return cands, f"{tag}:{_il_for(num_players).dataset_name}"
 
 
 def agent(obs, config=None):
@@ -373,23 +392,25 @@ def agent(obs, config=None):
             p["config"] = cfg
 
     t0 = time.perf_counter()
-    # IL injects in 2p only. _infer_num_players counts surviving owners, so a
-    # native 4p game reports 4 here (pure aphrodite, no IL) and only flips to 2 —
-    # lazily loading the 2p checkpoint on that turn — if it decays to two players.
+    # IL injects in every live game. _infer_num_players counts surviving owners:
+    # 2 uses the 2p checkpoint, 3/4 use the 4p checkpoint, and a 4p game decaying
+    # to two players switches back to the 2p checkpoint on that turn. The relevant
+    # checkpoint loads lazily the first turn its player-count is seen.
     num_players = _aph._infer_num_players(p)
-    if num_players == 2 and p["step"] >= _il_skip_turns():
+    tag = "2p" if num_players == 2 else "4p"
+    if num_players >= 2 and p["step"] >= _il_skip_turns():
         if _il_k() <= 0:
             cands = None
-            il_desc = "2p:k0"
+            il_desc = f"{tag}:k0"
         else:
-            cands, il_desc = _il_pass(p, t0)
+            cands, il_desc = _il_pass(p, t0, num_players)
             if cands:
                 p["il_candidates"] = [c["action"] for c in cands]
                 p["il_candidate_probs"] = [c["prob"] for c in cands]
                 p["il_candidate_logits"] = [c["logit"] for c in cands]
     else:
         cands = None
-        il_desc = "2p:skip" if num_players == 2 else None
+        il_desc = f"{tag}:skip" if num_players >= 2 else None
     # Dynamic split of the turn target: whatever the IL pass (or 4p skip) left
     # goes to the search. Sent per turn — the binary's env budget is unused.
     il_ms = (time.perf_counter() - t0) * 1000

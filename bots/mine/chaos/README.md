@@ -26,10 +26,12 @@ The field is optional: aphrodite's own wrapper never sends it, so the shared
 binary behaves identically for aphrodite.
 
 Scope (v1): root node only (per-node IL is ~1000x too slow), my side only.
-IL injection runs in 2p games only. A native 4p game plays as pure aphrodite (no
-IL); if it decays to two surviving players, the 2p checkpoint loads lazily on
-that turn and IL resumes. (4p IL was tried and regressed chaos, so the 4p Isaiah
-policy is no longer bundled or loaded.)
+IL injection runs in every live game: the 2p checkpoint feeds 2-player states,
+the 4p checkpoint feeds 3- and 4-player states, and a 4p game that decays to two
+survivors switches back to the 2p checkpoint on that turn. Each checkpoint loads
+lazily the first turn its player-count is seen. (An earlier 4p Isaiah policy
+regressed chaos and was removed; the current 4p checkpoint is the osteo
+last-third factored policy — retest its ladder effect before trusting it.)
 
 **Failures are loud:** a missing checkpoint, stale `orbit_wars_model` schema,
 IL runtime error, or dead binary raises immediately. If chaos is playing, the
@@ -63,6 +65,7 @@ effective search budget at 900ms when the remaining overage pool is low.
 | `CHAOS_TORCH_THREADS` | 2 | torch / OpenMP intra-op threads |
 | `CHAOS_TURN_TARGET_MS` | 600 dev / 900 submission | total per-turn wall target (IL + search) |
 | `CHAOS_IL_CHECKPOINT` | repo 2p checkpoint | override the 2p IL checkpoint path |
+| `CHAOS_IL_CHECKPOINT_4P` | repo 4p checkpoint | override the 4p IL checkpoint path |
 
 `OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL mode, ms + candidates) and
 `[chaos-il]` (Rust: offered/added/root_K) lines to stderr.
@@ -91,9 +94,11 @@ With `OW_DEBUG=1`, an apollo-only turn prints `[duck-apollo-only]` (instead of
 The policy IL tooling lives under `experimental_arch/imitation_learning`.
 `build_dataset_from_zips.py` can stream `ladder_replays/*.zip` into the chunked
 manifest format consumed by `train.py`; see that directory's README for the
-full 4p workflow. Note: a 4p IL policy was trained and wired into chaos but
-regressed it, so chaos no longer bundles or loads a 4p checkpoint — this tooling
-remains for future retraining only.
+full 4p workflow. The bundled 4p checkpoint (`osteo_il_4p_latest.pt`) is a frozen
+copy of `train.py`'s `best.pt` from the last-third factored run; refresh it by
+re-copying when a better checkpoint is trained, then rebuild the submission.
+Note: an earlier 4p IL policy regressed chaos, so confirm the current one helps
+on the ladder before trusting it.
 
 ## Future work
 
