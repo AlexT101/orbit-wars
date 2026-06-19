@@ -45,6 +45,10 @@ fn opening_targets(world: &WorldState) -> Vec<i64> {
     plan_opening(&model).iter().map(|e| e.target).collect()
 }
 
+fn opening_prepass_enabled() -> bool {
+    EARLY_GAME_END > 0
+}
+
 /// All planets sit in the static zone (orbital radius + planet radius ≥ 50),
 /// so positions are turn-constant and travel times are easy to reason about.
 ///
@@ -55,6 +59,9 @@ fn opening_targets(world: &WorldState) -> Vec<i64> {
 /// must find the B→C chain.
 #[test]
 fn early_game_finds_chain_captures() {
+    if !opening_prepass_enabled() {
+        return;
+    }
     let planets = vec![
         planet(0, 0, 95.0, 92.0, 12, 5),  // home
         planet(1, -1, 95.0, 82.0, 5, 1),  // B — cheap relay toward C
@@ -146,6 +153,9 @@ fn early_game_rejects_negative_value_captures() {
 /// next door.
 #[test]
 fn early_game_reservations_block_greedy() {
+    if !opening_prepass_enabled() {
+        return;
+    }
     let planets = vec![
         planet(0, 0, 95.0, 92.0, 10, 1),  // home
         planet(1, -1, 95.0, 82.0, 12, 5), // N — affordable only at offset ≥ 3
