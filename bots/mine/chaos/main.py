@@ -30,10 +30,13 @@ orbit_wars_model schema check happen at module load (`_warm_torch`), while the 2
 checkpoint loads lazily on the first turn IL is actually used.
 
 Env knobs:
-  CHAOS_IL_K            max IL candidates injected per turn (default 4)
+  CHAOS_IL_K            max IL candidates injected per turn; 0 disables the IL
+                         forward entirely (default 4)
   CHAOS_IL_MIN_PROB     drop IL suggestions below this policy prob (default 0.02)
   CHAOS_IL_SKIP_TURNS   skip IL injection on the first N turns (default 8 =
                          match the Apollo-only opening shortcut)
+  CHAOS_IL_BUSY_FAIL_MS fail loudly if a timed-out IL worker is still busy after
+                         this many ms (default 5000)
   CHAOS_TORCH_THREADS   torch / OpenMP intra-op threads (default 2; set before
                          `import torch`)
   CHAOS_TURN_TARGET_MS  total per-turn wall target override
@@ -157,6 +160,10 @@ def _il_skip_turns() -> int:
     return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "8")))
 
 
+def _il_busy_fail_ms() -> int:
+    return max(0, int(os.environ.get("CHAOS_IL_BUSY_FAIL_MS", "5000")))
+
+
 def _checkpoint_path() -> Path:
     override = os.environ.get("CHAOS_IL_CHECKPOINT")
     if override:
@@ -193,6 +200,8 @@ class _ILPolicy:
         # when this policy is built mid-game (a 4p board decaying to two players).
 
     def top_actions(self, obs: dict, k: int, min_prob: float) -> list[dict]:
+        if k <= 0:
+            return []
         torch = self._torch
         from features import decode_move, encode_obs
         from model import tensorize
@@ -287,10 +296,15 @@ def _warm_torch() -> None:
 # skipped injection only forfeits that turn's IL candidates, never the search.
 _IL_EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chaos-il")
 _IL_FUTURE = None  # in-flight task from a turn whose IL deadline expired
+_IL_FUTURE_STARTED_AT: float | None = None
+_IL_FUTURE_STEP = None
 
 
 def _il_candidates(obs: dict) -> list[dict]:
-    return _il().top_actions(obs, _il_k(), _il_min_prob())
+    k = _il_k()
+    if k <= 0:
+        return []
+    return _il().top_actions(obs, k, _il_min_prob())
 
 
 def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
@@ -301,25 +315,40 @@ def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
     `_MIN_SEARCH_MS`. On a cold turn (first inference, or the 4p->2p checkpoint
     load) the worker keeps running in the background and populates the cache for
     the next turn; we never reuse its result for a later, different obs."""
-    global _IL_FUTURE
+    global _IL_FUTURE, _IL_FUTURE_STARTED_AT, _IL_FUTURE_STEP
     if _IL_FUTURE is not None:
         if _IL_FUTURE.done():
             stale = _IL_FUTURE
             _IL_FUTURE = None
+            _IL_FUTURE_STARTED_AT = None
+            _IL_FUTURE_STEP = None
             # Drain the stale previous-observation result. Success is discarded,
             # but any background exception must still be loud.
             stale.result()
         else:
+            started_at = _IL_FUTURE_STARTED_AT or time.perf_counter()
+            busy_ms = (time.perf_counter() - started_at) * 1000
+            limit_ms = _il_busy_fail_ms()
+            if busy_ms >= limit_ms:
+                prior_step = _IL_FUTURE_STEP
+                raise RuntimeError(
+                    f"IL worker stuck after timeout: prior_step={prior_step} "
+                    f"current_step={obs.get('step')} busy_ms={busy_ms:.0f} "
+                    f"limit_ms={limit_ms}"
+                )
             return None, "2p:busy"  # prior forward still running
 
     deadline_s = (
         _turn_target_ms() - _MIN_SEARCH_MS - _DISPATCH_MARGIN_MS
     ) / 1000.0 - (time.perf_counter() - t0)
+    submitted_at = time.perf_counter()
     fut = _IL_EXEC.submit(_il_candidates, obs)
     try:
         cands = fut.result(timeout=max(0.0, deadline_s))
     except _FutureTimeout:
         _IL_FUTURE = fut  # let it finish; its checkpoint/cache warms the next turn
+        _IL_FUTURE_STARTED_AT = submitted_at
+        _IL_FUTURE_STEP = obs.get("step")
         # Loud by design: a deadline cut is rare post-warmup (a cold first
         # forward or the 4p->2p checkpoint load), so surface it unconditionally.
         print(
@@ -349,11 +378,15 @@ def agent(obs, config=None):
     # lazily loading the 2p checkpoint on that turn — if it decays to two players.
     num_players = _aph._infer_num_players(p)
     if num_players == 2 and p["step"] >= _il_skip_turns():
-        cands, il_desc = _il_pass(p, t0)
-        if cands:
-            p["il_candidates"] = [c["action"] for c in cands]
-            p["il_candidate_probs"] = [c["prob"] for c in cands]
-            p["il_candidate_logits"] = [c["logit"] for c in cands]
+        if _il_k() <= 0:
+            cands = None
+            il_desc = "2p:k0"
+        else:
+            cands, il_desc = _il_pass(p, t0)
+            if cands:
+                p["il_candidates"] = [c["action"] for c in cands]
+                p["il_candidate_probs"] = [c["prob"] for c in cands]
+                p["il_candidate_logits"] = [c["logit"] for c in cands]
     else:
         cands = None
         il_desc = "2p:skip" if num_players == 2 else None

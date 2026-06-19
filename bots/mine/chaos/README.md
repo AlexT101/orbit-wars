@@ -56,9 +56,10 @@ effective search budget at 900ms when the remaining overage pool is low.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `CHAOS_IL_K` | 4 | max IL candidates injected per turn |
+| `CHAOS_IL_K` | 4 | max IL candidates injected per turn; `0` disables the IL forward entirely |
 | `CHAOS_IL_MIN_PROB` | 0.02 | drop IL suggestions below this policy prob |
 | `CHAOS_IL_SKIP_TURNS` | 8 | skip IL injection on the first N turns, matching the tested Apollo-only opening |
+| `CHAOS_IL_BUSY_FAIL_MS` | 5000 | fail loudly if a timed-out IL worker is still busy after this many ms |
 | `CHAOS_TORCH_THREADS` | 2 | torch / OpenMP intra-op threads |
 | `CHAOS_TURN_TARGET_MS` | 600 dev / 900 submission | total per-turn wall target (IL + search) |
 | `CHAOS_IL_CHECKPOINT` | repo 2p checkpoint | override the 2p IL checkpoint path |
