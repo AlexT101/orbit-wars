@@ -30,7 +30,7 @@ orbit_wars_model schema check happen at module load (`_warm_torch`), while the 2
 checkpoint loads lazily on the first turn IL is actually used.
 
 Env knobs:
-  CHAOS_IL_K            max IL candidates injected per turn (default 5)
+  CHAOS_IL_K            max IL candidates injected per turn (default 4)
   CHAOS_IL_MIN_PROB     drop IL suggestions below this policy prob (default 0.02)
   CHAOS_IL_SKIP_TURNS   skip IL injection on the first N turns (default 1 =
                          skip only turn 0, where the binary spawn already lands)
@@ -143,7 +143,7 @@ def _turn_target_ms() -> int:
 
 
 def _il_k() -> int:
-    return max(0, int(os.environ.get("CHAOS_IL_K", "5")))
+    return max(0, int(os.environ.get("CHAOS_IL_K", "4")))
 
 
 def _il_min_prob() -> float:

@@ -443,35 +443,24 @@ fn inject_root_candidates(
     logits: &[i64],
 ) -> (usize, usize) {
     let base_n = node.my_candidates.len();
-    let reinforced_plans = crate::apollo_bridge::il_candidates_with_reinforcements(
-        &node.state,
-        node.state.player,
-        extra,
-    );
     for (rank, &a) in extra.iter().enumerate() {
-        let mut variants = vec![("solo", vec![a])];
-        if let Some(plan) = reinforced_plans.get(rank) {
-            variants.push(("reinforced", plan.clone()));
+        let plan = vec![a];
+        if node.my_candidates.iter().any(|c| actions_equal(c, &plan)) {
+            continue;
         }
-        for (variant, plan) in variants {
-            if node.my_candidates.iter().any(|c| actions_equal(c, &plan)) {
-                continue;
-            }
-            node.my_candidates.push(plan);
-            let prob = probs.get(rank).copied().unwrap_or(f64::NAN);
-            let logit = logits.get(rank).copied().unwrap_or(-1);
-            node.my_labels.push(format!(
-                "il:{}:rank={}:prob={:.6}:logit={}",
-                variant,
-                rank + 1,
-                prob,
-                logit
-            ));
-            node.my_stats.push(ActionStats {
-                visits: 0,
-                sum_value: 0.0,
-            });
-        }
+        node.my_candidates.push(plan);
+        let prob = probs.get(rank).copied().unwrap_or(f64::NAN);
+        let logit = logits.get(rank).copied().unwrap_or(-1);
+        node.my_labels.push(format!(
+            "il:solo:rank={}:prob={:.6}:logit={}",
+            rank + 1,
+            prob,
+            logit
+        ));
+        node.my_stats.push(ActionStats {
+            visits: 0,
+            sum_value: 0.0,
+        });
     }
     let added = node.my_candidates.len() - base_n;
     if added == 0 {
