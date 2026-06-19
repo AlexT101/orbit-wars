@@ -123,14 +123,14 @@ os.environ.setdefault("MKL_NUM_THREADS", _TORCH_THREADS)
 
 # Total per-turn wall target (IL pass + search). Submission builds flip
 # _USE_PROD_LIMITS to match aphrodite's production budget policy.
-_DEV_TURN_TARGET_MS = 700
-_SUBMISSION_TURN_TARGET_MS = 1000
+_DEV_TURN_TARGET_MS = 600
+_SUBMISSION_TURN_TARGET_MS = 900
 _USE_PROD_LIMITS = False
 # Never squeeze the search below this, no matter how slow the IL pass was.
 _MIN_SEARCH_MS = 250
 # Margin between (target - il_elapsed) and the budget we hand the binary,
 # covering JSON encode + IPC + the binary's own dispatch overhead.
-_DISPATCH_MARGIN_MS = 30
+_DISPATCH_MARGIN_MS = 100
 # Architecture of the deployed 2p IL checkpoint. Only used to warm torch's
 # kernels/threadpool at startup with a throwaway model; the real architecture
 # and weights come from the checkpoint's own config at load time.
