@@ -36,11 +36,11 @@ IL runtime error, or dead binary raises immediately. If chaos is playing, the
 IL injection is provably active.
 
 **Time budgeting** is dynamic per turn: the wrapper times its IL pass and
-sends the binary `budget_ms = target - il_elapsed - 30` (floor 250ms) in the
+sends the binary `budget_ms = target - il_elapsed - 100` (floor 250ms) in the
 payload, overriding the binary's env budget. The source default is a
-conservative 700ms target for dev runs; `build_submission.py` flips prod limits
-on, giving Chaos a 1000ms target while Aphrodite's Rust panic clamp still caps
-the effective search budget at 900ms when the remaining overage pool is low.
+conservative 600ms target for dev runs; `build_submission.py` flips prod limits
+on, giving Chaos a 900ms target. Aphrodite's Rust panic clamp also caps the
+effective search budget at 900ms when the remaining overage pool is low.
 
 ## Requirements
 
@@ -56,11 +56,11 @@ the effective search budget at 900ms when the remaining overage pool is low.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `CHAOS_IL_K` | 5 | max IL candidates injected per turn |
+| `CHAOS_IL_K` | 4 | max IL candidates injected per turn |
 | `CHAOS_IL_MIN_PROB` | 0.02 | drop IL suggestions below this policy prob |
-| `CHAOS_IL_SKIP_TURNS` | 1 | skip IL injection on the first N turns (default skips only turn 0) |
+| `CHAOS_IL_SKIP_TURNS` | 8 | skip IL injection on the first N turns, matching the tested Apollo-only opening |
 | `CHAOS_TORCH_THREADS` | 2 | torch / OpenMP intra-op threads |
-| `CHAOS_TURN_TARGET_MS` | 700 dev / 1000 submission | total per-turn wall target (IL + search) |
+| `CHAOS_TURN_TARGET_MS` | 600 dev / 900 submission | total per-turn wall target (IL + search) |
 | `CHAOS_IL_CHECKPOINT` | repo 2p checkpoint | override the 2p IL checkpoint path |
 
 `OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL mode, ms + candidates) and
@@ -74,13 +74,13 @@ before assuming a bug — they live in **different layers**:
 
 | Knob | Layer | Default | Effect |
 |---|---|---|---|
-| `CHAOS_IL_SKIP_TURNS` | this wrapper (env var, `main.py`) | 1 | skip the IL forward + injection for steps `< N` (default skips only turn 0, where the binary spawn already lands). `0` = inject from step 0. |
-| `APOLLO_ONLY_FIRST_TURNS` | aphrodite binary (`const` in `src/duct.rs`) | 0 | skip DUCT search + leaf eval for steps `< N` and play apollo's top candidate directly. **Compile-time constant — needs a rebuild, not an env var.** `0` = search from step 0. |
+| `CHAOS_IL_SKIP_TURNS` | this wrapper (env var, `main.py`) | 8 | skip the IL forward + injection for steps `< N`, matching the tested Apollo-only opening. `0` = inject from step 0. |
+| `APOLLO_ONLY_FIRST_TURNS` | aphrodite binary (`const` in `src/duct.rs`) | 8 | skip DUCT search + leaf eval for steps `< N` and play apollo's top candidate directly. **Compile-time constant — needs a rebuild, not an env var.** `0` = search from step 0. |
 
-They are **not** coupled. If you set `APOLLO_ONLY_FIRST_TURNS = N`, the binary
-returns apollo's top move instantly on those turns, but the wrapper still runs
-its (now-ignored) IL forward unless you also set `CHAOS_IL_SKIP_TURNS=N`. To skip
-both IL and search on the opening, set both to the same `N`.
+They are **not** coupled in code, but the checked-in defaults are both `8` from
+testing: the opening plays pure Apollo and avoids spending IL work on turns whose
+candidates the binary would ignore. If you change one, consider whether the other
+should change too.
 
 With `OW_DEBUG=1`, an apollo-only turn prints `[duck-apollo-only]` (instead of
 `[duck]`) and an IL-skipped turn shows `il=2p:skip` in the `[chaos]` line.

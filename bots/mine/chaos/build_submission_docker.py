@@ -216,7 +216,7 @@ SMOKE_SCRIPT = r"""
 import json, sys, time
 sys.path.insert(0, ".")
 t0 = time.perf_counter()
-import main  # eager init: torch + checkpoint + schema validation + warmup
+import main  # eager init: torch + schema validation + warmup; checkpoint loads lazily
 print(f"[smoke] import+init: {(time.perf_counter()-t0)*1000:.0f}ms", file=sys.stderr)
 assert main._BUNDLE, "staged main.py did not detect the flat bundle layout"
 from orbit_wars_engine import OrbitWarsEngine

@@ -15,7 +15,7 @@ aphrodite's own wrapper never sends it).
 Time budgeting is dynamic per turn: Kaggle gives 1s/turn + a 60s overage pool
 on unknown hardware, so the wrapper measures its own IL pass each turn and
 sends the binary `budget_ms` = turn target minus elapsed. The target is a
-conservative 700ms in dev and 1000ms in submission builds. The Rust side still
+conservative 600ms in dev and 900ms in submission builds. The Rust side still
 clamps the effective budget to 900ms when the remaining overage pool is low.
 
 Failures are LOUD by design: a missing checkpoint, stale `orbit_wars_model`
@@ -32,8 +32,8 @@ checkpoint loads lazily on the first turn IL is actually used.
 Env knobs:
   CHAOS_IL_K            max IL candidates injected per turn (default 4)
   CHAOS_IL_MIN_PROB     drop IL suggestions below this policy prob (default 0.02)
-  CHAOS_IL_SKIP_TURNS   skip IL injection on the first N turns (default 1 =
-                         skip only turn 0, where the binary spawn already lands)
+  CHAOS_IL_SKIP_TURNS   skip IL injection on the first N turns (default 8 =
+                         match the Apollo-only opening shortcut)
   CHAOS_TORCH_THREADS   torch / OpenMP intra-op threads (default 2; set before
                          `import torch`)
   CHAOS_TURN_TARGET_MS  total per-turn wall target override
@@ -151,10 +151,9 @@ def _il_min_prob() -> float:
 
 
 def _il_skip_turns() -> int:
-    # Skip IL injection on the first N turns (default 1 = just turn 0). Turn 0
-    # already eats the one-time binary spawn + XGB weight parse; deferring the
-    # first checkpoint load off it keeps those costs on separate turns' budgets
-    # instead of stacking on the one turn most likely to spill into overage.
+    # Skip IL injection on the first N turns. Default 8 intentionally matches
+    # APOLLO_ONLY_FIRST_TURNS in aphrodite's DUCT layer, so the tested opening
+    # plays pure Apollo instead of spending IL work on turns the binary ignores.
     return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "8")))
 
 
@@ -305,7 +304,11 @@ def _il_pass(obs: dict, t0: float) -> tuple[list[dict] | None, str]:
     global _IL_FUTURE
     if _IL_FUTURE is not None:
         if _IL_FUTURE.done():
-            _IL_FUTURE = None  # drain + discard the stale (previous-obs) result
+            stale = _IL_FUTURE
+            _IL_FUTURE = None
+            # Drain the stale previous-observation result. Success is discarded,
+            # but any background exception must still be loud.
+            stale.result()
         else:
             return None, "2p:busy"  # prior forward still running
 

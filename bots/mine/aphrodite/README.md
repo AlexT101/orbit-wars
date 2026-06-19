@@ -21,12 +21,12 @@ The Rust bot uses DUCT only. Apollo candidate generation and Apollo's final
 ### Opening shortcut: `APOLLO_ONLY_FIRST_TURNS`
 
 > **Heads up — if DUCT/eval looks "disabled" on the opening turns, check this
-> first.** `APOLLO_ONLY_FIRST_TURNS` (a `const` in `src/duct.rs`, default `0`)
-> makes `best_move` skip the whole DUCT search + leaf eval for the first N steps
-> and play apollo's top-ranked candidate (`my_candidates[0]`) directly. At `0`
-> the search runs from step 0 (normal behavior). It is a compile-time constant,
-> **not** an env var, so changing it requires a rebuild. With `OW_DEBUG=1` an
-> apollo-only turn prints a `[duck-apollo-only]` line instead of `[duck]`.
+> first.** `APOLLO_ONLY_FIRST_TURNS` (a `const` in `src/duct.rs`, default `8`)
+> makes `best_move` skip the whole DUCT search + leaf eval for steps `< 8` and
+> play apollo's top-ranked candidate (`my_candidates[0]`) directly. Setting it to
+> `0` makes search run from step 0. It is a compile-time constant, **not** an env
+> var, so changing it requires a rebuild. With `OW_DEBUG=1` an apollo-only turn
+> prints a `[duck-apollo-only]` line instead of `[duck]`.
 
 ## Build
 

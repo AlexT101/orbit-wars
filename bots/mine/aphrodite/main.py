@@ -141,6 +141,12 @@ def _config_candidate(run_cwd, build_cwd, name):
 
 
 def _infer_num_players(payload):
+    """Infer the active game-size bucket from currently surviving owners.
+
+    This is intentionally based on the number of distinct live player IDs, not
+    the maximum ID. A 4p game can decay to a 1v1 between players 2 and 3; that is
+    a 2-player position for eval/model-selection and for Chaos's IL gate.
+    """
     seen = set()
     for planet in payload.get("planets", []) or []:
         try:
@@ -156,7 +162,7 @@ def _infer_num_players(payload):
             continue
         if owner >= 0:
             seen.add(owner)
-    if len(seen) > 2 or any(p >= 2 for p in seen):
+    if len(seen) > 2:
         return 4
     return 2
 
