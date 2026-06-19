@@ -1,0 +1,20 @@
+{
+  "chunk_rows": 64,
+  "keep_players": "experimental_arch\\imitation_learning\\data\\smoke_daily_top20_4p.json",
+  "launch_only": false,
+  "limit_games_per_zip": null,
+  "max_angle_error": 0.08,
+  "max_rows": 128,
+  "min_alive_players": 3,
+  "out_dir": "C:\\Users\\alext\\Github\\orbit-wars\\experimental_arch\\imitation_learning\\data\\smoke_4p_daily_identity_decay",
+  "player_names": [],
+  "players": 4,
+  "reference_day": "6_17",
+  "row_half_life_days": 7.0,
+  "send_fraction_tolerance": 0.25,
+  "winner_only": false,
+  "zip_paths": [
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_16.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_17.zip"
+  ]
+}

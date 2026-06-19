@@ -1,0 +1,104 @@
+{
+  "action_dim": 3873,
+  "config": {
+    "chunk_rows": 64,
+    "keep_players": "experimental_arch\\imitation_learning\\data\\smoke_daily_top20_4p.json",
+    "launch_only": false,
+    "limit_games_per_zip": null,
+    "max_angle_error": 0.08,
+    "max_rows": 128,
+    "min_alive_players": 3,
+    "out_dir": "C:\\Users\\alext\\Github\\orbit-wars\\experimental_arch\\imitation_learning\\data\\smoke_4p_daily_identity_decay",
+    "player_names": [],
+    "players": 4,
+    "reference_day": "6_17",
+    "row_half_life_days": 7.0,
+    "send_fraction_tolerance": 0.25,
+    "winner_only": false,
+    "zip_paths": [
+      "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_16.zip",
+      "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_17.zip"
+    ]
+  },
+  "created_at_unix": 1781785979.6800573,
+  "dataset_name": "osteo_kept_4p",
+  "elapsed_seconds": 0.555614709854126,
+  "feature_shapes_verified": {
+    "PAIR_OUTCOME_SHAPE": [
+      44,
+      44,
+      3,
+      4
+    ],
+    "PAIR_TURN_SHAPE": [
+      44,
+      44,
+      3
+    ],
+    "PLANET_TIMELINE_SHAPE": [
+      44,
+      31
+    ],
+    "TOKEN_SHAPE": [
+      4,
+      44,
+      15
+    ]
+  },
+  "format_version": 2,
+  "identity_features": {
+    "alive_players": "live owners with ships on planets or fleets",
+    "owner_ids": "0=neutral_or_missing, 1..4=absolute_player_id_plus_one",
+    "player_ids": "absolute acting player id"
+  },
+  "label_counts_top": {
+    "0": 92,
+    "10": 1,
+    "1058": 1,
+    "1060": 1,
+    "1074": 1,
+    "1098": 4,
+    "1234": 1,
+    "1238": 1,
+    "1254": 1,
+    "1326": 1,
+    "1410": 1,
+    "1764": 1,
+    "1966": 3,
+    "2056": 1,
+    "208": 1,
+    "2232": 1,
+    "2248": 1,
+    "34": 1,
+    "48": 1,
+    "52": 1,
+    "706": 1,
+    "730": 2,
+    "734": 2,
+    "750": 3,
+    "886": 2,
+    "910": 1,
+    "912": 1
+  },
+  "launch_rows": 36,
+  "noop_rows": 92,
+  "players": 4,
+  "processed_replays": 1,
+  "replays_seen": 19,
+  "rows": 128,
+  "stats": {
+    "alive_4_states": 129,
+    "launch_rows": 36,
+    "multi_launch_steps": 2,
+    "noop_rows": 92,
+    "replays_kept": 1,
+    "replays_seen": 19,
+    "row_alive_4": 128,
+    "row_player_slot_0": 67,
+    "row_player_slot_2": 61,
+    "rows": 128,
+    "skipped_angle": 3,
+    "skipped_format": 18,
+    "skipped_invalid": 3
+  }
+}

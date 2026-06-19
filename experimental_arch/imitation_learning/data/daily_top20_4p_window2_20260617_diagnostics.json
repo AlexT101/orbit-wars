@@ -1,0 +1,2186 @@
+{
+  "days": {
+    "5_24": {
+      "rated_players": 24,
+      "top": [
+        {
+          "name": "Jake Will",
+          "rating": 0.757240617060201
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.7079606578185637
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.6588634680603127
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.5913764878015728
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.528278108084843
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.4611972287537347
+        },
+        {
+          "name": "flg",
+          "rating": 0.3482707864560593
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.3395281949734763
+        },
+        {
+          "name": "ShunkiKyoya",
+          "rating": 0.297306438398595
+        },
+        {
+          "name": "kovi",
+          "rating": 0.2815703425810479
+        },
+        {
+          "name": "🛰️ Low-Orbit Losers",
+          "rating": 0.27483520155079466
+        },
+        {
+          "name": "saharan",
+          "rating": 0.25193720089644756
+        },
+        {
+          "name": "persona",
+          "rating": 0.017073576084744913
+        },
+        {
+          "name": "Maruichi01",
+          "rating": -0.10741936146992828
+        },
+        {
+          "name": "Ebi",
+          "rating": -0.11763949498172019
+        },
+        {
+          "name": "klog",
+          "rating": -0.130207227496661
+        },
+        {
+          "name": "213tubo",
+          "rating": -0.18561218455489975
+        },
+        {
+          "name": "typeIIIfairy",
+          "rating": -0.21635765827138426
+        },
+        {
+          "name": "3Comets",
+          "rating": -0.22073360292742875
+        },
+        {
+          "name": "Shun_PI",
+          "rating": -0.33057170390604784
+        }
+      ],
+      "window_games": 931
+    },
+    "5_25": {
+      "rated_players": 45,
+      "top": [
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.0175833943776567
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.9600477675722952
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.9335871735612511
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.7771594755786
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.6990647462967912
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.6953410931648344
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.6736354933029056
+        },
+        {
+          "name": "klog",
+          "rating": 0.5455408043495882
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.5356846922090331
+        },
+        {
+          "name": "saharan",
+          "rating": 0.5290164548467673
+        },
+        {
+          "name": "flg",
+          "rating": 0.5186253778895478
+        },
+        {
+          "name": "Mooegi",
+          "rating": 0.4809509433187763
+        },
+        {
+          "name": "persona",
+          "rating": 0.4628257032980411
+        },
+        {
+          "name": "kovi",
+          "rating": 0.4209672089304479
+        },
+        {
+          "name": "ShunkiKyoya",
+          "rating": 0.40133317218120756
+        },
+        {
+          "name": "Ascalon",
+          "rating": 0.3902154316132651
+        },
+        {
+          "name": "Kevin Cao",
+          "rating": 0.36059486326900886
+        },
+        {
+          "name": "Illedan",
+          "rating": 0.3601458431668182
+        },
+        {
+          "name": "🛰️ Low-Orbit Losers",
+          "rating": 0.35324044950891104
+        },
+        {
+          "name": "linrock",
+          "rating": 0.24067788358808087
+        }
+      ],
+      "window_games": 1697
+    },
+    "5_26": {
+      "rated_players": 65,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1679370390390005
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.1509030922305898
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.1033158162222387
+        },
+        {
+          "name": "Jake Will",
+          "rating": 1.0859008624979714
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.925364368692703
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.9063101866609877
+        },
+        {
+          "name": "klog",
+          "rating": 0.8434993632241335
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.8123608233684219
+        },
+        {
+          "name": "saharan",
+          "rating": 0.7801261269892651
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.7706324456448091
+        },
+        {
+          "name": "persona",
+          "rating": 0.6854882817191293
+        },
+        {
+          "name": "Illedan",
+          "rating": 0.5969262669139515
+        },
+        {
+          "name": "flg",
+          "rating": 0.5897186474062684
+        },
+        {
+          "name": "Forrest",
+          "rating": 0.5871539973973646
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.581552444333519
+        },
+        {
+          "name": "bengle",
+          "rating": 0.5703268417938476
+        },
+        {
+          "name": "🛰️ Low-Orbit Losers",
+          "rating": 0.4982552321911297
+        },
+        {
+          "name": "ShunkiKyoya",
+          "rating": 0.49588806950612235
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.37405725061794354
+        },
+        {
+          "name": "linrock",
+          "rating": 0.36207621273336277
+        }
+      ],
+      "window_games": 1762
+    },
+    "5_27": {
+      "rated_players": 64,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.375745853072969
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.1490340680165088
+        },
+        {
+          "name": "Jake Will",
+          "rating": 1.1251652061156208
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.902327985451319
+        },
+        {
+          "name": "saharan",
+          "rating": 0.8093888606041425
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.7648644717344191
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.7640808082712289
+        },
+        {
+          "name": "klog",
+          "rating": 0.7548622816940214
+        },
+        {
+          "name": "Forrest",
+          "rating": 0.7010704589714024
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.6956283579439562
+        },
+        {
+          "name": "bengle",
+          "rating": 0.6474597484731199
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.6201375143950724
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.590772686046629
+        },
+        {
+          "name": "Illedan",
+          "rating": 0.5103850149216662
+        },
+        {
+          "name": "🛰️ Low-Orbit Losers",
+          "rating": 0.4987346235171229
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.4236901625444482
+        },
+        {
+          "name": "flg",
+          "rating": 0.40348300467703063
+        },
+        {
+          "name": "ShunkiKyoya",
+          "rating": 0.3856771946447205
+        },
+        {
+          "name": "Félix Truong",
+          "rating": 0.38562191607214696
+        },
+        {
+          "name": "Ousagi",
+          "rating": 0.3465788695458016
+        }
+      ],
+      "window_games": 1619
+    },
+    "5_28": {
+      "rated_players": 23,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 0.9039017623397257
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.6828450993683034
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.658169432719485
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.550871577084679
+        },
+        {
+          "name": "saharan",
+          "rating": 0.4043324951979019
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.39798037957034516
+        },
+        {
+          "name": "flg",
+          "rating": 0.3727778318602867
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.3611520798760264
+        },
+        {
+          "name": "klog",
+          "rating": 0.22597452779535734
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.19957383995751113
+        },
+        {
+          "name": "Gregor Lied",
+          "rating": 0.18718639188577565
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.18306370996700402
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.06664547157272951
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": -0.03368894934114797
+        },
+        {
+          "name": "Maruichi01",
+          "rating": -0.0340497005489737
+        },
+        {
+          "name": "Ebi",
+          "rating": -0.21404316830866274
+        },
+        {
+          "name": "typeIIIfairy",
+          "rating": -0.3017381911417989
+        },
+        {
+          "name": "kovi",
+          "rating": -0.43003028050580755
+        },
+        {
+          "name": "3Comets",
+          "rating": -0.5993515742275685
+        },
+        {
+          "name": "Ezra",
+          "rating": -0.603334431377095
+        }
+      ],
+      "window_games": 1437
+    },
+    "5_29": {
+      "rated_players": 55,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.3698886435080078
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.1713634474439567
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.0457244825093874
+        },
+        {
+          "name": "flg",
+          "rating": 1.0053224874751037
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.9926598420113617
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.984303681617788
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.9175583546185464
+        },
+        {
+          "name": "saharan",
+          "rating": 0.8612140712485551
+        },
+        {
+          "name": "Félix Truong",
+          "rating": 0.8235319895623491
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.7970008106776086
+        },
+        {
+          "name": "bengle",
+          "rating": 0.7842181475555067
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.6931527949982145
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.5184997125512674
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 0.4850367552953054
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.48009926795173286
+        },
+        {
+          "name": "kovi",
+          "rating": 0.47107104655078286
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.4666612488232614
+        },
+        {
+          "name": "typeIIIfairy",
+          "rating": 0.2954102950379554
+        },
+        {
+          "name": "🛰️ Low-Orbit Losers",
+          "rating": 0.2601548598177478
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.2198910718337787
+        }
+      ],
+      "window_games": 1586
+    },
+    "5_30": {
+      "rated_players": 56,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.375754596214779
+        },
+        {
+          "name": "flg",
+          "rating": 0.9909129490470893
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.925796077008866
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.9060505545485888
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.8916618750238674
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.879162779204068
+        },
+        {
+          "name": "Félix Truong",
+          "rating": 0.8238001594976851
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.8146335592794209
+        },
+        {
+          "name": "bengle",
+          "rating": 0.8090226385782004
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.7975004209962271
+        },
+        {
+          "name": "saharan",
+          "rating": 0.7057158117604543
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.7026513748120763
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.6142285450481322
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.5361139626593981
+        },
+        {
+          "name": "kovi",
+          "rating": 0.5318627726038855
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.46823386020921626
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 0.43853396419528823
+        },
+        {
+          "name": "typeIIIfairy",
+          "rating": 0.38862743869362937
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 0.3371744685398677
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.33590449748126056
+        }
+      ],
+      "window_games": 1482
+    },
+    "5_31": {
+      "rated_players": 69,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.3455694550014112
+        },
+        {
+          "name": "flg",
+          "rating": 1.1631105192189362
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.0438637618192725
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 1.016254834854632
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.9743424727572353
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.928021041846413
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 0.8466930188359802
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.8274472788058831
+        },
+        {
+          "name": "saharan",
+          "rating": 0.8085877699864447
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.7938919079902743
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.7653916509525354
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.75689292175627
+        },
+        {
+          "name": "bengle",
+          "rating": 0.7392032966742873
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.7268519781229569
+        },
+        {
+          "name": "Forrest",
+          "rating": 0.6653888761232645
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 0.6220477019428224
+        },
+        {
+          "name": "Ezra",
+          "rating": 0.576195980250488
+        },
+        {
+          "name": "kovi",
+          "rating": 0.5249096864639423
+        },
+        {
+          "name": "unosss",
+          "rating": 0.5237961880148718
+        },
+        {
+          "name": "typeIIIfairy",
+          "rating": 0.45053078596160084
+        }
+      ],
+      "window_games": 1560
+    },
+    "6_01": {
+      "rated_players": 78,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.288132710897687
+        },
+        {
+          "name": "flg",
+          "rating": 1.1545490731492456
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 1.1292225532817153
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.1004254845014674
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.0422335332450154
+        },
+        {
+          "name": "saharan",
+          "rating": 1.001833900875296
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.9161844092149427
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.8883370145223838
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.8472927546453137
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.7821048718433348
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.7760750381625906
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.7617337523093811
+        },
+        {
+          "name": "bengle",
+          "rating": 0.7215945086287793
+        },
+        {
+          "name": "Forrest",
+          "rating": 0.6746097151418322
+        },
+        {
+          "name": "Ezra",
+          "rating": 0.6628517906397935
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.6038720281637641
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.5518924806871823
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.546724188347669
+        },
+        {
+          "name": "unosss",
+          "rating": 0.5040526959202868
+        },
+        {
+          "name": "klog",
+          "rating": 0.4377611605127654
+        }
+      ],
+      "window_games": 1759
+    },
+    "6_02": {
+      "rated_players": 76,
+      "top": [
+        {
+          "name": "saharan",
+          "rating": 1.0959936078680834
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.0730037600888234
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.0218664490696028
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.973013291493936
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 0.9178937293824186
+        },
+        {
+          "name": "flg",
+          "rating": 0.8930547464305847
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.8001663924895628
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.7731508790321873
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.7589006054713684
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.715013945131094
+        },
+        {
+          "name": "Code Flowing on Finger",
+          "rating": 0.6708263929467481
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.6087174740748158
+        },
+        {
+          "name": "klog",
+          "rating": 0.5628979673107319
+        },
+        {
+          "name": "vkhydras",
+          "rating": 0.5591522618050974
+        },
+        {
+          "name": "bengle",
+          "rating": 0.5550347860319417
+        },
+        {
+          "name": "C404",
+          "rating": 0.49437893660927734
+        },
+        {
+          "name": "Galatea of the Spheres",
+          "rating": 0.49423243011851575
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.48226980689715193
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.47889050109535264
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.4786833843250041
+        }
+      ],
+      "window_games": 1998
+    },
+    "6_03": {
+      "rated_players": 74,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.131596874799426
+        },
+        {
+          "name": "saharan",
+          "rating": 1.0054099078855603
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.9909225176458433
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.975928446830012
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 0.9701430208012864
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 0.9338384009880617
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.8728505798008396
+        },
+        {
+          "name": "flg",
+          "rating": 0.8569057033855598
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.8284632579721183
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.7892885509292897
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.7098623522302328
+        },
+        {
+          "name": "bengle",
+          "rating": 0.6462377147012092
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.6315810302870222
+        },
+        {
+          "name": "vkhydras",
+          "rating": 0.626259857692361
+        },
+        {
+          "name": "Tommy Barnes",
+          "rating": 0.606662066896074
+        },
+        {
+          "name": "klog",
+          "rating": 0.5926670253321255
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.5713316435772492
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.5552176157485447
+        },
+        {
+          "name": "C404",
+          "rating": 0.4599501683786779
+        },
+        {
+          "name": "Filip Strzałka",
+          "rating": 0.44089473210816865
+        }
+      ],
+      "window_games": 1984
+    },
+    "6_04": {
+      "rated_players": 188,
+      "top": [
+        {
+          "name": "dragon warrior",
+          "rating": 1.372343091550633
+        },
+        {
+          "name": "flg",
+          "rating": 1.3154888000858231
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.2817288834474712
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.266543358950971
+        },
+        {
+          "name": "TonyK",
+          "rating": 1.2225206754655986
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 1.1479524633679872
+        },
+        {
+          "name": "saharan",
+          "rating": 1.0941158206238266
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.0839860257041674
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.0529463232967016
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.048157712931341
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.0072734739880518
+        },
+        {
+          "name": "klog",
+          "rating": 0.9381489128434419
+        },
+        {
+          "name": "Tommy Barnes",
+          "rating": 0.9365594082686651
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.9320534648848109
+        },
+        {
+          "name": "C404",
+          "rating": 0.9244771345472963
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.8812150748895669
+        },
+        {
+          "name": "vkhydras",
+          "rating": 0.8606571988179904
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.8047433459950418
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.766571653104037
+        },
+        {
+          "name": "Artyom Sosnin",
+          "rating": 0.7514447493952991
+        }
+      ],
+      "window_games": 2205
+    },
+    "6_05": {
+      "rated_players": 312,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.4871462279439156
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.4380677718166743
+        },
+        {
+          "name": "flg",
+          "rating": 1.398990481023726
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 1.3638358664877686
+        },
+        {
+          "name": "C404",
+          "rating": 1.2606688308300475
+        },
+        {
+          "name": "saharan",
+          "rating": 1.257096246171599
+        },
+        {
+          "name": "klog",
+          "rating": 1.1586359683880327
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1325068864943897
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.0907778303217401
+        },
+        {
+          "name": "ShunkiKyoya",
+          "rating": 1.0872624277223204
+        },
+        {
+          "name": "Illedan",
+          "rating": 1.0760040865218958
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 1.0685164887267198
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.063876574633757
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.0599690818042418
+        },
+        {
+          "name": "unosss",
+          "rating": 1.0296730274940702
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 1.0173953612616318
+        },
+        {
+          "name": "Ezra",
+          "rating": 1.0141848814891188
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.0027386598550958
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.9995373814235285
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.9607113524735756
+        }
+      ],
+      "window_games": 2746
+    },
+    "6_06": {
+      "rated_players": 262,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.6223645023859516
+        },
+        {
+          "name": "saharan",
+          "rating": 1.4543617614371234
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.3555120231387827
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 1.3506199215932595
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.3426275817276196
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.3029376868082672
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.2064909634856344
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.1748597857952445
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.1658135135999366
+        },
+        {
+          "name": "flg",
+          "rating": 1.1425769386586642
+        },
+        {
+          "name": "ShunkiKyoya",
+          "rating": 1.1027974146251665
+        },
+        {
+          "name": "Ezra",
+          "rating": 1.069899967539491
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 1.067505347371639
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 1.0480142523880374
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 1.0412609439779648
+        },
+        {
+          "name": "skalermo",
+          "rating": 1.0035426974235857
+        },
+        {
+          "name": "Tommy Barnes",
+          "rating": 0.9589144750468054
+        },
+        {
+          "name": "Illedan",
+          "rating": 0.9073220992814724
+        },
+        {
+          "name": "bengle",
+          "rating": 0.9056482604628802
+        },
+        {
+          "name": "Ender",
+          "rating": 0.8873353796209762
+        }
+      ],
+      "window_games": 2516
+    },
+    "6_07": {
+      "rated_players": 104,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.4061500728820833
+        },
+        {
+          "name": "saharan",
+          "rating": 1.3448587651686643
+        },
+        {
+          "name": "flg",
+          "rating": 1.2285054850930979
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.1817976010855225
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1784103810472482
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.1438255972758202
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.1037570915268409
+        },
+        {
+          "name": "Ender",
+          "rating": 1.0978941939124152
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.0375947292017327
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.9741995325674396
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.9705696161368818
+        },
+        {
+          "name": "linrock",
+          "rating": 0.9636507092803143
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.958133702797039
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.9318899215526792
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 0.872715105852729
+        },
+        {
+          "name": "Piotr Gabrys",
+          "rating": 0.8428995476405822
+        },
+        {
+          "name": "klog",
+          "rating": 0.6989289854130292
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.6960769032980103
+        },
+        {
+          "name": "Tommy Barnes",
+          "rating": 0.6581115526932977
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.6440562823569556
+        }
+      ],
+      "window_games": 2155
+    },
+    "6_08": {
+      "rated_players": 155,
+      "top": [
+        {
+          "name": "flg",
+          "rating": 1.5108861917506498
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.3179201793863577
+        },
+        {
+          "name": "saharan",
+          "rating": 1.3018196981038923
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.2233021896695158
+        },
+        {
+          "name": "Ender",
+          "rating": 1.205571337429169
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.1963289229257053
+        },
+        {
+          "name": "skalermo",
+          "rating": 1.187119610730757
+        },
+        {
+          "name": "TonyK",
+          "rating": 1.1785989524339096
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.1720045738318698
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.1472215282176064
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.0543022135220506
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 1.0207203073310431
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.9960565976629547
+        },
+        {
+          "name": "linrock",
+          "rating": 0.8859695596933426
+        },
+        {
+          "name": "klog",
+          "rating": 0.8597312155858965
+        },
+        {
+          "name": "Hober Malloc",
+          "rating": 0.8484378762053063
+        },
+        {
+          "name": "Piotr Gabrys",
+          "rating": 0.8384154396241902
+        },
+        {
+          "name": "Controlvector",
+          "rating": 0.7797608978547884
+        },
+        {
+          "name": "WuJingjing",
+          "rating": 0.7702605927846029
+        },
+        {
+          "name": "Zachary Ruhe",
+          "rating": 0.7481555777601432
+        }
+      ],
+      "window_games": 2141
+    },
+    "6_09": {
+      "rated_players": 224,
+      "top": [
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.4515028221864081
+        },
+        {
+          "name": "saharan",
+          "rating": 1.3533842809576575
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.2622098950041862
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.2088381695804535
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.2035989994434486
+        },
+        {
+          "name": "TonyK",
+          "rating": 1.193332750204472
+        },
+        {
+          "name": "skalermo",
+          "rating": 1.1558759446744609
+        },
+        {
+          "name": "bengle",
+          "rating": 1.1030692403845714
+        },
+        {
+          "name": "flg",
+          "rating": 1.0862543784326555
+        },
+        {
+          "name": "Hober Malloc",
+          "rating": 1.0742224274859515
+        },
+        {
+          "name": "Ender",
+          "rating": 1.0293060828751166
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.0201609306670747
+        },
+        {
+          "name": "C404",
+          "rating": 0.9630079754705823
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.9399624818810141
+        },
+        {
+          "name": "moriiiiiiiiim",
+          "rating": 0.9376269575261661
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.9316097768143242
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 0.9260462287168629
+        },
+        {
+          "name": "klog",
+          "rating": 0.920987105763852
+        },
+        {
+          "name": "Artem",
+          "rating": 0.8760926695287851
+        },
+        {
+          "name": "draven",
+          "rating": 0.8583387762356011
+        }
+      ],
+      "window_games": 2435
+    },
+    "6_10": {
+      "rated_players": 278,
+      "top": [
+        {
+          "name": "saharan",
+          "rating": 1.3395157623879277
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.2873337949185533
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.2758988252941208
+        },
+        {
+          "name": "TonyK",
+          "rating": 1.1749239827291607
+        },
+        {
+          "name": "klog",
+          "rating": 1.1637167465225986
+        },
+        {
+          "name": "Artem",
+          "rating": 1.138298376486621
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.0642870757173288
+        },
+        {
+          "name": "bengle",
+          "rating": 1.0630731531105961
+        },
+        {
+          "name": "Ender",
+          "rating": 1.0380655465507613
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 0.9728241789525649
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.9711646394960329
+        },
+        {
+          "name": "Piotr Gabrys",
+          "rating": 0.9695795010225997
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 0.9104665865510232
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.8965881133655171
+        },
+        {
+          "name": "flg",
+          "rating": 0.8809504949330115
+        },
+        {
+          "name": "Mendrika",
+          "rating": 0.8665824240843304
+        },
+        {
+          "name": "moriiiiiiiiim",
+          "rating": 0.8501352606441561
+        },
+        {
+          "name": "C404",
+          "rating": 0.8455066764461072
+        },
+        {
+          "name": "Xiangyu Liu",
+          "rating": 0.844066301127394
+        },
+        {
+          "name": "M & J & M.ver2",
+          "rating": 0.8320601302583354
+        }
+      ],
+      "window_games": 2870
+    },
+    "6_11": {
+      "rated_players": 268,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.5664521825941407
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.27018778331648
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.2502587540482002
+        },
+        {
+          "name": "Ender",
+          "rating": 1.2263424989983303
+        },
+        {
+          "name": "klog",
+          "rating": 1.185265286770756
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.1658464151032697
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1602819100400985
+        },
+        {
+          "name": "Artem",
+          "rating": 1.1407810102163316
+        },
+        {
+          "name": "saharan",
+          "rating": 1.114205604396131
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.085106802974535
+        },
+        {
+          "name": "flg",
+          "rating": 1.022323350085839
+        },
+        {
+          "name": "bengle",
+          "rating": 0.9739063555184608
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.9736350077080704
+        },
+        {
+          "name": "Ebi",
+          "rating": 0.9307729071559104
+        },
+        {
+          "name": "atl132",
+          "rating": 0.9219307570357526
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.9079579271692468
+        },
+        {
+          "name": "ma name",
+          "rating": 0.8913493574873469
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.8856882550364814
+        },
+        {
+          "name": "Gregor Lied",
+          "rating": 0.8630288908915777
+        },
+        {
+          "name": "Piotr Gabrys",
+          "rating": 0.8339984630401869
+        }
+      ],
+      "window_games": 2800
+    },
+    "6_12": {
+      "rated_players": 218,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.69122662539299
+        },
+        {
+          "name": "flg",
+          "rating": 1.495012102393958
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.4503059255828383
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.3444382370978771
+        },
+        {
+          "name": "213tubo",
+          "rating": 1.2559133117361643
+        },
+        {
+          "name": "Ebi",
+          "rating": 1.249872321020069
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1816107748937847
+        },
+        {
+          "name": "Vadasz",
+          "rating": 1.1262832091577957
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.052276825553027
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 1.0334750116037268
+        },
+        {
+          "name": "skalermo",
+          "rating": 1.0164725472002678
+        },
+        {
+          "name": "Ender",
+          "rating": 0.9759894428509307
+        },
+        {
+          "name": "Gregor Lied",
+          "rating": 0.9618139342277167
+        },
+        {
+          "name": "bengle",
+          "rating": 0.9550719427777652
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.9549528537205848
+        },
+        {
+          "name": "klog",
+          "rating": 0.9333747421749204
+        },
+        {
+          "name": "Artem",
+          "rating": 0.9286277024371858
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.9264924623435074
+        },
+        {
+          "name": "saharan",
+          "rating": 0.9217868208384538
+        },
+        {
+          "name": "C404",
+          "rating": 0.9023920221288182
+        }
+      ],
+      "window_games": 2562
+    },
+    "6_13": {
+      "rated_players": 255,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.793503517518255
+        },
+        {
+          "name": "flg",
+          "rating": 1.4031460807354796
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 1.3372507970822263
+        },
+        {
+          "name": "M & J & M.ver2",
+          "rating": 1.2922608070308106
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 1.2649488943683391
+        },
+        {
+          "name": "Artem",
+          "rating": 1.1968405742201096
+        },
+        {
+          "name": "Piotr Gabrys",
+          "rating": 1.1420050377039122
+        },
+        {
+          "name": "skalermo",
+          "rating": 1.1120242138538854
+        },
+        {
+          "name": "vkhydras",
+          "rating": 1.0507962146309797
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.0429974553727068
+        },
+        {
+          "name": "C404",
+          "rating": 1.0134359084486735
+        },
+        {
+          "name": "Ebi",
+          "rating": 1.010422720331158
+        },
+        {
+          "name": "bowwowforeach",
+          "rating": 0.9651867117742396
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.9628426305135717
+        },
+        {
+          "name": "saharan",
+          "rating": 0.9442574509944079
+        },
+        {
+          "name": "klog",
+          "rating": 0.9411512735467237
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.924231455247603
+        },
+        {
+          "name": "Vadasz",
+          "rating": 0.9225818723210175
+        },
+        {
+          "name": "Xiangyu Liu",
+          "rating": 0.8916404900131268
+        },
+        {
+          "name": "Yuki Okumura",
+          "rating": 0.8901531479477188
+        }
+      ],
+      "window_games": 2735
+    },
+    "6_14": {
+      "rated_players": 235,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.678143002976111
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.3530666088766088
+        },
+        {
+          "name": "M & J & M.ver2",
+          "rating": 1.202834284579516
+        },
+        {
+          "name": "Artem",
+          "rating": 1.154616422980866
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 1.0930394753053563
+        },
+        {
+          "name": "Piotr Gabrys",
+          "rating": 1.0699818698125931
+        },
+        {
+          "name": "dragon warrior",
+          "rating": 1.0662723498959585
+        },
+        {
+          "name": "Yuki Okumura",
+          "rating": 1.0147695390004028
+        },
+        {
+          "name": "vkhydras",
+          "rating": 0.995134387695894
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.9611526845088478
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.9582231880922449
+        },
+        {
+          "name": "saharan",
+          "rating": 0.8954860208544183
+        },
+        {
+          "name": "klog",
+          "rating": 0.8945436731987065
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 0.845605613266533
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.8360368759972527
+        },
+        {
+          "name": "Dreame1",
+          "rating": 0.8320505538134136
+        },
+        {
+          "name": "Mimi",
+          "rating": 0.799683759045995
+        },
+        {
+          "name": "C404",
+          "rating": 0.7653627025796602
+        },
+        {
+          "name": "Abdelghani Belgaid",
+          "rating": 0.7582941311811341
+        },
+        {
+          "name": "flg",
+          "rating": 0.7531440159725228
+        }
+      ],
+      "window_games": 2527
+    },
+    "6_15": {
+      "rated_players": 138,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.5740566496503168
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.3754750068421076
+        },
+        {
+          "name": "Nebraskinator",
+          "rating": 0.9281568328668421
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 0.9209064711617155
+        },
+        {
+          "name": "vkhydras",
+          "rating": 0.9182866137313642
+        },
+        {
+          "name": "CurveCowboy",
+          "rating": 0.9133777436018252
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.8767332658583258
+        },
+        {
+          "name": "M & J & M.ver2",
+          "rating": 0.8591406849277243
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.8567056860027049
+        },
+        {
+          "name": "Xiangyu Liu",
+          "rating": 0.8434377297590473
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.8232401092833653
+        },
+        {
+          "name": "Vadasz & Ascalon",
+          "rating": 0.820273575495251
+        },
+        {
+          "name": "Vincent Schuler",
+          "rating": 0.8001114599719552
+        },
+        {
+          "name": "saharan",
+          "rating": 0.7801077721234498
+        },
+        {
+          "name": "моп манки",
+          "rating": 0.7236471819039162
+        },
+        {
+          "name": "Artem",
+          "rating": 0.7195525801859164
+        },
+        {
+          "name": "klog",
+          "rating": 0.7101134003105857
+        },
+        {
+          "name": "XtraLearning",
+          "rating": 0.6791930977145176
+        },
+        {
+          "name": "Yuki Okumura",
+          "rating": 0.6422349683418449
+        },
+        {
+          "name": "flg",
+          "rating": 0.6414210997627806
+        }
+      ],
+      "window_games": 2213
+    },
+    "6_16": {
+      "rated_players": 136,
+      "top": [
+        {
+          "name": "TonyK",
+          "rating": 1.3779263693834796
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1539723896054581
+        },
+        {
+          "name": "Xiangyu Liu",
+          "rating": 1.109566327493584
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.061599576818668
+        },
+        {
+          "name": "Jake Will",
+          "rating": 1.025585325552633
+        },
+        {
+          "name": "flg",
+          "rating": 0.8802593248956926
+        },
+        {
+          "name": "Nebraskinator",
+          "rating": 0.8800214080169724
+        },
+        {
+          "name": "saharan",
+          "rating": 0.836412791704318
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.8218230605605175
+        },
+        {
+          "name": "klog",
+          "rating": 0.8071733057992929
+        },
+        {
+          "name": "draven",
+          "rating": 0.7949056032299999
+        },
+        {
+          "name": "моп манки",
+          "rating": 0.7919629837500508
+        },
+        {
+          "name": "XtraLearning",
+          "rating": 0.7607128458252852
+        },
+        {
+          "name": "Ender",
+          "rating": 0.7555841632143331
+        },
+        {
+          "name": "CurveCowboy",
+          "rating": 0.7311183701970069
+        },
+        {
+          "name": "skalermo",
+          "rating": 0.6994108491433746
+        },
+        {
+          "name": "Mendrika",
+          "rating": 0.6781008802566301
+        },
+        {
+          "name": "Vadasz & Ascalon",
+          "rating": 0.6520217717323643
+        },
+        {
+          "name": "vkhydras",
+          "rating": 0.6463310177725202
+        },
+        {
+          "name": "Hober Malloc",
+          "rating": 0.6439463216459387
+        }
+      ],
+      "window_games": 2342
+    },
+    "6_17": {
+      "rated_players": 133,
+      "top": [
+        {
+          "name": "Xiangyu Liu",
+          "rating": 1.2212113844097583
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1891912449069335
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.1242170303958328
+        },
+        {
+          "name": "TonyK",
+          "rating": 1.092326746237408
+        },
+        {
+          "name": "flg",
+          "rating": 1.0196385271157964
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.9237551494022725
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.8228534530033216
+        },
+        {
+          "name": "Boey",
+          "rating": 0.8227388320774253
+        },
+        {
+          "name": "Hober Malloc",
+          "rating": 0.8084751549043578
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.7305796227801244
+        },
+        {
+          "name": "Azat Akhtyamov",
+          "rating": 0.724388090369521
+        },
+        {
+          "name": "Ender",
+          "rating": 0.7141841536034146
+        },
+        {
+          "name": "Artem",
+          "rating": 0.7117176917937142
+        },
+        {
+          "name": "saharan",
+          "rating": 0.6839795507602644
+        },
+        {
+          "name": "Mendrika",
+          "rating": 0.683402389574052
+        },
+        {
+          "name": "Guanshuo Xu",
+          "rating": 0.6765488006564279
+        },
+        {
+          "name": "M & J & M.ver2",
+          "rating": 0.6501038565202746
+        },
+        {
+          "name": "Audun Ljone Henriksen",
+          "rating": 0.6449950833302204
+        },
+        {
+          "name": "bengle",
+          "rating": 0.6436217710570723
+        },
+        {
+          "name": "draven",
+          "rating": 0.6425299976698847
+        }
+      ],
+      "window_games": 2403
+    }
+  },
+  "min_games": 5,
+  "players": 4,
+  "prior_strength": 3.0,
+  "top_n": 20,
+  "window_days": 2,
+  "zip_paths": [
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_24.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_25.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_26.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_27.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_28.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_29.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_30.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_5_31.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_01.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_02.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_03.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_04.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_05.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_06.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_07.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_08.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_09.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_10.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_11.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_12.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_13.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_14.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_15.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_16.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_17.zip"
+  ]
+}

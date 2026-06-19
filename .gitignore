@@ -229,3 +229,5 @@ orbit-wars-lab/runs/*
 .DS_Store
 
 prometheus_ref/
+
+bots/mine/chaos/experiments/

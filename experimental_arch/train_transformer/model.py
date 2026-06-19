@@ -129,6 +129,9 @@ class OrbitPolicy(nn.Module):
         pair_reachable_mask=None,
         pair_outcome_features=None,
         planet_timeline_features=None,
+        owner_ids=None,
+        player_ids=None,
+        alive_players=None,
     ):
         batch = planets.shape[0]
         encoded = self.planet_encoder(with_timeline_features(planets, planet_timeline_features))
@@ -219,6 +222,9 @@ class EntityTransformerPolicy(nn.Module):
         pair_reachable_mask=None,
         pair_outcome_features=None,
         planet_timeline_features=None,
+        owner_ids=None,
+        player_ids=None,
+        alive_players=None,
     ):
         batch = planets.shape[0]
         planet_tokens = self.planet_encoder(with_timeline_features(planets, planet_timeline_features))
@@ -305,10 +311,125 @@ class NgptActionFeaturePolicy(nn.Module):
         pair_reachable_mask=None,
         pair_outcome_features=None,
         planet_timeline_features=None,
+        owner_ids=None,
+        player_ids=None,
+        alive_players=None,
     ):
         batch = planets.shape[0]
         planet_tokens = self.planet_encoder(with_timeline_features(planets, planet_timeline_features))
         global_token = self.global_encoder(globals_).unsqueeze(1)
+        tokens = torch.cat([global_token, planet_tokens], dim=1)
+        global_valid = torch.ones(batch, 1, dtype=torch.bool, device=planet_mask.device)
+        valid = torch.cat([global_valid, planet_mask.bool()], dim=1)
+        encoded = self.transformer(tokens, src_key_padding_mask=~valid)
+        global_encoded = encoded[:, 0]
+        planet_encoded = encoded[:, 1:]
+
+        src = planet_encoded.unsqueeze(2).expand(batch, MAX_PLANETS, MAX_PLANETS, -1)
+        tgt = planet_encoded.unsqueeze(1).expand(batch, MAX_PLANETS, MAX_PLANETS, -1)
+        pair = torch.cat([src, tgt, src - tgt, src * tgt], dim=-1)
+
+        xy = planets[..., PLANET_XY_SLICE]
+        src_xy = xy.unsqueeze(2).expand(batch, MAX_PLANETS, MAX_PLANETS, 2)
+        tgt_xy = xy.unsqueeze(1).expand(batch, MAX_PLANETS, MAX_PLANETS, 2)
+        delta = tgt_xy - src_xy
+        dist = torch.linalg.norm(delta, dim=-1, keepdim=True)
+        pair_geom = torch.cat([delta, dist, dist.clamp_min(1e-4).reciprocal().clamp_max(20.0)], dim=-1)
+        g = globals_.view(batch, 1, 1, GLOBAL_FEATURES).expand(batch, MAX_PLANETS, MAX_PLANETS, -1)
+
+        pair_base = torch.cat([pair, pair_geom, g], dim=-1)
+        pair_base = pair_base.unsqueeze(3).expand(batch, MAX_PLANETS, MAX_PLANETS, len(SEND_FRACTIONS), -1)
+        if pair_outcome_features is None:
+            outcome = pair_base.new_zeros((batch, MAX_PLANETS, MAX_PLANETS, len(SEND_FRACTIONS), PAIR_OUTCOME_FEATURES))
+        else:
+            outcome = pair_outcome_features[:, :, :, SEND_ACTIONS, :].to(dtype=pair_base.dtype, device=pair_base.device)
+        action_features = action_feature_tensor(planets, pair_turns, pair_reachable_mask)
+        pair_logits = self.pair_head(torch.cat([pair_base, outcome, action_features], dim=-1)).reshape(batch, -1)
+        state = torch.cat([global_encoded, globals_], dim=-1)
+        logits = torch.cat([self.noop_head(state), pair_logits], dim=-1)
+        if action_mask is not None:
+            logits = logits.masked_fill(~action_mask, -1e9)
+        value = self.value_head(state).squeeze(-1)
+        return logits, value
+
+
+class NgptActionFeatureIdentityPolicy(nn.Module):
+    """4p policy variant with absolute owner, acting-player, and alive-count embeddings."""
+
+    def __init__(self, hidden: int = 128, layers: int = 3, heads: int = 4) -> None:
+        super().__init__()
+        self.planet_encoder = nn.Sequential(
+            nn.Linear(PLANET_FEATURES, hidden),
+            nn.LayerNorm(hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+        )
+        self.global_encoder = nn.Sequential(
+            nn.Linear(GLOBAL_FEATURES, hidden),
+            nn.LayerNorm(hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+        )
+        self.owner_embedding = nn.Embedding(5, hidden)
+        self.player_embedding = nn.Embedding(4, hidden)
+        self.alive_embedding = nn.Embedding(5, hidden)
+        self.transformer = NormalizedEncoder(hidden, layers, heads)
+        pair_features = hidden * 4 + 4 + GLOBAL_FEATURES + PAIR_OUTCOME_FEATURES + ACTION_FEATURES
+        self.pair_head = nn.Sequential(
+            nn.Linear(pair_features, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+        self.noop_head = nn.Sequential(
+            nn.Linear(hidden + GLOBAL_FEATURES, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden + GLOBAL_FEATURES, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(
+        self,
+        planets,
+        planet_mask,
+        globals_,
+        action_mask=None,
+        pair_turns=None,
+        pair_reachable_mask=None,
+        pair_outcome_features=None,
+        planet_timeline_features=None,
+        owner_ids=None,
+        player_ids=None,
+        alive_players=None,
+    ):
+        batch = planets.shape[0]
+        device = planets.device
+        if owner_ids is None:
+            owner_ids = torch.zeros((batch, MAX_PLANETS), dtype=torch.long, device=device)
+        else:
+            owner_ids = owner_ids.to(device=device, dtype=torch.long).clamp(0, 4)
+        if player_ids is None:
+            player_ids = torch.zeros((batch,), dtype=torch.long, device=device)
+        else:
+            player_ids = player_ids.to(device=device, dtype=torch.long).view(batch).clamp(0, 3)
+        if alive_players is None:
+            alive_players = torch.zeros((batch,), dtype=torch.long, device=device)
+        else:
+            alive_players = alive_players.to(device=device, dtype=torch.long).view(batch).clamp(0, 4)
+
+        player_context = self.player_embedding(player_ids)
+        alive_context = self.alive_embedding(alive_players)
+        planet_tokens = (
+            self.planet_encoder(with_timeline_features(planets, planet_timeline_features))
+            + self.owner_embedding(owner_ids)
+            + player_context.unsqueeze(1)
+        )
+        global_token = (self.global_encoder(globals_) + player_context + alive_context).unsqueeze(1)
         tokens = torch.cat([global_token, planet_tokens], dim=1)
         global_valid = torch.ones(batch, 1, dtype=torch.bool, device=planet_mask.device)
         valid = torch.cat([global_valid, planet_mask.bool()], dim=1)
@@ -364,6 +485,12 @@ def build_policy(
             layers=transformer_layers,
             heads=transformer_heads,
         )
+    if model_type == "entity_transformer_ngpt_action_features_identity":
+        return NgptActionFeatureIdentityPolicy(
+            hidden=hidden,
+            layers=transformer_layers,
+            heads=transformer_heads,
+        )
     raise ValueError(f"unknown model type: {model_type}")
 
 
@@ -383,4 +510,7 @@ def tensorize(encoded, device="cpu"):
         "planet_timeline_features": torch.as_tensor(
             encoded.planet_timeline_features, dtype=torch.float32, device=device
         ).unsqueeze(0),
+        "owner_ids": torch.as_tensor(encoded.owner_ids, dtype=torch.long, device=device).unsqueeze(0),
+        "player_ids": torch.as_tensor([encoded.player_id], dtype=torch.long, device=device),
+        "alive_players": torch.as_tensor([encoded.alive_players], dtype=torch.long, device=device),
     }

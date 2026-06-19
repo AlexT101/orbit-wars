@@ -53,6 +53,9 @@ class EncodedObs:
     pair_reachable_mask: np.ndarray
     pair_outcome_features: np.ndarray
     planet_timeline_features: np.ndarray
+    owner_ids: np.ndarray
+    player_id: int
+    alive_players: int
 
 
 def observation_space() -> spaces.Dict:
@@ -140,6 +143,36 @@ def _array_from_feat(feat: dict[str, Any], key: str, shape: tuple[int, ...], dty
     raise ValueError(f"unexpected {key} shape {raw_shape}, expected {shape}")
 
 
+def owner_ids_from_obs(obs: dict[str, Any], feat: dict[str, Any]) -> np.ndarray:
+    """Absolute owner category per planet slot: 0=neutral/missing, 1..4=player id + 1."""
+    owner_by_id: dict[int, int] = {}
+    for planet in obs.get("planets", []) or []:
+        if len(planet) >= 2:
+            owner_by_id[int(planet[0])] = int(planet[1])
+    planet_ids = [int(x) for x in feat.get("planet_ids", [])]
+    out = np.zeros((PLANET_SLOTS,), dtype=np.int64)
+    for slot, planet_id in enumerate(planet_ids[:PLANET_SLOTS]):
+        owner = owner_by_id.get(planet_id, -1)
+        if 0 <= owner <= 3:
+            out[slot] = owner + 1
+    return out
+
+
+def alive_players_from_obs(obs: dict[str, Any]) -> int:
+    owners: set[int] = set()
+    for planet in obs.get("planets", []) or []:
+        if len(planet) >= 6:
+            owner = int(planet[1])
+            if owner >= 0 and float(planet[5]) > 0:
+                owners.add(owner)
+    for fleet in obs.get("fleets", []) or []:
+        if len(fleet) >= 7:
+            owner = int(fleet[1])
+            if owner >= 0 and float(fleet[6]) > 0:
+                owners.add(owner)
+    return len(owners)
+
+
 def encode_features(obs: dict[str, Any], player: int) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     feat = _rust_encode_obs(obs, player)
     tokens = _tokens_from_feat(obs, feat)
@@ -156,6 +189,9 @@ def encode_features(obs: dict[str, Any], player: int) -> tuple[dict[str, np.ndar
             feat, "planet_timeline_features", PLANET_TIMELINE_SHAPE, np.float32
         ),
         "valid_actions_mask": policy_action_mask(feat),
+        "owner_ids": owner_ids_from_obs(obs, feat),
+        "player_ids": np.asarray(int(player), dtype=np.int64),
+        "alive_players": np.asarray(alive_players_from_obs(obs), dtype=np.int64),
     }
     return model_obs, feat
 
@@ -163,8 +199,14 @@ def encode_features(obs: dict[str, Any], player: int) -> tuple[dict[str, np.ndar
 def encoded_from_feat(feat: dict[str, Any], obs: dict[str, Any] | None = None) -> EncodedObs:
     if obs is None:
         tokens = feat["tokens"].reshape(TOKEN_SHAPE).astype(np.float32)
+        owner_ids = np.zeros((PLANET_SLOTS,), dtype=np.int64)
+        player_id = 0
+        alive_players = 0
     else:
         tokens = _tokens_from_feat(obs, feat)
+        owner_ids = owner_ids_from_obs(obs, feat)
+        player_id = int(obs.get("player", 0))
+        alive_players = alive_players_from_obs(obs)
     presence = _array_from_feat(feat, "presence", PRESENCE_SHAPE, np.float32)
     turns = _array_from_feat(feat, "turns", TURN_SHAPE, np.float32)
     reachable = _array_from_feat(feat, "reachable_mask", TURN_SHAPE, np.uint8)
@@ -181,6 +223,9 @@ def encoded_from_feat(feat: dict[str, Any], obs: dict[str, Any] | None = None) -
         pair_reachable_mask=reachable[0],
         pair_outcome_features=pair_outcome,
         planet_timeline_features=timeline,
+        owner_ids=owner_ids,
+        player_id=player_id,
+        alive_players=alive_players,
     )
 
 

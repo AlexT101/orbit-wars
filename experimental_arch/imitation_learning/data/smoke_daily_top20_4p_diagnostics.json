@@ -1,0 +1,185 @@
+{
+  "days": {
+    "6_16": {
+      "rated_players": 118,
+      "top": [
+        {
+          "name": "Xiangyu Liu",
+          "rating": 1.0367603907426322
+        },
+        {
+          "name": "flg",
+          "rating": 0.9212015145051498
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 0.8828357750631025
+        },
+        {
+          "name": "draven",
+          "rating": 0.8277479279502109
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.7872656822006925
+        },
+        {
+          "name": "CPMP",
+          "rating": 0.7854222180653497
+        },
+        {
+          "name": "Jake Will",
+          "rating": 0.7779831053992833
+        },
+        {
+          "name": "klog",
+          "rating": 0.7765560763099064
+        },
+        {
+          "name": "TonyK",
+          "rating": 0.7738285315971133
+        },
+        {
+          "name": "Hober Malloc",
+          "rating": 0.7154107749503186
+        },
+        {
+          "name": "saharan",
+          "rating": 0.7031686746541828
+        },
+        {
+          "name": "Nebraskinator",
+          "rating": 0.6816920700810951
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.680666968161806
+        },
+        {
+          "name": "Mendrika",
+          "rating": 0.6671463023945778
+        },
+        {
+          "name": "Guanshuo Xu",
+          "rating": 0.6598203990900877
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 0.617019307243224
+        },
+        {
+          "name": "Azat Akhtyamov",
+          "rating": 0.5940073065602726
+        },
+        {
+          "name": "Ender",
+          "rating": 0.5895337146940558
+        },
+        {
+          "name": "Maruichi01",
+          "rating": 0.5867181723218311
+        },
+        {
+          "name": "Son Pham",
+          "rating": 0.5811320372376444
+        }
+      ],
+      "window_games": 1184
+    },
+    "6_17": {
+      "rated_players": 133,
+      "top": [
+        {
+          "name": "Xiangyu Liu",
+          "rating": 1.2212113844097583
+        },
+        {
+          "name": "Isaiah @ Tufa Labs",
+          "rating": 1.1891912449069335
+        },
+        {
+          "name": "One Man Wrecking Machine",
+          "rating": 1.1242170303958328
+        },
+        {
+          "name": "TonyK",
+          "rating": 1.092326746237408
+        },
+        {
+          "name": "flg",
+          "rating": 1.0196385271157964
+        },
+        {
+          "name": "Harm Buisman",
+          "rating": 0.9237551494022725
+        },
+        {
+          "name": "Erfan Eshratifar",
+          "rating": 0.8228534530033216
+        },
+        {
+          "name": "Boey",
+          "rating": 0.8227388320774253
+        },
+        {
+          "name": "Hober Malloc",
+          "rating": 0.8084751549043578
+        },
+        {
+          "name": "213tubo",
+          "rating": 0.7305796227801244
+        },
+        {
+          "name": "Azat Akhtyamov",
+          "rating": 0.724388090369521
+        },
+        {
+          "name": "Ender",
+          "rating": 0.7141841536034146
+        },
+        {
+          "name": "Artem",
+          "rating": 0.7117176917937142
+        },
+        {
+          "name": "saharan",
+          "rating": 0.6839795507602644
+        },
+        {
+          "name": "Mendrika",
+          "rating": 0.683402389574052
+        },
+        {
+          "name": "Guanshuo Xu",
+          "rating": 0.6765488006564279
+        },
+        {
+          "name": "M & J & M.ver2",
+          "rating": 0.6501038565202746
+        },
+        {
+          "name": "Audun Ljone Henriksen",
+          "rating": 0.6449950833302204
+        },
+        {
+          "name": "bengle",
+          "rating": 0.6436217710570723
+        },
+        {
+          "name": "draven",
+          "rating": 0.6425299976698847
+        }
+      ],
+      "window_games": 2403
+    }
+  },
+  "min_games": 5,
+  "players": 4,
+  "prior_strength": 3.0,
+  "top_n": 20,
+  "window_days": 2,
+  "zip_paths": [
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_16.zip",
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_17.zip"
+  ]
+}

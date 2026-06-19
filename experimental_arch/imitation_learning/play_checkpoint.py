@@ -36,18 +36,19 @@ if str(TRAIN_DIR) not in sys.path:
 decode_move: Callable[[dict[str, Any], int], list[list[float]]]
 encode_obs: Callable[..., Any]
 build_policy: Callable[..., torch.nn.Module]
+tensorize: Callable[..., dict[str, torch.Tensor]]
 raw_encode_obs: Callable[[dict[str, Any], int], dict[str, Any]]
 OrbitWarsEngine: Any
 _RUNTIME_DEPS_LOADED = False
 
 
 def load_runtime_deps() -> None:
-    global decode_move, encode_obs, build_policy, raw_encode_obs, OrbitWarsEngine, _RUNTIME_DEPS_LOADED
+    global decode_move, encode_obs, build_policy, tensorize, raw_encode_obs, OrbitWarsEngine, _RUNTIME_DEPS_LOADED
     if _RUNTIME_DEPS_LOADED:
         return
     try:
         from features import decode_move as feature_decode_move, encode_obs as feature_encode_obs  # noqa: E402
-        from model import build_policy as feature_build_policy  # noqa: E402
+        from model import build_policy as feature_build_policy, tensorize as feature_tensorize  # noqa: E402
         from orbit_wars_engine import OrbitWarsEngine as feature_engine  # noqa: E402
         from orbit_wars_model import encode_obs as feature_raw_encode_obs  # noqa: E402
     except ModuleNotFoundError as exc:
@@ -61,6 +62,7 @@ def load_runtime_deps() -> None:
     decode_move = feature_decode_move
     encode_obs = feature_encode_obs
     build_policy = feature_build_policy
+    tensorize = feature_tensorize
     raw_encode_obs = feature_raw_encode_obs
     OrbitWarsEngine = feature_engine
     _RUNTIME_DEPS_LOADED = True
@@ -113,28 +115,7 @@ class CheckpointAgent:
     def act(self, obs: dict) -> list[list[float]]:
         load_runtime_deps()
         encoded = encode_obs(obs, player=int(obs.get("player", 0)))
-        batch = {
-            "planets": torch.as_tensor(encoded.planets, dtype=torch.float32, device=self.device).unsqueeze(0),
-            "planet_mask": torch.as_tensor(encoded.planet_mask, dtype=torch.float32, device=self.device).unsqueeze(0),
-            "globals_": torch.as_tensor(encoded.globals, dtype=torch.float32, device=self.device).unsqueeze(0),
-            "action_mask": torch.as_tensor(encoded.action_mask, dtype=torch.bool, device=self.device).unsqueeze(0),
-            "pair_turns": torch.as_tensor(encoded.pair_turns, dtype=torch.float32, device=self.device).unsqueeze(0),
-            "pair_reachable_mask": torch.as_tensor(
-                encoded.pair_reachable_mask,
-                dtype=torch.float32,
-                device=self.device,
-            ).unsqueeze(0),
-            "pair_outcome_features": torch.as_tensor(
-                encoded.pair_outcome_features,
-                dtype=torch.float32,
-                device=self.device,
-            ).unsqueeze(0),
-            "planet_timeline_features": torch.as_tensor(
-                encoded.planet_timeline_features,
-                dtype=torch.float32,
-                device=self.device,
-            ).unsqueeze(0),
-        }
+        batch = tensorize(encoded, device=self.device)
         with torch.inference_mode():
             logits, _value = self.model(**batch)
             if self.deterministic:

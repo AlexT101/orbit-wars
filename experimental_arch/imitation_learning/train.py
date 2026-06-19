@@ -73,6 +73,11 @@ DATASET_NAME = os.environ.get("IL_DATASET_NAME", "osteo_top20_2p_winners")
 MAX_TRAIN_STEPS = int(os.environ.get("IL_MAX_TRAIN_STEPS", "0") or "0")
 MAX_VAL_BATCHES = int(os.environ.get("IL_MAX_VAL_BATCHES", "0") or "0")
 MAX_CHUNKS = int(os.environ.get("IL_MAX_CHUNKS", "0") or "0")
+# "factored" = noop-vs-launch gate + conditional launch-cell loss (default);
+# "flat" = original single 3873-way cross-entropy.
+LOSS_MODE = os.environ.get("IL_LOSS", "factored").lower()
+GATE_LAMBDA = float(os.environ.get("IL_GATE_LAMBDA", "1.0"))
+TOPK = int(os.environ.get("IL_TOPK", "5"))
 
 if "IL_EPOCHS" in os.environ:
     EPOCHS = int(os.environ["IL_EPOCHS"])
@@ -198,6 +203,24 @@ class ChunkedILDataset(Dataset):
             player_rank = payload["player_rank"].astype(np.float32, copy=False)
             weights = ((1.0 - our_ship_fraction) ** 2) * (1.0 - player_rank / 30.0)
             weights = np.clip(weights, 0.0, None).astype(np.float32, copy=False)
+            rows = int(payload["labels"].shape[0])
+            if "age_weight" in payload:
+                weights *= payload["age_weight"].astype(np.float32, copy=False)
+            owner_ids = (
+                payload["owner_ids"].astype(np.int64, copy=False)
+                if "owner_ids" in payload
+                else np.zeros((rows, TOKEN_SHAPE[1]), dtype=np.int64)
+            )
+            player_ids = (
+                payload["player_ids"].astype(np.int64, copy=False)
+                if "player_ids" in payload
+                else payload["players"].astype(np.int64, copy=False)
+            )
+            alive_players = (
+                payload["alive_players"].astype(np.int64, copy=False)
+                if "alive_players" in payload
+                else np.zeros((rows,), dtype=np.int64)
+            )
             tensors = {
                 "tokens": torch.from_numpy(payload["tokens"]),
                 "presence": torch.from_numpy(payload["presence"]),
@@ -210,9 +233,17 @@ class ChunkedILDataset(Dataset):
                 "labels": torch.from_numpy(payload["labels"]),
                 "steps": torch.from_numpy(payload["steps"]),
                 "players": torch.from_numpy(payload["players"]),
+                "owner_ids": torch.from_numpy(owner_ids),
+                "player_ids": torch.from_numpy(player_ids),
+                "alive_players": torch.from_numpy(alive_players),
                 "player_rank": torch.from_numpy(payload["player_rank"]),
                 "opponent_rank": torch.from_numpy(payload["opponent_rank"]),
                 "our_ship_fraction": torch.from_numpy(payload["our_ship_fraction"]),
+                "age_weight": torch.from_numpy(
+                    payload["age_weight"].astype(np.float32, copy=False)
+                    if "age_weight" in payload
+                    else np.ones((rows,), dtype=np.float32)
+                ),
                 "weights": torch.from_numpy(weights),
             }
         self._cache[chunk_index] = tensors
@@ -233,9 +264,13 @@ class ChunkedILDataset(Dataset):
             "pair_reachable_mask": tensors["pair_reachable_mask"][local_idx].float(),
             "pair_outcome_features": tensors["pair_outcome_features"][local_idx].float(),
             "planet_timeline_features": tensors["planet_timeline_features"][local_idx].float(),
+            "owner_ids": tensors["owner_ids"][local_idx].long(),
+            "player_ids": tensors["player_ids"][local_idx].long(),
+            "alive_players": tensors["alive_players"][local_idx].long(),
             "label": tensors["labels"][local_idx].long(),
             "weight": tensors["weights"][local_idx].float(),
             "our_ship_fraction": tensors["our_ship_fraction"][local_idx].float(),
+            "age_weight": tensors["age_weight"][local_idx].float(),
             "player_rank": tensors["player_rank"][local_idx].long(),
         }
 
@@ -453,6 +488,16 @@ def validate_dataset_schema(dataset: ChunkedILDataset) -> None:
             got = tuple(payload[key].shape[1:])
             if got != tuple(shape):
                 raise ValueError(f"dataset tensor {key!r} has shape tail {got}, expected {shape}")
+        if "owner_ids" in payload and tuple(payload["owner_ids"].shape[1:]) != (TOKEN_SHAPE[1],):
+            raise ValueError(
+                f"dataset tensor 'owner_ids' has shape tail {tuple(payload['owner_ids'].shape[1:])}, "
+                f"expected {(TOKEN_SHAPE[1],)}"
+            )
+        for key in ("player_ids", "alive_players"):
+            if key in payload and tuple(payload[key].shape[1:]) != ():
+                raise ValueError(f"dataset tensor {key!r} must be rank-1, got shape {payload[key].shape}")
+        if "age_weight" in payload and tuple(payload["age_weight"].shape[1:]) != ():
+            raise ValueError(f"dataset tensor 'age_weight' must be rank-1, got shape {payload['age_weight'].shape}")
         send_fractions = tuple(float(x) for x in payload["send_fractions"])
         if send_fractions != (0.5, 1.0):
             raise ValueError(f"dataset send_fractions={send_fractions!r}, expected (0.5, 1.0)")
@@ -568,6 +613,9 @@ def model_forward(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> tup
         pair_reachable_mask=batch.get("pair_reachable_mask"),
         pair_outcome_features=batch.get("pair_outcome_features"),
         planet_timeline_features=batch.get("planet_timeline_features"),
+        owner_ids=batch.get("owner_ids"),
+        player_ids=batch.get("player_ids"),
+        alive_players=batch.get("alive_players"),
     )
 
 
@@ -611,6 +659,40 @@ def weighted_ce_loss(logits: torch.Tensor, labels: torch.Tensor, weights: torch.
     return (loss_rows * weights).sum() / denom
 
 
+def factored_loss(
+    logits: torch.Tensor, labels: torch.Tensor, weights: torch.Tensor, gate_lambda: float = 1.0
+) -> torch.Tensor:
+    """Factored policy loss: P(action) = P(launch?) * P(cell | launch).
+
+    Index 0 is noop; indices 1.. are launch cells (already action-masked to -1e9
+    inside the model forward). Splitting the objective stops the single large noop
+    class from tugging the launch-cell decision boundary each epoch: the cell
+    softmax never sees noop, so launch cells compete only against each other.
+    """
+    noop_logit = logits[:, :1]
+    launch_logits = logits[:, 1:]
+    launch_mask = labels != 0
+    weights = weights.to(dtype=logits.dtype).clamp_min(0.0)
+
+    # Gate: noop vs "any launch" as a 2-class CE over [noop, logsumexp(launch cells)].
+    launch_pooled = torch.logsumexp(launch_logits, dim=-1, keepdim=True)
+    gate_logits = torch.cat([noop_logit, launch_pooled], dim=-1)
+    gate_rows = F.cross_entropy(gate_logits, launch_mask.long(), reduction="none")
+    gate_loss = (gate_rows * weights).sum() / weights.sum().clamp_min(1.0e-8)
+
+    # Target: which cell, computed only on launch rows (labels shifted by 1).
+    if bool(launch_mask.any()):
+        tl = launch_logits[launch_mask]
+        tt = labels[launch_mask] - 1
+        tw = weights[launch_mask]
+        target_rows = F.cross_entropy(tl, tt, reduction="none")
+        target_loss = (target_rows * tw).sum() / tw.sum().clamp_min(1.0e-8)
+    else:
+        target_loss = logits.new_zeros(())
+
+    return gate_loss + gate_lambda * target_loss
+
+
 @torch.no_grad()
 def evaluate(
     model: torch.nn.Module,
@@ -626,36 +708,49 @@ def evaluate(
     total_weight = 0.0
     total = 0
     correct = 0
+    correct_topk = 0
     launch_total = 0
     launch_correct = 0
+    launch_correct_topk = 0
     noop_total = 0
     noop_correct = 0
+    topk = max(1, min(TOPK, ACTION_DIM))
     for batch_index, raw_batch in enumerate(loader, start=1):
         batch = batch_to_device(raw_batch, device)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             logits, _value = model_forward(model, batch)
         loss_rows = F.cross_entropy(logits, batch["label"], reduction="none")
         weights = batch["weight"].to(dtype=loss_rows.dtype).clamp_min(0.0)
+        label = batch["label"]
         pred = torch.argmax(logits, dim=-1)
+        k = min(topk, logits.shape[-1])
+        topk_idx = torch.topk(logits, k, dim=-1).indices
+        in_topk = (topk_idx == label.unsqueeze(-1)).any(dim=-1)
+        top1_hit = pred == label
         total_loss += float(loss_rows.sum().item())
         total_weighted_loss += float((loss_rows * weights).sum().item())
         total_weight += float(weights.sum().item())
-        total += int(batch["label"].numel())
-        correct += int((pred == batch["label"]).sum().item())
-        launch_mask = batch["label"] != 0
+        total += int(label.numel())
+        correct += int(top1_hit.sum().item())
+        correct_topk += int(in_topk.sum().item())
+        launch_mask = label != 0
         noop_mask = ~launch_mask
         launch_total += int(launch_mask.sum().item())
         noop_total += int(noop_mask.sum().item())
-        launch_correct += int(((pred == batch["label"]) & launch_mask).sum().item())
-        noop_correct += int(((pred == batch["label"]) & noop_mask).sum().item())
+        launch_correct += int((top1_hit & launch_mask).sum().item())
+        launch_correct_topk += int((in_topk & launch_mask).sum().item())
+        noop_correct += int((top1_hit & noop_mask).sum().item())
         if max_batches > 0 and batch_index >= max_batches:
             break
     return {
         "loss": total_loss / max(1, total),
         "weighted_loss": total_weighted_loss / max(1.0e-8, total_weight),
         "accuracy": correct / max(1, total),
+        "accuracy_topk": correct_topk / max(1, total),
         "launch_accuracy": launch_correct / max(1, launch_total),
+        "launch_accuracy_topk": launch_correct_topk / max(1, launch_total),
         "noop_accuracy": noop_correct / max(1, noop_total),
+        "topk": float(topk),
         "rows": float(total),
         "weight_mean": total_weight / max(1, total),
     }
@@ -813,7 +908,10 @@ def main() -> int:
             batch = batch_to_device(raw_batch, device)
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
                 logits, _value = model_forward(model, batch)
-                loss = weighted_ce_loss(logits, batch["label"], batch["weight"])
+                if LOSS_MODE == "factored":
+                    loss = factored_loss(logits, batch["label"], batch["weight"], GATE_LAMBDA)
+                else:
+                    loss = weighted_ce_loss(logits, batch["label"], batch["weight"])
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -933,7 +1031,9 @@ def main() -> int:
             "val_loss": val["loss"],
             "val_weighted_loss": val["weighted_loss"],
             "val_accuracy": val["accuracy"],
+            "val_accuracy_top5": val["accuracy_topk"],
             "val_launch_accuracy": val["launch_accuracy"],
+            "val_launch_accuracy_top5": val["launch_accuracy_topk"],
             "val_noop_accuracy": val["noop_accuracy"],
             "val_sample_weight_mean": val["weight_mean"],
             "train_rows": int(split_stats["train_rows"]),
@@ -957,7 +1057,9 @@ def main() -> int:
                     "val/loss": row["val_loss"],
                     "val/weighted_loss": row["val_weighted_loss"],
                     "val/accuracy": row["val_accuracy"],
+                    "val/accuracy_top5": row["val_accuracy_top5"],
                     "val/launch_accuracy": row["val_launch_accuracy"],
+                    "val/launch_accuracy_top5": row["val_launch_accuracy_top5"],
                     "val/noop_accuracy": row["val_noop_accuracy"],
                     "val/sample_weight_mean": row["val_sample_weight_mean"],
                     "rows/train": row["train_rows"],
@@ -978,7 +1080,8 @@ def main() -> int:
             f"epoch {epoch:02d} train_loss={row['train_loss']:.4f} "
             f"train_acc={row['train_accuracy']:.3f} val_loss={row['val_loss']:.4f} "
             f"val_weighted={row['val_weighted_loss']:.4f} "
-            f"val_acc={row['val_accuracy']:.3f} launch={row['val_launch_accuracy']:.3f} "
+            f"val_acc={row['val_accuracy']:.3f} acc@5={row['val_accuracy_top5']:.3f} "
+            f"launch={row['val_launch_accuracy']:.3f} launch@5={row['val_launch_accuracy_top5']:.3f} "
             f"lr={row['learning_rate']:.3g} "
             f"rows/s={row['train_rows_per_sec']:.0f}"
         )

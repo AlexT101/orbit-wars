@@ -1,0 +1,106 @@
+{
+  "action_dim": 3873,
+  "chunks": [
+    {
+      "alive_counts": {
+        "4": 32
+      },
+      "path": "chunks/chunk_000000.npz",
+      "rows": 32,
+      "weight_sum": 17.4
+    },
+    {
+      "alive_counts": {
+        "4": 32
+      },
+      "path": "chunks/chunk_000001.npz",
+      "rows": 32,
+      "weight_sum": 17.248708790540693
+    }
+  ],
+  "config": {
+    "chunk_rows": 32,
+    "keep_players": null,
+    "launch_only": false,
+    "limit_games_per_zip": null,
+    "max_angle_error": 0.08,
+    "max_rows": 64,
+    "min_alive_players": 3,
+    "out_dir": "C:\\Users\\alext\\Github\\orbit-wars\\experimental_arch\\imitation_learning\\data\\smoke_4p_identity",
+    "player_names": [],
+    "players": 4,
+    "send_fraction_tolerance": 0.25,
+    "winner_only": false,
+    "zip_paths": [
+      "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_17.zip"
+    ]
+  },
+  "created_at_unix": 1781785106.8959198,
+  "dataset_name": "osteo_all_4p",
+  "elapsed_seconds": 0.6031486988067627,
+  "feature_shapes_verified": {
+    "PAIR_OUTCOME_SHAPE": [
+      44,
+      44,
+      3,
+      4
+    ],
+    "PAIR_TURN_SHAPE": [
+      44,
+      44,
+      3
+    ],
+    "PLANET_TIMELINE_SHAPE": [
+      44,
+      31
+    ],
+    "TOKEN_SHAPE": [
+      4,
+      44,
+      15
+    ]
+  },
+  "format_version": 2,
+  "identity_features": {
+    "alive_players": "live owners with ships on planets or fleets",
+    "owner_ids": "0=neutral_or_missing, 1..4=absolute_player_id_plus_one",
+    "player_ids": "absolute acting player id"
+  },
+  "label_counts_top": {
+    "0": 45,
+    "1066": 1,
+    "1074": 1,
+    "1098": 1,
+    "1118": 1,
+    "1188": 1,
+    "1278": 1,
+    "1288": 1,
+    "1336": 1,
+    "1368": 1,
+    "2138": 8,
+    "2228": 1,
+    "2302": 1
+  },
+  "launch_rows": 19,
+  "noop_rows": 45,
+  "players": 4,
+  "processed_replays": 1,
+  "replays_seen": 1,
+  "rows": 64,
+  "stats": {
+    "alive_4_states": 71,
+    "launch_rows": 19,
+    "multi_launch_steps": 3,
+    "noop_rows": 45,
+    "replays_kept": 1,
+    "replays_seen": 1,
+    "row_alive_4": 64,
+    "row_player_slot_0": 20,
+    "row_player_slot_1": 14,
+    "row_player_slot_2": 16,
+    "row_player_slot_3": 14,
+    "rows": 64,
+    "skipped_angle": 10,
+    "skipped_invalid": 10
+  }
+}

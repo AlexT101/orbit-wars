@@ -1,0 +1,17 @@
+{
+  "chunk_rows": 32,
+  "keep_players": null,
+  "launch_only": false,
+  "limit_games_per_zip": null,
+  "max_angle_error": 0.08,
+  "max_rows": 64,
+  "min_alive_players": 3,
+  "out_dir": "C:\\Users\\alext\\Github\\orbit-wars\\experimental_arch\\imitation_learning\\data\\smoke_4p_identity",
+  "player_names": [],
+  "players": 4,
+  "send_fraction_tolerance": 0.25,
+  "winner_only": false,
+  "zip_paths": [
+    "C:\\Users\\alext\\Github\\orbit-wars\\ladder_replays\\replays_6_17.zip"
+  ]
+}

@@ -46,6 +46,7 @@ import time
 import zipfile
 from collections import Counter
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -81,12 +82,13 @@ SEND_ACTIONS: tuple[int, ...]
 SEND_FRACTIONS: tuple[float, ...]
 discrete_action_index: Callable[[int, int, int], int]
 encoded_from_feat: Callable[..., Any]
+alive_players_from_obs: Callable[[dict[str, Any]], int]
 rust_encode_obs: Callable[[dict[str, Any], int], dict[str, Any]]
 _RUNTIME_DEPS_LOADED = False
 
 
 def load_runtime_deps() -> None:
-    global SEND_ACTIONS, SEND_FRACTIONS, discrete_action_index, encoded_from_feat, rust_encode_obs
+    global SEND_ACTIONS, SEND_FRACTIONS, alive_players_from_obs, discrete_action_index, encoded_from_feat, rust_encode_obs
     global _RUNTIME_DEPS_LOADED
     if _RUNTIME_DEPS_LOADED:
         return
@@ -95,6 +97,7 @@ def load_runtime_deps() -> None:
             ACTION_DIM as feature_action_dim,
             SEND_ACTIONS as feature_send_actions,
             SEND_FRACTIONS as feature_send_fractions,
+            alive_players_from_obs as feature_alive_players_from_obs,
             discrete_action_index as feature_discrete_action_index,
             encoded_from_feat as feature_encoded_from_feat,
         )
@@ -111,6 +114,7 @@ def load_runtime_deps() -> None:
         raise RuntimeError(f"feature ACTION_DIM={feature_action_dim}, expected {ACTION_DIM}")
     SEND_ACTIONS = tuple(int(x) for x in feature_send_actions)
     SEND_FRACTIONS = tuple(float(x) for x in feature_send_fractions)
+    alive_players_from_obs = feature_alive_players_from_obs
     discrete_action_index = feature_discrete_action_index
     encoded_from_feat = feature_encoded_from_feat
     rust_encode_obs = feature_rust_encode_obs
@@ -125,6 +129,9 @@ class BuildConfig:
     player_names: tuple[str, ...]
     winner_only: bool
     launch_only: bool
+    min_alive_players: int
+    row_half_life_days: float
+    reference_day: str
     max_angle_error: float
     send_fraction_tolerance: float
     chunk_rows: int
@@ -148,6 +155,7 @@ class Sample:
     player_rank: int
     opponent_rank: int
     our_ship_fraction: float
+    age_weight: float
     day: str
     game_id: str
 
@@ -207,7 +215,13 @@ def read_replay_meta(zf: zipfile.ZipFile, entry_name: str, players: int) -> Repl
         return replay_meta_from_head(f.read(REPLAY_HEAD_BYTES), players)
 
 
-def selected_slots_for(meta: ReplayMeta, args: argparse.Namespace, keep_set: set[str] | None) -> tuple[int, ...] | None:
+def selected_slots_for(
+    meta: ReplayMeta,
+    args: argparse.Namespace,
+    keep_set: set[str] | None,
+    daily_ranks: dict[str, dict[str, int]] | None,
+    day: str,
+) -> tuple[int, ...] | None:
     winner = unique_winner(meta.rewards)
     if args.winner_only and winner is None:
         return None
@@ -215,7 +229,7 @@ def selected_slots_for(meta: ReplayMeta, args: argparse.Namespace, keep_set: set
     for slot in range(args.players):
         if args.winner_only and slot != winner:
             continue
-        if keep_set is not None and meta.names[slot] not in keep_set:
+        if not player_kept_for(meta.names[slot], day, keep_set, daily_ranks):
             continue
         slots.append(slot)
     return tuple(slots)
@@ -314,11 +328,18 @@ def encode_sample(
     opponent_rank: int,
     day: str,
     game_id: str,
+    min_alive_players: int,
+    age_weight: float,
     max_angle_error: float,
     send_fraction_tolerance: float,
     launch_only: bool,
 ) -> tuple[list[Sample], Counter[str]]:
     stats: Counter[str] = Counter()
+    alive_count = alive_players_from_obs(obs)
+    stats[f"alive_{alive_count}_states"] += 1
+    if alive_count < min_alive_players:
+        stats["skipped_alive_filter"] += 1
+        return [], stats
     feat = rust_encode_obs(obs, player)
     encoded = encoded_from_feat(feat, obs=obs)
     rows: list[Sample] = []
@@ -338,6 +359,7 @@ def encode_sample(
                 player_rank=player_rank,
                 opponent_rank=opponent_rank,
                 our_ship_fraction=ship_fraction,
+                age_weight=age_weight,
                 day=day,
                 game_id=game_id,
             )
@@ -375,6 +397,7 @@ def encode_sample(
                 player_rank=player_rank,
                 opponent_rank=opponent_rank,
                 our_ship_fraction=ship_fraction,
+                age_weight=age_weight,
                 day=day,
                 game_id=game_id,
             )
@@ -388,18 +411,60 @@ def day_from_zip(path: Path) -> str:
     return match.group(1) if match else path.stem
 
 
-def load_player_filter(path: Path | None, player_names: list[str]) -> tuple[set[str] | None, dict[str, int]]:
+def day_ordinal(day: str) -> int:
+    month_s, day_s = day.split("_", 1)
+    return date(2026, int(month_s), int(day_s)).toordinal()
+
+
+def age_weight_for(day: str, reference_day: str, half_life_days: float) -> float:
+    if half_life_days <= 0.0:
+        return 1.0
+    age_days = max(0, day_ordinal(reference_day) - day_ordinal(day))
+    return float(0.5 ** (age_days / half_life_days))
+
+
+def load_player_filter(
+    path: Path | None,
+    player_names: list[str],
+) -> tuple[set[str] | None, dict[str, int], dict[str, dict[str, int]] | None]:
     names: list[str] = []
+    daily_ranks: dict[str, dict[str, int]] | None = None
     if path is not None:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, list):
-            raise ValueError(f"--keep-players must be a JSON list: {path}")
-        names.extend(str(x) for x in raw)
+        if isinstance(raw, list):
+            names.extend(str(x) for x in raw)
+        elif isinstance(raw, dict):
+            daily_ranks = {}
+            for day, day_names in raw.items():
+                if not isinstance(day_names, list):
+                    raise ValueError(f"--keep-players day {day!r} must map to a JSON list: {path}")
+                daily_ranks[str(day)] = {str(name): i + 1 for i, name in enumerate(day_names)}
+        else:
+            raise ValueError(f"--keep-players must be a JSON list or day->list object: {path}")
     names.extend(str(x) for x in player_names)
     names = list(dict.fromkeys(names))
-    if not names:
-        return None, {}
-    return set(names), {name: i + 1 for i, name in enumerate(names)}
+    keep_set = set(names) if names else None
+    ranks = {name: i + 1 for i, name in enumerate(names)}
+    return keep_set, ranks, daily_ranks
+
+
+def player_rank_for(name: str, day: str, ranks: dict[str, int], daily_ranks: dict[str, dict[str, int]] | None) -> int:
+    if daily_ranks is not None:
+        return daily_ranks.get(day, {}).get(name, 30)
+    return ranks.get(name, 1)
+
+
+def player_kept_for(
+    name: str,
+    day: str,
+    keep_set: set[str] | None,
+    daily_ranks: dict[str, dict[str, int]] | None,
+) -> bool:
+    if daily_ranks is not None:
+        return name in daily_ranks.get(day, {})
+    if keep_set is None:
+        return True
+    return name in keep_set
 
 
 def slugify_name(name: str) -> str:
@@ -443,13 +508,17 @@ class ChunkWriter:
         pair_reachable = np.stack([encoded.pair_reachable_mask for encoded in encoded_rows]).astype(np.bool_)
         pair_outcome = np.stack([encoded.pair_outcome_features for encoded in encoded_rows]).astype(np.float16)
         timeline = np.stack([encoded.planet_timeline_features for encoded in encoded_rows]).astype(np.float16)
+        owner_ids = np.stack([encoded.owner_ids for encoded in encoded_rows]).astype(np.int8)
 
         labels = np.asarray([sample.label for sample in samples], dtype=np.int64)
         steps = np.asarray([sample.step for sample in samples], dtype=np.int64)
         players = np.asarray([sample.player for sample in samples], dtype=np.int64)
+        player_ids = np.asarray([sample.encoded.player_id for sample in samples], dtype=np.int64)
+        alive_players = np.asarray([sample.encoded.alive_players for sample in samples], dtype=np.int64)
         player_rank = np.asarray([sample.player_rank for sample in samples], dtype=np.int64)
         opponent_rank = np.asarray([sample.opponent_rank for sample in samples], dtype=np.int64)
         our_ship_fraction = np.asarray([sample.our_ship_fraction for sample in samples], dtype=np.float32)
+        age_weight = np.asarray([sample.age_weight for sample in samples], dtype=np.float32)
         games = Counter((sample.day, sample.game_id) for sample in samples)
         games_json = json.dumps(
             [
@@ -472,12 +541,16 @@ class ChunkWriter:
             pair_reachable_mask=pair_reachable.reshape((-1, *PAIR_TURN_SHAPE)),
             pair_outcome_features=pair_outcome.reshape((-1, *PAIR_OUTCOME_SHAPE)),
             planet_timeline_features=timeline.reshape((-1, *PLANET_TIMELINE_SHAPE)),
+            owner_ids=owner_ids,
             labels=labels,
             steps=steps,
             players=players,
+            player_ids=player_ids,
+            alive_players=alive_players,
             player_rank=player_rank,
             opponent_rank=opponent_rank,
             our_ship_fraction=our_ship_fraction,
+            age_weight=age_weight,
             games_json=np.asarray(games_json),
         )
         tmp_path.replace(final_path)
@@ -486,7 +559,13 @@ class ChunkWriter:
             {
                 "path": str(rel).replace("\\", "/"),
                 "rows": int(len(samples)),
-                "weight_sum": float(np.clip((1.0 - our_ship_fraction) ** 2 * (1.0 - player_rank / 30.0), 0.0, None).sum()),
+                "weight_sum": float(
+                    (
+                        np.clip((1.0 - our_ship_fraction) ** 2 * (1.0 - player_rank / 30.0), 0.0, None)
+                        * age_weight
+                    ).sum()
+                ),
+                "alive_counts": {str(k): int(v) for k, v in sorted(Counter(alive_players.tolist()).items())},
             }
         )
         print(f"wrote {final_path} rows={len(samples):,}", flush=True)
@@ -507,11 +586,12 @@ def iter_zip_paths(patterns: list[str]) -> list[Path]:
 def build(args: argparse.Namespace) -> dict[str, Any]:
     load_runtime_deps()
     zip_paths = iter_zip_paths(args.zip)
+    reference_day = args.reference_day or max((day_from_zip(path) for path in zip_paths), key=day_ordinal)
     out_dir = args.out_dir.resolve()
     chunks_dir = out_dir / "chunks"
     out_dir.mkdir(parents=True, exist_ok=True)
     chunks_dir.mkdir(parents=True, exist_ok=True)
-    keep_set, ranks = load_player_filter(args.keep_players, args.player_name)
+    keep_set, ranks, daily_ranks = load_player_filter(args.keep_players, args.player_name)
 
     cfg = BuildConfig(
         zip_paths=tuple(str(p) for p in zip_paths),
@@ -520,6 +600,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         player_names=tuple(args.player_name),
         winner_only=bool(args.winner_only),
         launch_only=bool(args.launch_only),
+        min_alive_players=int(args.min_alive_players),
+        row_half_life_days=float(args.row_half_life_days),
+        reference_day=str(reference_day),
         max_angle_error=float(args.max_angle_error),
         send_fraction_tolerance=float(args.send_fraction_tolerance),
         chunk_rows=int(args.chunk_rows),
@@ -537,6 +620,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     for zi, zip_path in enumerate(zip_paths, start=1):
         day = day_from_zip(zip_path)
+        age_weight = age_weight_for(day, reference_day, args.row_half_life_days)
         with zipfile.ZipFile(zip_path) as zf:
             entries = sorted(n for n in zf.namelist() if n.endswith(".json") and not n.endswith("/"))
             if args.limit_games_per_zip is not None:
@@ -552,7 +636,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                 if meta is None:
                     stats["skipped_format"] += 1
                     continue
-                selected_slots = selected_slots_for(meta, args, keep_set)
+                selected_slots = selected_slots_for(meta, args, keep_set, daily_ranks, day)
                 if selected_slots is None:
                     stats["skipped_draw"] += 1
                     continue
@@ -587,7 +671,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                         action = entry_obj.get("action") or []
                         obs = prev_obs[slot]
                         if obs is not None:
-                            player_rank = ranks.get(meta.names[slot], 1)
+                            player_rank = player_rank_for(meta.names[slot], day, ranks, daily_ranks)
                             opponent_rank = opponent_rank_for(meta.names, slot, ranks)
                             try:
                                 samples, row_stats = encode_sample(
@@ -598,6 +682,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                                     opponent_rank,
                                     day,
                                     game_id,
+                                    args.min_alive_players,
+                                    age_weight,
                                     args.max_angle_error,
                                     args.send_fraction_tolerance,
                                     args.launch_only,
@@ -613,6 +699,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                                 stats["rows"] += len(samples)
                                 for sample in samples:
                                     label_counts[sample.label] += 1
+                                    stats[f"row_alive_{sample.encoded.alive_players}"] += 1
+                                    stats[f"row_player_slot_{sample.player}"] += 1
                                 if args.max_rows is not None and stats["rows"] >= args.max_rows:
                                     break
                         if current_obs is not None:
@@ -651,6 +739,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "chunks": writer.manifest_chunks,
         "label_counts_top": {str(k): int(v) for k, v in label_counts.most_common(50)},
         "stats": {str(k): int(v) for k, v in sorted(stats.items())},
+        "identity_features": {
+            "owner_ids": "0=neutral_or_missing, 1..4=absolute_player_id_plus_one",
+            "player_ids": "absolute acting player id",
+            "alive_players": "live owners with ships on planets or fleets",
+        },
         "feature_shapes_verified": {
             "TOKEN_SHAPE": list(TOKEN_SHAPE),
             "PAIR_TURN_SHAPE": list(PAIR_TURN_SHAPE),
@@ -677,6 +770,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--player-name", action="append", default=[], help="exact player name to include; repeatable")
     p.add_argument("--winner-only", action="store_true", help="only imitate the unique game winner's actions")
     p.add_argument("--launch-only", action="store_true", help="drop noop rows and train only on launch actions")
+    p.add_argument(
+        "--min-alive-players",
+        type=int,
+        default=0,
+        help="drop rows whose observation has fewer live players; use 3 for native 4p IL",
+    )
+    p.add_argument(
+        "--row-half-life-days",
+        type=float,
+        default=0.0,
+        help="multiply sample weights by 0.5 ** (days_old / half_life); 0 disables",
+    )
+    p.add_argument(
+        "--reference-day",
+        default=None,
+        help="latest day for row age weighting, e.g. 6_17; default is latest provided zip",
+    )
     p.add_argument("--chunk-rows", type=int, default=DEFAULT_CHUNK_ROWS)
     p.add_argument("--limit-games-per-zip", type=int, default=None, help="debug cap per zip before format filtering")
     p.add_argument("--max-rows", type=int, default=None, help="stop after writing this many samples")
@@ -685,6 +795,15 @@ def parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.chunk_rows < 1:
         p.error("--chunk-rows must be >= 1")
+    if args.min_alive_players < 0 or args.min_alive_players > args.players:
+        p.error("--min-alive-players must be between 0 and --players")
+    if args.row_half_life_days < 0.0:
+        p.error("--row-half-life-days must be >= 0")
+    if args.reference_day is not None:
+        try:
+            day_ordinal(args.reference_day)
+        except Exception:
+            p.error("--reference-day must look like M_D, e.g. 6_17")
     if args.dataset_name is None:
         if args.player_name:
             gate = "_".join(slugify_name(name) for name in args.player_name[:3])
