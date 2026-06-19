@@ -9,7 +9,8 @@ Bundle layout (flat, everything at the archive root):
   aphrodite                  Linux glibc binary built inside Kaggle's own image
   xgb_*.json                 value-net weights (names from aphrodite's main.py)
   config*.json               apollo runtime configs read by the aphrodite binary
-  osteo_il_2p_latest.pt      2p IL checkpoint
+  osteo_il_2p_latest.pt      2p IL checkpoint (2-player states)
+  osteo_il_4p_latest.pt      4p IL checkpoint (3- and 4-player states)
   features.py, model.py, constants.py
                              IL support (from experimental_arch/train_transformer)
   orbit_wars_model.abi3.so   Rust feature encoder (Linux .so built in Docker)
@@ -49,14 +50,9 @@ APHRODITE = REPO_ROOT / "bots" / "mine" / "aphrodite"
 TRAIN_DIR = REPO_ROOT / "experimental_arch" / "train_transformer"
 ENV_MODEL = REPO_ROOT / "experimental_arch" / "env_model"
 ENV_ENGINE = REPO_ROOT / "experimental_arch" / "env_engine"
-CHECKPOINT_2P = (
-    REPO_ROOT
-    / "experimental_arch"
-    / "imitation_learning"
-    / "checkpoints"
-    / "osteo_bc_transformer"
-    / "latest.pt"
-)
+_IL_CHECKPOINT_DIR = REPO_ROOT / "experimental_arch" / "imitation_learning" / "checkpoints"
+CHECKPOINT_2P = _IL_CHECKPOINT_DIR / "osteo_bc_transformer" / "latest.pt"
+CHECKPOINT_4P = _IL_CHECKPOINT_DIR / "osteo_il_4p_latest.pt"
 BUNDLE = HERE / "submission.tar.gz"
 
 # Weight filenames come from aphrodite's main.py (single source of truth).
@@ -196,6 +192,7 @@ def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
     files: list[tuple[Path, str]] = [
         (BIN_OUT, "aphrodite"),
         (CHECKPOINT_2P, "osteo_il_2p_latest.pt"),
+        (CHECKPOINT_4P, "osteo_il_4p_latest.pt"),
         (TRAIN_DIR / "features.py", "features.py"),
         (TRAIN_DIR / "model.py", "model.py"),
         (TRAIN_DIR / "constants.py", "constants.py"),
