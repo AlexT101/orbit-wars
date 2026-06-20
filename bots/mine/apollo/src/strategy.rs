@@ -234,23 +234,26 @@ fn build_reinforcement_targets(
     player: i64,
 ) -> HashMap<i64, i64> {
     let pressure = reinforcement_pressure(state, model);
+    let attraction = expansion_attraction(state, model, player);
     let mut best: HashMap<i64, ReinforcementRoute> = HashMap::default();
     let mut queue: Vec<i64> = Vec::new();
 
-    // High-pressure owned planets are the sinks. The BFS walks backward through
-    // owned edges, preserving the first hop each source should use.
+    // Every owned planet is a potential sink, keyed by (enemy pressure,
+    // expansion attraction). Pressure dominates, so combat draining is
+    // unchanged; attraction only breaks ties — chiefly the low-pressure early
+    // game, where the enemy-driven pressure is uniformly ~0 and this instead
+    // drifts ships toward the frontier rather than leaving the BFS dormant. The
+    // BFS walks backward through owned edges, preserving the first hop each
+    // source should use.
     for p in &state.my_planets {
         if !model.non_comet_ids.contains(&p.id) {
-            continue;
-        }
-        let sink_pressure = pressure.get(&p.id).copied().unwrap_or(0.0);
-        if sink_pressure <= 0.0 {
             continue;
         }
         best.insert(
             p.id,
             ReinforcementRoute {
-                sink_pressure,
+                sink_pressure: pressure.get(&p.id).copied().unwrap_or(0.0),
+                sink_attraction: attraction.get(&p.id).copied().unwrap_or(f64::NEG_INFINITY),
                 hops: 0,
                 next_hop: p.id,
                 sink_id: p.id,
@@ -272,6 +275,7 @@ fn build_reinforcement_targets(
             }
             let candidate = ReinforcementRoute {
                 sink_pressure: route.sink_pressure,
+                sink_attraction: route.sink_attraction,
                 hops: route.hops + 1,
                 next_hop: node,
                 sink_id: route.sink_id,
@@ -293,15 +297,30 @@ fn build_reinforcement_targets(
             continue;
         }
         let own_pressure = pressure.get(&p.id).copied().unwrap_or(0.0);
+        let own_attraction = attraction.get(&p.id).copied().unwrap_or(f64::NEG_INFINITY);
         let Some(route) = best.get(&p.id).copied() else {
             continue;
         };
-        // Frontier sources only drain toward a clearly higher-pressure sink.
-        // Non-frontier relay/hop planets keep the normal "higher pressure" flow.
+        if route.next_hop == p.id {
+            continue;
+        }
+        // Flow toward a strictly better sink by (pressure, attraction): a
+        // higher-pressure combat sink as before, or — when pressure ties — a
+        // more frontier-facing one (the early-game drift).
+        let better = (route.sink_pressure, route.sink_attraction) > (own_pressure, own_attraction);
+        if !better {
+            continue;
+        }
+        // The frontier-ratio gate guards *combat* draining only — a frontier
+        // planet must not bleed its own defense into a higher-pressure sink.
+        // Pure drift (equal pressure, higher attraction) is exempt: pulling
+        // idle ships toward the frontier is the entire point.
+        let pressure_drain = route.sink_pressure > own_pressure;
         let frontier_source = is_reinforcement_frontier(state, model, p.id, player);
-        let clears_frontier_ratio = !frontier_source
+        let clears_frontier_ratio = !pressure_drain
+            || !frontier_source
             || reinforcement_pressure_clears_frontier_ratio(route.sink_pressure, own_pressure);
-        if route.next_hop != p.id && route.sink_pressure > own_pressure && clears_frontier_ratio {
+        if clears_frontier_ratio {
             out.insert(p.id, route.next_hop);
         }
     }
@@ -311,6 +330,10 @@ fn build_reinforcement_targets(
 #[derive(Clone, Copy)]
 struct ReinforcementRoute {
     sink_pressure: f64,
+    /// Expansion attraction of the sink (see [`expansion_attraction`]). Pure
+    /// tiebreaker below `sink_pressure`, so combat routing is unchanged; it only
+    /// decides flow when pressure ties (chiefly the zero-pressure early game).
+    sink_attraction: f64,
     hops: i64,
     next_hop: i64,
     sink_id: i64,
@@ -320,12 +343,51 @@ fn reinforcement_route_is_better(
     candidate: ReinforcementRoute,
     current: ReinforcementRoute,
 ) -> bool {
-    candidate.sink_pressure > current.sink_pressure
-        || (candidate.sink_pressure == current.sink_pressure
+    let cand_key = (candidate.sink_pressure, candidate.sink_attraction);
+    let cur_key = (current.sink_pressure, current.sink_attraction);
+    cand_key > cur_key
+        || (cand_key == cur_key
             && (candidate.hops < current.hops
                 || (candidate.hops == current.hops
                     && (candidate.sink_id, candidate.next_hop)
                         < (current.sink_id, current.next_hop))))
+}
+
+/// Per owned planet, how frontier-facing it is: the negative distance to its
+/// nearest reachable non-owned planet — enemy *or* neutral. Higher (closer)
+/// means nearer to where ships are useful; planets that can't reach any
+/// non-owned planet get `f64::NEG_INFINITY` so idle ships flow off them.
+///
+/// Used only as a tiebreaker below enemy reinforcement pressure. The pressure
+/// BFS is enemy-driven and goes dormant when nothing is in range (the early
+/// game), stranding ships on interior planets; this drifts them toward planets
+/// that can actually launch at non-owned territory, pre-positioning for
+/// expansion and eventual contact.
+fn expansion_attraction(
+    state: &WorldState,
+    model: &HellburnerModel,
+    player: i64,
+) -> HashMap<i64, f64> {
+    let mut out: HashMap<i64, f64> = HashMap::default();
+    for p in &state.my_planets {
+        if !model.non_comet_ids.contains(&p.id) {
+            continue;
+        }
+        let nearest = model.outbound_edges[&p.id]
+            .iter()
+            .filter(|(did, _)| {
+                model.non_comet_ids.contains(did) && state.planet(*did).owner != player
+            })
+            .map(|&(_, d)| d)
+            .fold(f64::INFINITY, f64::min);
+        let attraction = if nearest.is_finite() {
+            -nearest
+        } else {
+            f64::NEG_INFINITY
+        };
+        out.insert(p.id, attraction);
+    }
+    out
 }
 
 fn is_reinforcement_frontier(

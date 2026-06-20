@@ -16,7 +16,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::cache::EntityCache;
 use crate::constants::{
     BOARD_SIZE, CENTER, COMET_SPEED, EPISODE_STEPS, LAUNCH_CLEARANCE, MAX_PLAYERS, MAX_SHIP_SPEED,
-    ROTATION_LIMIT, SUN_RADIUS,
+    ROTATION_LIMIT, SHIP_SPEED_SATURATION, SUN_RADIUS,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -214,8 +214,10 @@ pub fn fleet_speed(ships: i64, max_speed: f64) -> f64 {
     if let Some(v) = MEMO.with(|m| m.borrow().get(&key).copied()) {
         return v;
     }
-    let speed =
-        (1.0 + (max_speed - 1.0) * ((ships as f64).ln() / 1000.0f64.ln()).powf(1.5)).min(max_speed);
+    let speed = (1.0
+        + (max_speed - 1.0)
+            * ((ships as f64).ln() / (SHIP_SPEED_SATURATION as f64).ln()).powf(1.5))
+    .min(max_speed);
     MEMO.with(|m| m.borrow_mut().insert(key, speed));
     speed
 }
