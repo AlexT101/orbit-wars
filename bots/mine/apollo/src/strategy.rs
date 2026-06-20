@@ -48,6 +48,18 @@ pub struct HellburnerModel<'a> {
     /// out-reinforce. Computed from baseline timelines only (plan-independent),
     /// before any source selection.
     pub pressure_gated_targets: HashSet<i64>,
+    /// Per owned source planet, the fewest *arrival* turns (launch offset +
+    /// travel) to land a fleet on any enemy-owned (non-comet) planet, best-case
+    /// over launch offsets `0..=OFFSET_LOOKAHEAD`. Drives the per-source
+    /// closer-enemy gate in `collect_source_candidates`: a source only considers
+    /// combat targets whose own arrival is within `CLOSER_ENEMY_TARGET_MARGIN`
+    /// turns of this nearest-enemy arrival, so each source fights near its
+    /// frontier rather than chasing distant planets. Both sides are measured on
+    /// arrival (offset + travel), so a delayed-launch option counts its full
+    /// time-to-land (offset 2 + travel 5 = 7). Absent for a source that can
+    /// reach no enemy (gate inert — no enemy contact), keeping early/no-contact
+    /// play unchanged.
+    pub source_enemy_reach: HashMap<i64, i64>,
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
     /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
     /// Avoids repeated traffic to the L2 `EntityCache::aim_cache` inside the
@@ -116,8 +128,10 @@ impl<'a> HellburnerModel<'a> {
             outbound_edges,
             reinforcement_target: HashMap::default(),
             pressure_gated_targets: HashSet::default(),
+            source_enemy_reach: HashMap::default(),
             shot_cache: RefCell::new(HashMap::default()),
         };
+        model.source_enemy_reach = build_source_enemy_reach(state, &model);
         model.reinforcement_target = build_reinforcement_targets(state, &model, player);
         model.pressure_gated_targets = build_pressure_gate(state, &model);
         model
@@ -555,6 +569,52 @@ fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i
         }
     }
     gated
+}
+
+/// Extra arrival turns a source is allowed to look past its nearest reachable
+/// enemy when choosing combat targets. A source ignores any target whose arrival
+/// (launch offset + travel) exceeds its nearest-enemy arrival by more than this,
+/// so each source fights near its own frontier instead of chasing distant
+/// planets. See [`HellburnerModel::source_enemy_reach`].
+const CLOSER_ENEMY_TARGET_MARGIN: i64 = 2;
+
+/// Build [`HellburnerModel::source_enemy_reach`]: per owned (non-comet) source,
+/// the soonest arrival (launch offset + travel) onto any enemy-owned planet,
+/// best-case over offsets `0..=OFFSET_LOOKAHEAD`. Ship counts come from the
+/// plan-free baseline (like the pressure gates), so the result is
+/// plan-independent and computed once per model build. Sources that can reach no
+/// enemy are omitted, leaving the gate inert for them.
+fn build_source_enemy_reach(state: &WorldState, model: &HellburnerModel) -> HashMap<i64, i64> {
+    let player = state.player;
+    let mut out: HashMap<i64, i64> = HashMap::default();
+    for src in &state.my_planets {
+        if !model.non_comet_ids.contains(&src.id) {
+            continue;
+        }
+        let mut best: Option<i64> = None;
+        for enemy in &state.enemy_planets {
+            if !model.non_comet_ids.contains(&enemy.id) {
+                continue;
+            }
+            for offset in 0..=offset_lookahead() {
+                let ships = baseline_available_at_for_owner(state, src.id, player, offset);
+                if ships <= 0 {
+                    continue;
+                }
+                let Some((_, travel_turns, _, _, _)) =
+                    model.plan_shot(src.id, enemy.id, ships, offset)
+                else {
+                    continue;
+                };
+                let arrival = (offset + travel_turns).max(1);
+                best = Some(best.map_or(arrival, |b| b.min(arrival)));
+            }
+        }
+        if let Some(arrival) = best {
+            out.insert(src.id, arrival);
+        }
+    }
+    out
 }
 
 fn reinforcement_pressure_weight(turns: i64) -> f64 {
@@ -1234,6 +1294,21 @@ fn collect_source_candidates(
         if src.owner != owner {
             continue;
         }
+        // Closer-enemy gate — our combat selection only. This source ignores any
+        // target whose arrival exceeds its nearest reachable enemy's arrival by
+        // more than `CLOSER_ENEMY_TARGET_MARGIN`. Measured on arrival (offset +
+        // travel) on both sides, so a delayed launch counts its full
+        // time-to-land. `None` ⇒ no reachable enemy (inert), and the gate is
+        // skipped entirely for enemy-owner counter-option collection so the
+        // recapture model stays unrestricted.
+        let arrival_cutoff = if owner == world.player {
+            model
+                .source_enemy_reach
+                .get(&src_id)
+                .map(|reach| reach + CLOSER_ENEMY_TARGET_MARGIN)
+        } else {
+            None
+        };
         let mut row = Vec::with_capacity(option_stride);
         let mut has_option = false;
         for launch_offset in 0..=offset_lookahead() {
@@ -1241,12 +1316,18 @@ fn collect_source_candidates(
             let option = if ships > 0 {
                 model
                     .plan_shot(src_id, target.id, ships, launch_offset)
-                    .map(|(angle, turns, _, _, _)| SourceOption {
-                        src_id,
-                        launch_offset,
-                        angle,
-                        arrival: (launch_offset + turns).max(1),
-                        ships,
+                    .and_then(|(angle, turns, _, _, _)| {
+                        let arrival = (launch_offset + turns).max(1);
+                        if arrival_cutoff.is_some_and(|cutoff| arrival > cutoff) {
+                            return None;
+                        }
+                        Some(SourceOption {
+                            src_id,
+                            launch_offset,
+                            angle,
+                            arrival,
+                            ships,
+                        })
                     })
             } else {
                 None
