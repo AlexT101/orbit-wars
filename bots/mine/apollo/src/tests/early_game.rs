@@ -1,7 +1,7 @@
 //! Early-game expansion pre-pass tests.
 
 use crate::cache::EntityCache;
-use crate::constants::EARLY_GAME_END;
+use crate::constants::early_game_end;
 use crate::early_game::plan_opening;
 use crate::engine::{CometGroup, Planet};
 use crate::strategy::HellburnerModel;
@@ -46,7 +46,7 @@ fn opening_targets(world: &WorldState) -> Vec<i64> {
 }
 
 fn opening_prepass_enabled() -> bool {
-    EARLY_GAME_END > 0
+    early_game_end() > 0
 }
 
 /// All planets sit in the static zone (orbital radius + planet radius ≥ 50),
@@ -120,8 +120,8 @@ fn early_game_inactive_after_phase() {
         planet(1, -1, 95.0, 82.0, 5, 1),
         planet(4, 1, 5.0, 8.0, 10, 1),
     ];
-    let cache = cache_for(&planets, EARLY_GAME_END);
-    let world = world_for(&planets, &cache, EARLY_GAME_END);
+    let cache = cache_for(&planets, early_game_end());
+    let world = world_for(&planets, &cache, early_game_end());
     let model = HellburnerModel::build(&world);
     assert!(plan_opening(&model).is_empty());
 }
@@ -203,7 +203,7 @@ fn early_game_search_profile() {
         // Per turn: runs, plans found, total/max nodes, exhausted count,
         // total/max ms, total events.
         let mut per_turn =
-            vec![(0u64, 0u64, 0u64, 0u64, 0u64, 0.0f64, 0.0f64, 0u64); EARLY_GAME_END as usize];
+            vec![(0u64, 0u64, 0u64, 0u64, 0u64, 0.0f64, 0.0f64, 0u64); early_game_end() as usize];
         for &seed in seeds {
             let mut state = RefEngine::new(seed, num_players, Configuration::default());
             let mut cache = EntityCache::build(
@@ -213,7 +213,7 @@ fn early_game_search_profile() {
                 state.angular_velocity,
                 state.step,
             );
-            for turn in 0..EARLY_GAME_END {
+            for turn in 0..early_game_end() {
                 cache.set_current_turn(state.step);
                 let snap = state.snapshot();
                 for p in 0..num_players {

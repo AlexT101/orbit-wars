@@ -1,5 +1,5 @@
 //! Early-game expansion pre-pass: brute-force capture scheduling for the
-//! first [`EARLY_GAME_END`] steps.
+//! first [`early_game_end()`](crate::constants::early_game_end) steps.
 //!
 //! The greedy pipeline in [`crate::strategy`] commits the best-scoring
 //! capture per iteration, independently. In the opening that throws away
@@ -17,12 +17,12 @@
 //! no-opening candidate so the rollout minimax can reject a bad opening
 //! wholesale.
 //!
-//! The phase gate ([`EARLY_GAME_END`]) is a hard stop on *running* the DFS, not
+//! The phase gate ([`early_game_end()`](crate::constants::early_game_end)) is a hard stop on *running* the DFS, not
 //! a valuation cliff: the objective extends to the full horizon and greedy runs
 //! on top, so there is no scoring discontinuity. There is, however, a behavioral
 //! limitation at the boundary — only offset-0 hops are emitted each turn, and
 //! once the gate closes the DFS no longer re-derives the chain, so a chain whose
-//! later hops would launch at/after [`EARLY_GAME_END`] is handed to the greedy
+//! later hops would launch at/after [`early_game_end()`](crate::constants::early_game_end) is handed to the greedy
 //! planner (which does not model chains) for its tail. In practice first hops
 //! launch early and per-turn re-planning keeps this rare, but a chain set up
 //! late in the window can lose its continuation.
@@ -41,7 +41,7 @@
 //! capture's payoff) is deliberately not modeled here — per-turn re-planning
 //! plus the rollout's no-opening alternative cover interference. Enemy *reach*,
 //! however, gates candidate *selection*: a neutral is only an opening candidate
-//! when we win the race to it by `EARLY_GAME_RACE_MARGIN` turns against the
+//! when we win the race to it by `early_game_race_margin()` turns against the
 //! earliest direct enemy arrival (a Voronoi partition). This keeps the
 //! uncontested closed form honest and makes the early→combat handoff local —
 //! planets drop out of the opening as enemies close in. Observed reality is
@@ -77,8 +77,8 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::constants::{
-    EARLY_GAME_CANDIDATE_SLACK, EARLY_GAME_END, EARLY_GAME_MAX_CHILD_FUND, EARLY_GAME_NODE_BUDGET,
-    EARLY_GAME_RACE_MARGIN, EARLY_GAME_SCORE_HORIZON, SHIP_SPEED_SATURATION,
+    early_game_candidate_slack, early_game_end, early_game_max_child_fund, early_game_race_margin,
+    early_game_score_horizon, EARLY_GAME_NODE_BUDGET, SHIP_SPEED_SATURATION,
 };
 use crate::engine::ArrivalEvent;
 use crate::helpers::dist;
@@ -186,7 +186,7 @@ struct Candidate {
 /// would blow the turn budget).
 pub(crate) fn plan_opening(model: &HellburnerModel) -> Vec<OpeningEvent> {
     let world = model.state;
-    if world.rollout_internal || world.cache.current_turn >= EARLY_GAME_END {
+    if world.rollout_internal || world.cache.current_turn >= early_game_end() {
         return Vec::new();
     }
     let Some(s) = run_search(world, model) else {
@@ -208,7 +208,7 @@ pub(crate) fn plan_opening(model: &HellburnerModel) -> Vec<OpeningEvent> {
 /// `arrival`: the closed form of the greedy `timeline_delta_score` for an
 /// uncontested capture (we trade `garrison` of our ships against the neutral
 /// garrison, then produce until `horizon`). `horizon` here is the *economic*
-/// scoring horizon ([`EARLY_GAME_SCORE_HORIZON`]), not the shorter projection
+/// scoring horizon ([`early_game_score_horizon()`](crate::constants::early_game_score_horizon)), not the shorter projection
 /// window that bounds arrivals — a captured planet keeps producing long past
 /// the combat horizon, so crediting only the projection window would charge
 /// full garrison against a sliver of payback and reject good long-term holds.
@@ -222,7 +222,7 @@ fn capture_value(production: i64, garrison: i64, horizon: i64, arrival: i64) -> 
 #[cfg(test)]
 pub(crate) fn opening_search_stats(model: &HellburnerModel) -> Option<(u64, usize, i64)> {
     let world = model.state;
-    if world.rollout_internal || world.cache.current_turn >= EARLY_GAME_END {
+    if world.rollout_internal || world.cache.current_turn >= early_game_end() {
         return None;
     }
     run_search(world, model).map(|s| (s.nodes, s.best_events.len(), s.best_value))
@@ -274,11 +274,11 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     let window = world.timeline_cache.horizon.max(1);
     // Economic horizon for capture *value*: a captured planet keeps producing
     // long past the combat horizon, so production is credited over a longer
-    // window (arrivals stay bounded by `window`). EARLY_GAME_SCORE_HORIZON is an
+    // window (arrivals stay bounded by `window`). early_game_score_horizon() is an
     // *absolute* turn cap, so the credited window is `that − current_turn` and
     // never reaches past it as the game advances; floored at the projection
     // window so value is always credited at least that far.
-    let score_horizon = (EARLY_GAME_SCORE_HORIZON - world.cache.current_turn).max(window);
+    let score_horizon = (early_game_score_horizon() - world.cache.current_turn).max(window);
     let player = world.player;
 
     // Launch sources: planets owned now, plus planets the baseline timeline
@@ -360,7 +360,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     // cap with map size and player count instead of a flat constant; the race
     // filter below usually keeps fewer, so this only bounds worst-case node cost.
     let players = world.num_players.max(1);
-    let ceiling = model.non_comet_ids.len().div_ceil(players) + EARLY_GAME_CANDIDATE_SLACK;
+    let ceiling = model.non_comet_ids.len().div_ceil(players) + early_game_candidate_slack();
 
     // Distance pre-filter, purely to bound probe cost: keep twice the final
     // cap so the arrival/value ranking below still has slack to differ from
@@ -483,7 +483,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
         .collect();
 
     // Reachable *and* won outright: a neutral is an opening candidate only when
-    // we arrive at least `EARLY_GAME_RACE_MARGIN` turns before any enemy could.
+    // we arrive at least `early_game_race_margin()` turns before any enemy could.
     // This keeps the closed-form capture value honest (contested planets are the
     // combat planner's job, not this pre-pass) and makes the early→combat
     // transition local — planets leave the opening as enemies close in, rather
@@ -492,7 +492,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
         .iter()
         .enumerate()
         .filter(|&(i, _)| earliest[i] <= window)
-        .filter(|&(i, _)| earliest[i] + EARLY_GAME_RACE_MARGIN <= enemy_earliest[i])
+        .filter(|&(i, _)| earliest[i] + early_game_race_margin() <= enemy_earliest[i])
         .map(|(i, c)| (earliest[i], *c))
         .collect();
     if reachable.is_empty() {
@@ -591,7 +591,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
                 value_bound: value_bound(earliest, &c),
                 children: near
                     .into_iter()
-                    .take(EARLY_GAME_MAX_CHILD_FUND)
+                    .take(early_game_max_child_fund())
                     .map(|(_, _, i)| i)
                     .collect(),
             }
@@ -642,7 +642,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
 
 struct Search {
     window: i64,
-    /// Economic horizon used for capture *value* ([`EARLY_GAME_SCORE_HORIZON`],
+    /// Economic horizon used for capture *value* ([`early_game_score_horizon()`](crate::constants::early_game_score_horizon),
     /// clamped to at least `window`). Arrivals stay bounded by `window`.
     score_horizon: i64,
     candidates: Vec<Candidate>,

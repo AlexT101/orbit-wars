@@ -18,5 +18,12 @@
   "neutral_payback_turns": 20.0,
   "neutral_payback_penalty": 0.0,
   "lead_gate": 50.0,
-  "neutral_capture_penalty": 0.0
+  "neutral_capture_penalty": 0.0,
+  "early_game_end": 18,
+  "early_game_candidate_slack": 4,
+  "early_game_race_margin": 3,
+  "early_game_score_horizon": 30,
+  "early_game_max_child_fund": 4,
+  "closer_enemy_target_margin": 999,
+  "secondary_enemy_pressure_weight": 1.0
 }
