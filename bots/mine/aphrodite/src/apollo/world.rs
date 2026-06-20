@@ -55,6 +55,11 @@ pub struct WorldState<'a> {
     /// Runtime tuning profile selected from the alive-player count of this snapshot.
     pub config: Config,
 
+    /// Alive players at this snapshot (those still holding a planet or fleet).
+    /// The early-game pre-pass uses it to size its candidate ceiling to our
+    /// symmetric share of the map; grows as opponents are eliminated.
+    pub num_players: usize,
+
     /// defaults to 0.0 for rollout-internal and test-built worlds so they take the cheap
     /// path through cost-gated logic.
     pub remaining_overage_time: f64,
@@ -132,7 +137,8 @@ impl<'a> WorldState<'a> {
         cache: &'a EntityCache,
     ) -> Self {
         let timeline_cache = TimelineCache::from_ledger(sim.planets(), player, ledger);
-        let config = Config::for_alive(count_alive_players(sim.planets(), sim.fleets()));
+        let num_players = count_alive_players(sim.planets(), sim.fleets());
+        let config = Config::for_alive(num_players);
 
         let planets: Vec<Planet> = sim.planets().to_vec();
         let comet_planet_ids: Vec<i64> = sim.comet_planet_ids().to_vec();
@@ -193,6 +199,7 @@ impl<'a> WorldState<'a> {
             my_planets,
             enemy_planets,
             config,
+            num_players,
             remaining_overage_time: 0.0,
             rollout_internal: false,
             ship_lead,

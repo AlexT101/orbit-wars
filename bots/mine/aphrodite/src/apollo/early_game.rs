@@ -37,11 +37,17 @@
 //! phase boundary. Ties prefer Σ production (value beyond the horizon), then
 //! fewer events.
 //!
-//! Enemy *pressure* (what opponents could send) is deliberately not modeled
-//! here — per-turn re-planning plus the rollout's no-opening alternative
-//! cover interference. Observed reality is modeled: in-flight fleets already
-//! in the baseline timeline rule out neutrals that flip to an enemy inside
-//! the window and size garrisons from the baseline's worst case.
+//! Enemy *pressure in valuation* (weighing what opponents could send against a
+//! capture's payoff) is deliberately not modeled here — per-turn re-planning
+//! plus the rollout's no-opening alternative cover interference. Enemy *reach*,
+//! however, gates candidate *selection*: a neutral is only an opening candidate
+//! when we win the race to it by `EARLY_GAME_RACE_MARGIN` turns against the
+//! earliest direct enemy arrival (a Voronoi partition). This keeps the
+//! uncontested closed form honest and makes the early→combat handoff local —
+//! planets drop out of the opening as enemies close in. Observed reality is
+//! also modeled: in-flight fleets already in the baseline timeline rule out
+//! neutrals that flip to an enemy inside the window and size garrisons from the
+//! baseline's worst case.
 //!
 //! Model:
 //!   * Targets are neutral planets only. Neutral garrisons don't produce (the
@@ -71,8 +77,8 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::apollo::constants::{
-    EARLY_GAME_END, EARLY_GAME_FERRY_PROBES, EARLY_GAME_MAX_CANDIDATES, EARLY_GAME_MAX_CHILD_FUND,
-    EARLY_GAME_NODE_BUDGET, EARLY_GAME_PROBE_SHIPS, EARLY_GAME_VALUE_PICKS,
+    EARLY_GAME_CANDIDATE_SLACK, EARLY_GAME_END, EARLY_GAME_MAX_CHILD_FUND, EARLY_GAME_NODE_BUDGET,
+    EARLY_GAME_RACE_MARGIN, EARLY_GAME_SCORE_HORIZON, SHIP_SPEED_SATURATION,
 };
 use crate::apollo::engine::ArrivalEvent;
 use crate::apollo::helpers::dist;
@@ -201,9 +207,13 @@ pub(crate) fn plan_opening(model: &HellburnerModel) -> Vec<OpeningEvent> {
 /// Ships-at-horizon value of capturing a `production`/`garrison` neutral at
 /// `arrival`: the closed form of the greedy `timeline_delta_score` for an
 /// uncontested capture (we trade `garrison` of our ships against the neutral
-/// garrison, then produce until the horizon).
-fn capture_value(production: i64, garrison: i64, window: i64, arrival: i64) -> i64 {
-    production * (window - arrival) - garrison
+/// garrison, then produce until `horizon`). `horizon` here is the *economic*
+/// scoring horizon ([`EARLY_GAME_SCORE_HORIZON`]), not the shorter projection
+/// window that bounds arrivals — a captured planet keeps producing long past
+/// the combat horizon, so crediting only the projection window would charge
+/// full garrison against a sliver of payback and reject good long-term holds.
+fn capture_value(production: i64, garrison: i64, horizon: i64, arrival: i64) -> i64 {
+    production * (horizon - arrival) - garrison
 }
 
 /// Bench hook: run the opening search and report
@@ -259,9 +269,16 @@ fn avail_vector(
 }
 
 fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
-    // Objective window: ship delta at the end of the timeline horizon (the
-    // phase gate already passed in `plan_opening`).
+    // Projection window: bounds arrivals and availability (we can only project
+    // the timeline this far). The phase gate already passed in `plan_opening`.
     let window = world.timeline_cache.horizon.max(1);
+    // Economic horizon for capture *value*: a captured planet keeps producing
+    // long past the combat horizon, so production is credited over a longer
+    // window (arrivals stay bounded by `window`). EARLY_GAME_SCORE_HORIZON is an
+    // *absolute* turn cap, so the credited window is `that − current_turn` and
+    // never reaches past it as the game advances; floored at the projection
+    // window so value is always credited at least that far.
+    let score_horizon = (EARLY_GAME_SCORE_HORIZON - world.cache.current_turn).max(window);
     let player = world.player;
 
     // Launch sources: planets owned now, plus planets the baseline timeline
@@ -338,6 +355,13 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
         return None;
     }
 
+    // Candidate ceiling = our symmetric share of the map (rotational symmetry:
+    // ~1/players of the planets are ours to reach first) plus slack. Scales the
+    // cap with map size and player count instead of a flat constant; the race
+    // filter below usually keeps fewer, so this only bounds worst-case node cost.
+    let players = world.num_players.max(1);
+    let ceiling = model.non_comet_ids.len().div_ceil(players) + EARLY_GAME_CANDIDATE_SLACK;
+
     // Distance pre-filter, purely to bound probe cost: keep twice the final
     // cap so the arrival/value ranking below still has slack to differ from
     // raw distance order.
@@ -361,7 +385,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(raw[a.1].id.cmp(&raw[b.1].id))
     });
-    ranked.truncate(EARLY_GAME_MAX_CANDIDATES * 2);
+    ranked.truncate(ceiling * 2);
     let pool: Vec<RawCandidate> = ranked.iter().map(|&(_, i)| raw[i]).collect();
 
     // Achievable-fleet probe size: every ship we own plus everything that
@@ -385,7 +409,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     for c in &pool {
         achievable += c.production * window;
     }
-    let probe_ships = achievable.clamp(1, EARLY_GAME_PROBE_SHIPS);
+    let probe_ships = achievable.clamp(1, SHIP_SPEED_SATURATION);
 
     // Reachability probe + earliest possible arrival per candidate, computed as
     // a fixpoint relaxation: a candidate is reachable from a base source, or as
@@ -434,57 +458,123 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
             break;
         }
     }
+    // Enemy direct-arrival probe: the earliest a direct enemy shot could reach
+    // each pool candidate (no enemy relays — the near-term race is what the
+    // uncontested closed form depends on). Sized from the enemy's own
+    // achievable fleet (ships + production over the window), mirroring our
+    // probe so the race comparison is geometry-fair. `i64::MAX` = unreachable
+    // by any enemy ⇒ uncontested ⇒ always wins the race.
+    let enemy_probe = {
+        let mut a: i64 = 0;
+        for e in &world.enemy_planets {
+            a += e.ships + e.production * window;
+        }
+        a.clamp(1, SHIP_SPEED_SATURATION)
+    };
+    let enemy_earliest: Vec<i64> = pool
+        .iter()
+        .map(|c| {
+            let mut best = i64::MAX;
+            for e in &world.enemy_planets {
+                best = relax_arrival(model, e.id, c.id, enemy_probe, 0, window, best);
+            }
+            best
+        })
+        .collect();
+
+    // Reachable *and* won outright: a neutral is an opening candidate only when
+    // we arrive at least `EARLY_GAME_RACE_MARGIN` turns before any enemy could.
+    // This keeps the closed-form capture value honest (contested planets are the
+    // combat planner's job, not this pre-pass) and makes the early→combat
+    // transition local — planets leave the opening as enemies close in, rather
+    // than the whole bot flipping regimes at a turn-count boundary.
     let reachable: Vec<(i64, RawCandidate)> = pool
         .iter()
         .enumerate()
         .filter(|&(i, _)| earliest[i] <= window)
+        .filter(|&(i, _)| earliest[i] + EARLY_GAME_RACE_MARGIN <= enemy_earliest[i])
         .map(|(i, c)| (earliest[i], *c))
         .collect();
     if reachable.is_empty() {
         return None;
     }
 
-    // Final selection: nearest by earliest probe arrival (prices rotation and
-    // blockers, unlike raw distance; near candidates also serve as chain
-    // relays), unioned with the highest value-bound reachable planets so a
-    // fat target just outside the nearest set still gets considered.
+    // Final selection: keep the highest value-bound race-won captures up to the
+    // ceiling. The ceiling is sized to our Voronoi share plus slack, so this
+    // normally keeps every reachable candidate (the truncation is a rare
+    // edge — e.g. a negative race margin or an asymmetric map); when it does
+    // bite, `value_bound` already prices late arrival, so a far-but-fat target
+    // survives where pure-distance ranking would drop it.
     let value_bound = |earliest: i64, c: &RawCandidate| {
-        capture_value(c.production, c.garrison, window, earliest).max(0)
+        capture_value(c.production, c.garrison, score_horizon, earliest).max(0)
     };
-    let mut by_arrival = reachable.clone();
-    by_arrival.sort_by_key(|&(e, c)| (e, c.id));
-    let mut kept: Vec<(i64, RawCandidate)> = by_arrival
-        .iter()
-        .take(EARLY_GAME_MAX_CANDIDATES)
-        .copied()
-        .collect();
-    let mut by_value = reachable;
-    by_value.sort_by_key(|&(e, c)| (std::cmp::Reverse(value_bound(e, &c)), e, c.id));
-    for &(e, c) in by_value.iter().take(EARLY_GAME_VALUE_PICKS) {
-        if !kept.iter().any(|&(_, k)| k.id == c.id) {
-            kept.push((e, c));
-        }
-    }
+    let mut kept = reachable;
+    kept.sort_by_key(|&(e, c)| (std::cmp::Reverse(value_bound(e, &c)), e, c.id));
+    kept.truncate(ceiling);
 
     let index: HashMap<i64, usize> = kept
         .iter()
         .enumerate()
         .map(|(i, &(_, c))| (c.id, i))
         .collect();
+
+    // Source pruning + per-candidate best direct arrival, in one sweep over
+    // `sources × kept` (probe geometry is L1-cached, so these are cheap
+    // re-reads after the reachability fixpoint above). `live[si]` marks sources
+    // that can reach at least one candidate in-window — the rest are dead launch
+    // points (deep-interior planets) that would only add empty `options_for`
+    // calls at every DFS node, so they are dropped from the source set. A
+    // reachable candidate is always reached by some source's first hop, so at
+    // least one source stays live. `src_direct[j]` is the earliest a direct
+    // (non-relay) shot from any source reaches candidate `j`; it's the baseline
+    // the relay-benefit gate below prices funded chains against.
+    let mut live = vec![false; sources.len()];
+    let mut src_direct = vec![i64::MAX; kept.len()];
+    for (si, &(sid, smin)) in sources.iter().enumerate() {
+        for (j, &(_, c)) in kept.iter().enumerate() {
+            if sid == c.id {
+                continue;
+            }
+            let a = relax_arrival(model, sid, c.id, probe_ships, smin, window, i64::MAX);
+            if a <= window {
+                live[si] = true;
+                src_direct[j] = src_direct[j].min(a);
+            }
+        }
+    }
+
     let candidates: Vec<Candidate> = kept
         .iter()
         .map(|&(earliest, c)| {
             // Children ranked by what the chain is for — the value of the
-            // downstream hop — not by distance.
+            // downstream hop — not by distance. Relay-benefit gate: only fund a
+            // child the chain reaches *faster* than the best direct shot from
+            // our own sources. Funding `c → child` buys nothing when a source
+            // already reaches `child` as soon directly — the DFS will capture it
+            // straight, so the funded relay is dominated (a sun-blocked direct
+            // shot reads as `i64::MAX`, so genuine around-the-sun relays survive).
+            // The relay launches the turn after `c` is captured at its own
+            // earliest probe arrival, optimistic so the gate never drops a child
+            // some timing could relay sooner.
             let mut near: Vec<(i64, f64, usize)> = model
                 .outbound_edges
                 .get(&c.id)
                 .map(|v| {
                     v.iter()
                         .filter_map(|&(dst, d)| {
-                            index
-                                .get(&dst)
-                                .map(|&i| (value_bound(kept[i].0, &kept[i].1), d, i))
+                            index.get(&dst).and_then(|&i| {
+                                let relay = relax_arrival(
+                                    model,
+                                    c.id,
+                                    kept[i].1.id,
+                                    probe_ships,
+                                    earliest + 1,
+                                    window,
+                                    i64::MAX,
+                                );
+                                (relay < src_direct[i])
+                                    .then(|| (value_bound(kept[i].0, &kept[i].1), d, i))
+                            })
                         })
                         .collect()
                 })
@@ -511,6 +601,7 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     let total_value: i64 = candidates.iter().map(|c| c.value_bound).sum();
     let mut search = Search {
         window,
+        score_horizon,
         candidates,
         rows: HashMap::default(),
         nodes: 0,
@@ -524,7 +615,9 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     // when they join) instead of being re-derived at every node.
     let mut srcs: Vec<SrcState> = sources
         .iter()
-        .map(|&(id, min_launch)| SrcState {
+        .zip(&live)
+        .filter(|&(_, &is_live)| is_live)
+        .map(|(&(id, min_launch), _)| SrcState {
             id,
             min_launch,
             raw: avail_vector(world, id, None, window),
@@ -549,6 +642,9 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
 
 struct Search {
     window: i64,
+    /// Economic horizon used for capture *value* ([`EARLY_GAME_SCORE_HORIZON`],
+    /// clamped to at least `window`). Arrivals stay bounded by `window`.
+    score_horizon: i64,
     candidates: Vec<Candidate>,
     /// `(src, target, ships) → arrival per launch offset` (`None` = blocked
     /// or lands past the window). Geometry only — affordability is checked
@@ -687,8 +783,8 @@ impl Search {
         options.sort_by(|a, b| {
             let ca = &self.candidates[a.target_idx];
             let cb = &self.candidates[b.target_idx];
-            let ga = capture_value(ca.production, ca.garrison, self.window, a.arrival);
-            let gb = capture_value(cb.production, cb.garrison, self.window, b.arrival);
+            let ga = capture_value(ca.production, ca.garrison, self.score_horizon, a.arrival);
+            let gb = capture_value(cb.production, cb.garrison, self.score_horizon, b.arrival);
             gb.cmp(&ga)
                 .then(a.arrival.cmp(&b.arrival))
                 .then(a.offset.cmp(&b.offset))
@@ -736,7 +832,7 @@ impl Search {
                 srcs,
                 events,
                 remaining,
-                cur_value + capture_value(prod, garrison, self.window, ev.arrival),
+                cur_value + capture_value(prod, garrison, self.score_horizon, ev.arrival),
                 cur_prod + prod,
                 remaining_value - bound,
             );
@@ -823,26 +919,19 @@ impl Search {
 
         // Ferry: send everything available, on its *own* arrival frontier —
         // the bigger fleet is faster, so an offset dominated for the minimal
-        // fleet can still be the ferry's best. Plan-dependent ship counts
-        // can't use the geometry row cache, so the affordable offsets are
-        // subsampled (first affordable kept, rest evenly spread) to bound
-        // per-node cost.
-        let mut afford: Vec<i64> = (min_launch..window)
-            .filter(|&o| avail[o as usize] > min_ships)
-            .collect();
-        if afford.len() > EARLY_GAME_FERRY_PROBES {
-            let n = afford.len();
-            afford = (0..EARLY_GAME_FERRY_PROBES)
-                .map(|i| afford[i * n / EARLY_GAME_FERRY_PROBES])
-                .collect();
-        }
+        // fleet can still be the ferry's best. Plan-dependent ship counts can't
+        // use the geometry row cache, but the scan is naturally bounded: offsets
+        // run over `[min_launch, window)` (≤ horizon) and the strictly-improving
+        // early-break stops at the first frontier arrival.
         let mut best_arrival = i64::MAX;
-        for o in afford {
-            // `afford` is ascending and an arrival is ≥ its launch offset, so
-            // once an offset reaches the best arrival so far no later one in the
-            // (already subsampled) list can improve the frontier.
+        for o in min_launch..window {
+            // An arrival is ≥ its launch offset, so once an offset reaches the
+            // best arrival so far no later one can improve the frontier.
             if o >= best_arrival {
                 break;
+            }
+            if avail[o as usize] <= min_ships {
+                continue;
             }
             let ferry = avail[o as usize];
             if amounts.contains(&ferry) {

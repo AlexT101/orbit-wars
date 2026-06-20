@@ -142,7 +142,8 @@ pub const TOTAL_OVERAGE_TIME: f64 = 60.0; // Total overage time (in seconds).
 
 // Physics rules
 pub const SUN_RADIUS: f64 = 10.0; // Radius of sun's destruction zone.
-pub const MAX_SHIP_SPEED: f64 = 6.0; // Maximum fleet speed (reached at ~1000 ships).
+pub const MAX_SHIP_SPEED: f64 = 6.0; // Maximum fleet speed (reached at SHIP_SPEED_SATURATION ships).
+pub const SHIP_SPEED_SATURATION: i64 = 1000; // Fleet size at which `fleet_speed` reaches MAX_SHIP_SPEED: the speed curve is `1 + (max−1)·(ln(ships)/ln(SHIP_SPEED_SATURATION))^1.5`, so at this count the ratio is 1 (speed = max) and larger fleets are no faster. Used as the normalizer in `fleet_speed` and as the upper clamp on the early-game reachability probe (a bigger probe can't arrive sooner).
 pub const LAUNCH_CLEARANCE: f64 = 0.1; // Fleets spawn at `planet_radius + LAUNCH_CLEARANCE` from the planet center.
 pub const ROTATION_LIMIT: f64 = 50.0; // `orbital_radius + planet_radius >= ROTATION_LIMIT` → planet is static.
 pub const COMET_RADIUS: f64 = 1.0;
@@ -241,13 +242,15 @@ pub fn neutral_capture_penalty() -> f64 {
 } // Flat score penalty on neutral captures (bites marginal neutrals hardest); 0 = no-op.
 
 // Early-game expansion pre-pass (see early_game.rs)
-pub const EARLY_GAME_END: i64 = 8; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but it is a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner. See early_game.rs.
-pub const EARLY_GAME_MAX_CANDIDATES: usize = 10; // Capture targets kept by earliest probe arrival; EARLY_GAME_VALUE_PICKS more are unioned in by value bound.
-pub const EARLY_GAME_VALUE_PICKS: usize = 5; // Reachable neutrals with the highest value bound (production·(window − earliest arrival) − garrison) unioned into the candidate set regardless of arrival rank.
+pub const EARLY_GAME_END: i64 = 18; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). The race filter (EARLY_GAME_RACE_MARGIN) makes the expansion→combat transition emergent and local — contested planets drop out of the opening on their own as enemies close in — so the pre-pass can run all the way into the contact window. Cost used to be the limiter (in 2p the opening stays wide — enemies are 180° away, no contact until ~turn 15+ — and once we own several planets the chain DFS branching exploded, hitting the node budget at ~370ms around turn 12), but source pruning + the relay-benefit child gate (see early_game.rs) cut that ~5× and removed all node-budget exhaustion, so a long window like 30 now stays well within the 1s/step budget. No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but still a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner.
+pub const EARLY_GAME_CANDIDATE_SLACK: usize = 4; // Candidate ceiling = ceil(non-comet planets / alive players) + this slack. Encodes "≈ our symmetric share of the map" (rotational symmetry: ~half the planets in 2p, ~a quarter in 4p), scaling the cap with map size and player count instead of a flat constant. The race filter usually keeps fewer than this; the ceiling only bounds worst-case node cost.
+pub const EARLY_GAME_RACE_MARGIN: i64 = 3; // A neutral is an opening candidate only if we can reach it at least this many turns before any enemy could (Voronoi race filter on candidate selection — see early_game.rs). Keeps the uncontested closed-form capture value honest and makes the early→combat transition local (planets drop out of the opening as enemies close in). Larger = more conservative (only clearly-ours planets); 0 = strict race; negative = admit contested planets.
+pub const EARLY_GAME_SCORE_HORIZON: i64 = 30; // ABSOLUTE turn cap for the opening's capture VALUE (`production·(H − arrival) − garrison`), decoupled from the combat/projection horizon (config.horizon, ~14–16). The credited window used at turn `t` is `(EARLY_GAME_SCORE_HORIZON − t)`, floored at the projection window — so the economics never reach past this absolute turn and shrink as the game advances. Arrivals and availability are still bounded by the projection horizon; only the production-credit window is extended. The combat horizon alone is far too short to value an opening: a captured planet produces for the rest of the game, so crediting only ~16 turns of it charges full garrison against a sliver of payback and rejects far/late/chained captures that are excellent long-term holds. NOTE: once `t` is within `window` of this cap the credit clamps back to the projection window (no expansion premium), so to keep it active through the whole opening set this comfortably above EARLY_GAME_END + window (e.g. with END=30, window≈16, a value of 35 stays active only to ~turn 19). Higher = value expansion more, and active later; tune by A/B.
 pub const EARLY_GAME_MAX_CHILD_FUND: usize = 4; // Per target, highest-production remaining neutrals considered for the min+child funding variant.
 pub const EARLY_GAME_NODE_BUDGET: u64 = 50_000; // Hard cap on early-game DFS nodes; best plan found so far is kept on exhaustion.
-pub const EARLY_GAME_PROBE_SHIPS: i64 = 1000; // Upper clamp on the reachability probe fleet — fleet speed saturates at 1000 ships, so a larger probe can't arrive earlier. The probe itself is sized from exact achievable ships (owned + producible over the window).
-pub const EARLY_GAME_FERRY_PROBES: usize = 8; // Max launch offsets probed per (source, target) for the ferry variant each node (plan-dependent ship counts bypass the geometry row cache).
+// The reachability probe fleet is clamped at SHIP_SPEED_SATURATION (see physics rules): fleet speed
+// saturates there, so a larger probe can't arrive earlier. The probe itself is sized from exact
+// achievable ships (owned + producible over the window).
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 
