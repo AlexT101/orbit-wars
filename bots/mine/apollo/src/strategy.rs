@@ -417,7 +417,7 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
         if !model.non_comet_ids.contains(&target.id) {
             continue;
         }
-        let total = pressure_from(
+        let total = enemy_pressure_combined(
             state,
             model,
             target.id,
@@ -429,19 +429,23 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
     pressure
 }
 
-/// Total pressure `sources` exert on `target_id`: per source, the best
+/// Owner-bucketed pressure on `target_id`: for each source planet, the best
 /// time-decayed deliverable force over launch offsets `0..=max_offset`
-/// (`ships × reinforcement_pressure_weight(arrival)`), summed across sources.
-/// Availability is read from baseline timelines only, so the result is
-/// plan-independent and safe to compute once per model build.
-fn pressure_from(
+/// (`ships × reinforcement_pressure_weight(arrival)`), accumulated into the
+/// source's owner. Planets owned by the same player cooperate (summed within an
+/// owner); the caller decides how to combine across owners (`pressure_from`
+/// sums, `enemy_pressure_combined` maxes the strongest owner and discounts the
+/// rest). Availability is read from
+/// baseline timelines only, so the result is plan-independent and safe to
+/// compute once per model build.
+fn pressure_by_owner(
     state: &WorldState,
     model: &HellburnerModel,
     target_id: i64,
     sources: &[Planet],
     max_offset: i64,
-) -> f64 {
-    let mut total = 0.0;
+) -> HashMap<i64, f64> {
+    let mut by_owner: HashMap<i64, f64> = HashMap::default();
     for src in sources {
         if src.id == target_id || !model.non_comet_ids.contains(&src.id) {
             continue;
@@ -465,23 +469,71 @@ fn pressure_from(
                 }
             }
         }
-        total += best_contribution;
+        if best_contribution > 0.0 {
+            *by_owner.entry(src.owner).or_insert(0.0) += best_contribution;
+        }
     }
-    total
+    by_owner
+}
+
+/// Total pressure `sources` exert on `target_id`, summed across every source
+/// regardless of owner. Correct only for cooperating sources (i.e. all of our
+/// own planets) — use this for ally pressure.
+fn pressure_from(
+    state: &WorldState,
+    model: &HellburnerModel,
+    target_id: i64,
+    sources: &[Planet],
+    max_offset: i64,
+) -> f64 {
+    pressure_by_owner(state, model, target_id, sources, max_offset)
+        .values()
+        .sum()
+}
+
+/// Weight applied to every enemy owner's pressure except the single strongest
+/// one when combining per-owner pressures into one threat number. `1.0` is a
+/// full coalition (every enemy launches at once); `0.0` is only the strongest
+/// single opponent. The middle ground counts the most dangerous opponent fully
+/// while crediting the rest a discounted share — secondary opponents add real
+/// risk without assuming full coordination.
+const SECONDARY_ENEMY_PRESSURE_WEIGHT: f64 = 1.3;
+
+/// Combined enemy pressure on `target_id`: the strongest single enemy owner's
+/// pressure at full weight, plus `SECONDARY_ENEMY_PRESSURE_WEIGHT` × the summed
+/// pressure of every other enemy owner. Models the most dangerous independent
+/// opponent fully while still crediting secondary opponents a discounted share,
+/// rather than an unrealistic full coalition (plain sum) or ignoring them
+/// entirely (plain max). In 2p there is one enemy owner, so `total == strongest`
+/// and this reduces exactly to `pressure_from`; 2p play is unchanged. It differs
+/// only in 4p with multiple live opponents.
+fn enemy_pressure_combined(
+    state: &WorldState,
+    model: &HellburnerModel,
+    target_id: i64,
+    sources: &[Planet],
+    max_offset: i64,
+) -> f64 {
+    let by_owner = pressure_by_owner(state, model, target_id, sources, max_offset);
+    let total: f64 = by_owner.values().sum();
+    let strongest = by_owner.values().copied().fold(0.0, f64::max);
+    // strongest at full weight + the remaining owners (total − strongest) discounted
+    strongest + SECONDARY_ENEMY_PRESSURE_WEIGHT * (total - strongest)
 }
 
 /// Enemy-owned targets failing the ally-pressure gate. For each enemy planet,
-/// ally pressure (our planets, our `OFFSET_LOOKAHEAD`) is compared against
-/// enemy pressure (all enemy planets except the target itself,
-/// `ENEMY_OFFSET_LOOKAHEAD`) — both computed exactly like reinforcement
-/// pressure. Targets where ally < `ALLY_PRESSURE_RATIO` × enemy are gated.
+/// ally pressure (our planets, our `OFFSET_LOOKAHEAD`) is compared against the
+/// combined enemy pressure (all enemy planets except the target itself, bucketed
+/// by owner: strongest owner full + the rest discounted, `ENEMY_OFFSET_LOOKAHEAD`)
+/// — both computed exactly like reinforcement pressure. Targets where
+/// ally < `ALLY_PRESSURE_RATIO` × enemy are gated.
 fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i64> {
     let mut gated: HashSet<i64> = HashSet::default();
     for target in &state.enemy_planets {
         if !model.non_comet_ids.contains(&target.id) {
             continue;
         }
-        let enemy = pressure_from(
+        let enemy = enemy_pressure_combined(
             state,
             model,
             target.id,
