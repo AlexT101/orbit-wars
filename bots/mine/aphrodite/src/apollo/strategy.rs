@@ -49,6 +49,18 @@ pub struct HellburnerModel<'a> {
     /// out-reinforce. Computed from baseline timelines only (plan-independent),
     /// before any source selection.
     pub pressure_gated_targets: HashSet<i64>,
+    /// Per owned source planet, the fewest *arrival* turns (launch offset +
+    /// travel) to land a fleet on any enemy-owned (non-comet) planet, best-case
+    /// over launch offsets `0..=OFFSET_LOOKAHEAD`. Drives the per-source
+    /// closer-enemy gate in `collect_source_candidates`: a source only considers
+    /// combat targets whose own arrival is within `CLOSER_ENEMY_TARGET_MARGIN`
+    /// turns of this nearest-enemy arrival, so each source fights near its
+    /// frontier rather than chasing distant planets. Both sides are measured on
+    /// arrival (offset + travel), so a delayed-launch option counts its full
+    /// time-to-land (offset 2 + travel 5 = 7). Absent for a source that can
+    /// reach no enemy (gate inert — no enemy contact), keeping early/no-contact
+    /// play unchanged.
+    pub source_enemy_reach: HashMap<i64, i64>,
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
     /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
     /// Avoids repeated traffic to the L2 `EntityCache::aim_cache` inside the
@@ -117,8 +129,10 @@ impl<'a> HellburnerModel<'a> {
             outbound_edges,
             reinforcement_target: HashMap::default(),
             pressure_gated_targets: HashSet::default(),
+            source_enemy_reach: HashMap::default(),
             shot_cache: RefCell::new(HashMap::default()),
         };
+        model.source_enemy_reach = build_source_enemy_reach(state, &model);
         model.reinforcement_target = build_reinforcement_targets(state, &model, player);
         model.pressure_gated_targets = build_pressure_gate(state, &model);
         model
@@ -418,7 +432,7 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
         if !model.non_comet_ids.contains(&target.id) {
             continue;
         }
-        let total = pressure_from(
+        let total = enemy_pressure_combined(
             state,
             model,
             target.id,
@@ -430,19 +444,23 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
     pressure
 }
 
-/// Total pressure `sources` exert on `target_id`: per source, the best
+/// Owner-bucketed pressure on `target_id`: for each source planet, the best
 /// time-decayed deliverable force over launch offsets `0..=max_offset`
-/// (`ships × reinforcement_pressure_weight(arrival)`), summed across sources.
-/// Availability is read from baseline timelines only, so the result is
-/// plan-independent and safe to compute once per model build.
-fn pressure_from(
+/// (`ships × reinforcement_pressure_weight(arrival)`), accumulated into the
+/// source's owner. Planets owned by the same player cooperate (summed within an
+/// owner); the caller decides how to combine across owners (`pressure_from`
+/// sums, `enemy_pressure_combined` maxes the strongest owner and discounts the
+/// rest). Availability is read from
+/// baseline timelines only, so the result is plan-independent and safe to
+/// compute once per model build.
+fn pressure_by_owner(
     state: &WorldState,
     model: &HellburnerModel,
     target_id: i64,
     sources: &[Planet],
     max_offset: i64,
-) -> f64 {
-    let mut total = 0.0;
+) -> HashMap<i64, f64> {
+    let mut by_owner: HashMap<i64, f64> = HashMap::default();
     for src in sources {
         if src.id == target_id || !model.non_comet_ids.contains(&src.id) {
             continue;
@@ -466,23 +484,71 @@ fn pressure_from(
                 }
             }
         }
-        total += best_contribution;
+        if best_contribution > 0.0 {
+            *by_owner.entry(src.owner).or_insert(0.0) += best_contribution;
+        }
     }
-    total
+    by_owner
+}
+
+/// Total pressure `sources` exert on `target_id`, summed across every source
+/// regardless of owner. Correct only for cooperating sources (i.e. all of our
+/// own planets) — use this for ally pressure.
+fn pressure_from(
+    state: &WorldState,
+    model: &HellburnerModel,
+    target_id: i64,
+    sources: &[Planet],
+    max_offset: i64,
+) -> f64 {
+    pressure_by_owner(state, model, target_id, sources, max_offset)
+        .values()
+        .sum()
+}
+
+/// Weight applied to every enemy owner's pressure except the single strongest
+/// one when combining per-owner pressures into one threat number. `1.0` is a
+/// full coalition (every enemy launches at once); `0.0` is only the strongest
+/// single opponent. The middle ground counts the most dangerous opponent fully
+/// while crediting the rest a discounted share — secondary opponents add real
+/// risk without assuming full coordination.
+const SECONDARY_ENEMY_PRESSURE_WEIGHT: f64 = 1.3;
+
+/// Combined enemy pressure on `target_id`: the strongest single enemy owner's
+/// pressure at full weight, plus `SECONDARY_ENEMY_PRESSURE_WEIGHT` × the summed
+/// pressure of every other enemy owner. Models the most dangerous independent
+/// opponent fully while still crediting secondary opponents a discounted share,
+/// rather than an unrealistic full coalition (plain sum) or ignoring them
+/// entirely (plain max). In 2p there is one enemy owner, so `total == strongest`
+/// and this reduces exactly to `pressure_from`; 2p play is unchanged. It differs
+/// only in 4p with multiple live opponents.
+fn enemy_pressure_combined(
+    state: &WorldState,
+    model: &HellburnerModel,
+    target_id: i64,
+    sources: &[Planet],
+    max_offset: i64,
+) -> f64 {
+    let by_owner = pressure_by_owner(state, model, target_id, sources, max_offset);
+    let total: f64 = by_owner.values().sum();
+    let strongest = by_owner.values().copied().fold(0.0, f64::max);
+    // strongest at full weight + the remaining owners (total − strongest) discounted
+    strongest + SECONDARY_ENEMY_PRESSURE_WEIGHT * (total - strongest)
 }
 
 /// Enemy-owned targets failing the ally-pressure gate. For each enemy planet,
-/// ally pressure (our planets, our `OFFSET_LOOKAHEAD`) is compared against
-/// enemy pressure (all enemy planets except the target itself,
-/// `ENEMY_OFFSET_LOOKAHEAD`) — both computed exactly like reinforcement
-/// pressure. Targets where ally < `ALLY_PRESSURE_RATIO` × enemy are gated.
+/// ally pressure (our planets, our `OFFSET_LOOKAHEAD`) is compared against the
+/// combined enemy pressure (all enemy planets except the target itself, bucketed
+/// by owner: strongest owner full + the rest discounted, `ENEMY_OFFSET_LOOKAHEAD`)
+/// — both computed exactly like reinforcement pressure. Targets where
+/// ally < `ALLY_PRESSURE_RATIO` × enemy are gated.
 fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i64> {
     let mut gated: HashSet<i64> = HashSet::default();
     for target in &state.enemy_planets {
         if !model.non_comet_ids.contains(&target.id) {
             continue;
         }
-        let enemy = pressure_from(
+        let enemy = enemy_pressure_combined(
             state,
             model,
             target.id,
@@ -504,6 +570,52 @@ fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i
         }
     }
     gated
+}
+
+/// Extra arrival turns a source is allowed to look past its nearest reachable
+/// enemy when choosing combat targets. A source ignores any target whose arrival
+/// (launch offset + travel) exceeds its nearest-enemy arrival by more than this,
+/// so each source fights near its own frontier instead of chasing distant
+/// planets. See [`HellburnerModel::source_enemy_reach`].
+const CLOSER_ENEMY_TARGET_MARGIN: i64 = 2;
+
+/// Build [`HellburnerModel::source_enemy_reach`]: per owned (non-comet) source,
+/// the soonest arrival (launch offset + travel) onto any enemy-owned planet,
+/// best-case over offsets `0..=OFFSET_LOOKAHEAD`. Ship counts come from the
+/// plan-free baseline (like the pressure gates), so the result is
+/// plan-independent and computed once per model build. Sources that can reach no
+/// enemy are omitted, leaving the gate inert for them.
+fn build_source_enemy_reach(state: &WorldState, model: &HellburnerModel) -> HashMap<i64, i64> {
+    let player = state.player;
+    let mut out: HashMap<i64, i64> = HashMap::default();
+    for src in &state.my_planets {
+        if !model.non_comet_ids.contains(&src.id) {
+            continue;
+        }
+        let mut best: Option<i64> = None;
+        for enemy in &state.enemy_planets {
+            if !model.non_comet_ids.contains(&enemy.id) {
+                continue;
+            }
+            for offset in 0..=offset_lookahead() {
+                let ships = baseline_available_at_for_owner(state, src.id, player, offset);
+                if ships <= 0 {
+                    continue;
+                }
+                let Some((_, travel_turns, _, _, _)) =
+                    model.plan_shot(src.id, enemy.id, ships, offset)
+                else {
+                    continue;
+                };
+                let arrival = (offset + travel_turns).max(1);
+                best = Some(best.map_or(arrival, |b| b.min(arrival)));
+            }
+        }
+        if let Some(arrival) = best {
+            out.insert(src.id, arrival);
+        }
+    }
+    out
 }
 
 fn reinforcement_pressure_weight(turns: i64) -> f64 {
@@ -1184,6 +1296,21 @@ fn collect_source_candidates(
         if src.owner != owner {
             continue;
         }
+        // Closer-enemy gate — our combat selection only. This source ignores any
+        // target whose arrival exceeds its nearest reachable enemy's arrival by
+        // more than `CLOSER_ENEMY_TARGET_MARGIN`. Measured on arrival (offset +
+        // travel) on both sides, so a delayed launch counts its full
+        // time-to-land. `None` ⇒ no reachable enemy (inert), and the gate is
+        // skipped entirely for enemy-owner counter-option collection so the
+        // recapture model stays unrestricted.
+        let arrival_cutoff = if owner == world.player {
+            model
+                .source_enemy_reach
+                .get(&src_id)
+                .map(|reach| reach + CLOSER_ENEMY_TARGET_MARGIN)
+        } else {
+            None
+        };
         let mut row = Vec::with_capacity(option_stride);
         let mut has_option = false;
         for launch_offset in 0..=offset_lookahead() {
@@ -1191,12 +1318,18 @@ fn collect_source_candidates(
             let option = if ships > 0 {
                 model
                     .plan_shot(src_id, target.id, ships, launch_offset)
-                    .map(|(angle, turns, _, _, _)| SourceOption {
-                        src_id,
-                        launch_offset,
-                        angle,
-                        arrival: (launch_offset + turns).max(1),
-                        ships,
+                    .and_then(|(angle, turns, _, _, _)| {
+                        let arrival = (launch_offset + turns).max(1);
+                        if arrival_cutoff.is_some_and(|cutoff| arrival > cutoff) {
+                            return None;
+                        }
+                        Some(SourceOption {
+                            src_id,
+                            launch_offset,
+                            angle,
+                            arrival,
+                            ships,
+                        })
                     })
             } else {
                 None
