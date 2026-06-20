@@ -73,6 +73,15 @@ struct AgentConsts {
     neutral_payback_penalty: f64,
     lead_gate: f64,
     neutral_capture_penalty: f64,
+    // ── Early-game expansion pre-pass (see early_game.rs) ────────────────────
+    early_game_end: i64,
+    early_game_candidate_slack: usize,
+    early_game_race_margin: i64,
+    early_game_score_horizon: i64,
+    early_game_max_child_fund: usize,
+    // ── Combat target selection (see strategy.rs) ───────────────────────────
+    closer_enemy_target_margin: i64,
+    secondary_enemy_pressure_weight: f64,
 }
 
 // [0] = 2p, [1] = 4p.
@@ -127,6 +136,13 @@ fn parse_consts(env_key: &str, default_name: &str) -> AgentConsts {
         neutral_payback_penalty: f("neutral_payback_penalty"),
         lead_gate: f("lead_gate"),
         neutral_capture_penalty: f("neutral_capture_penalty"),
+        early_game_end: i("early_game_end"),
+        early_game_candidate_slack: i("early_game_candidate_slack") as usize,
+        early_game_race_margin: i("early_game_race_margin"),
+        early_game_score_horizon: i("early_game_score_horizon"),
+        early_game_max_child_fund: i("early_game_max_child_fund") as usize,
+        closer_enemy_target_margin: i("closer_enemy_target_margin"),
+        secondary_enemy_pressure_weight: f("secondary_enemy_pressure_weight"),
     }
 }
 
@@ -241,12 +257,39 @@ pub fn neutral_capture_penalty() -> f64 {
     agent().neutral_capture_penalty
 } // Flat score penalty on neutral captures (bites marginal neutrals hardest); 0 = no-op.
 
-// Early-game expansion pre-pass (see early_game.rs)
-pub const EARLY_GAME_END: i64 = 18; // The DFS expansion pre-pass runs on steps [0, EARLY_GAME_END). The race filter (EARLY_GAME_RACE_MARGIN) makes the expansion→combat transition emergent and local — contested planets drop out of the opening on their own as enemies close in — so the pre-pass can run all the way into the contact window. Cost used to be the limiter (in 2p the opening stays wide — enemies are 180° away, no contact until ~turn 15+ — and once we own several planets the chain DFS branching exploded, hitting the node budget at ~370ms around turn 12), but source pruning + the relay-benefit child gate (see early_game.rs) cut that ~5× and removed all node-budget exhaustion, so a long window like 30 now stays well within the 1s/step budget. No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but still a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner.
-pub const EARLY_GAME_CANDIDATE_SLACK: usize = 4; // Candidate ceiling = ceil(non-comet planets / alive players) + this slack. Encodes "≈ our symmetric share of the map" (rotational symmetry: ~half the planets in 2p, ~a quarter in 4p), scaling the cap with map size and player count instead of a flat constant. The race filter usually keeps fewer than this; the ceiling only bounds worst-case node cost.
-pub const EARLY_GAME_RACE_MARGIN: i64 = 3; // A neutral is an opening candidate only if we can reach it at least this many turns before any enemy could (Voronoi race filter on candidate selection — see early_game.rs). Keeps the uncontested closed-form capture value honest and makes the early→combat transition local (planets drop out of the opening as enemies close in). Larger = more conservative (only clearly-ours planets); 0 = strict race; negative = admit contested planets.
-pub const EARLY_GAME_SCORE_HORIZON: i64 = 30; // ABSOLUTE turn cap for the opening's capture VALUE (`production·(H − arrival) − garrison`), decoupled from the combat/projection horizon (config.horizon, ~14–16). The credited window used at turn `t` is `(EARLY_GAME_SCORE_HORIZON − t)`, floored at the projection window — so the economics never reach past this absolute turn and shrink as the game advances. Arrivals and availability are still bounded by the projection horizon; only the production-credit window is extended. The combat horizon alone is far too short to value an opening: a captured planet produces for the rest of the game, so crediting only ~16 turns of it charges full garrison against a sliver of payback and rejects far/late/chained captures that are excellent long-term holds. NOTE: once `t` is within `window` of this cap the credit clamps back to the projection window (no expansion premium), so to keep it active through the whole opening set this comfortably above EARLY_GAME_END + window (e.g. with END=30, window≈16, a value of 35 stays active only to ~turn 19). Higher = value expansion more, and active later; tune by A/B.
-pub const EARLY_GAME_MAX_CHILD_FUND: usize = 4; // Per target, highest-production remaining neutrals considered for the min+child funding variant.
+// Early-game expansion pre-pass (see early_game.rs) — TUNABLE (config.json /
+// config_4p.json), selected by MODE. Read with `name()` at the call site.
+#[inline]
+pub fn early_game_end() -> i64 {
+    agent().early_game_end
+} // The DFS expansion pre-pass runs on steps [0, early_game_end()). The race filter (early_game_race_margin()) makes the expansion→combat transition emergent and local — contested planets drop out of the opening on their own as enemies close in — so the pre-pass can run all the way into the contact window. Cost used to be the limiter (in 2p the opening stays wide — enemies are 180° away, no contact until ~turn 15+ — and once we own several planets the chain DFS branching exploded, hitting the node budget at ~370ms around turn 12), but source pruning + the relay-benefit child gate (see early_game.rs) cut that ~5× and removed all node-budget exhaustion, so a long window like 30 now stays well within the 1s/step budget. No valuation cliff (each plan's objective extends to the full horizon and greedy always runs on top), but still a hard stop on chain re-derivation: chains whose later hops would launch at/after this step are handed to the (chain-unaware) greedy planner.
+#[inline]
+pub fn early_game_candidate_slack() -> usize {
+    agent().early_game_candidate_slack
+} // Candidate ceiling = ceil(non-comet planets / alive players) + this slack. Encodes "≈ our symmetric share of the map" (rotational symmetry: ~half the planets in 2p, ~a quarter in 4p), scaling the cap with map size and player count instead of a flat constant. The race filter usually keeps fewer than this; the ceiling only bounds worst-case node cost.
+#[inline]
+pub fn early_game_race_margin() -> i64 {
+    agent().early_game_race_margin
+} // A neutral is an opening candidate only if we can reach it at least this many turns before any enemy could (Voronoi race filter on candidate selection — see early_game.rs). Keeps the uncontested closed-form capture value honest and makes the early→combat transition local (planets drop out of the opening as enemies close in). Larger = more conservative (only clearly-ours planets); 0 = strict race; negative = admit contested planets.
+#[inline]
+pub fn early_game_score_horizon() -> i64 {
+    agent().early_game_score_horizon
+} // ABSOLUTE turn cap for the opening's capture VALUE (`production·(H − arrival) − garrison`), decoupled from the combat/projection horizon (config.horizon, ~14–16). The credited window used at turn `t` is `(early_game_score_horizon() − t)`, floored at the projection window — so the economics never reach past this absolute turn and shrink as the game advances. Arrivals and availability are still bounded by the projection horizon; only the production-credit window is extended. The combat horizon alone is far too short to value an opening: a captured planet produces for the rest of the game, so crediting only ~16 turns of it charges full garrison against a sliver of payback and rejects far/late/chained captures that are excellent long-term holds. NOTE: once `t` is within `window` of this cap the credit clamps back to the projection window (no expansion premium), so to keep it active through the whole opening set this comfortably above early_game_end() + window (e.g. with END=30, window≈16, a value of 35 stays active only to ~turn 19). Higher = value expansion more, and active later; tune by A/B.
+#[inline]
+pub fn early_game_max_child_fund() -> usize {
+    agent().early_game_max_child_fund
+} // Per target, highest-production remaining neutrals considered for the min+child funding variant.
+
+// Combat target selection (see strategy.rs) — TUNABLE (config.json / config_4p.json).
+#[inline]
+pub fn closer_enemy_target_margin() -> i64 {
+    agent().closer_enemy_target_margin
+} // Extra arrival turns a source is allowed to look past its nearest reachable enemy when choosing combat targets. A source ignores any target whose arrival (launch offset + travel) exceeds its nearest-enemy arrival by more than this, so each source fights near its own frontier instead of chasing distant planets. >= 150 disables the gate entirely (the reach map is skipped to save time). See `HellburnerModel::source_enemy_reach`.
+#[inline]
+pub fn secondary_enemy_pressure_weight() -> f64 {
+    agent().secondary_enemy_pressure_weight
+} // Weight applied to every enemy owner's pressure except the single strongest one when combining per-owner pressures into one threat number. `1.0` is a full coalition (every enemy launches at once); `0.0` is only the strongest single opponent. In 2p there is one enemy owner so this is inert.
+
 pub const EARLY_GAME_NODE_BUDGET: u64 = 50_000; // Hard cap on early-game DFS nodes; best plan found so far is kept on exhaustion.
 // The reachability probe fleet is clamped at SHIP_SPEED_SATURATION (see physics rules): fleet speed
 // saturates there, so a larger probe can't arrive earlier. The probe itself is sized from exact

@@ -23,8 +23,9 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::apollo::cache::{AimCacheVerdict, EntityCache, InvariantVerdict};
 use crate::apollo::constants::{
-    ally_pressure_ratio, enemy_offset_lookahead, frontier_pressure_ratio, offset_lookahead,
-    reinforcement_pressure_decay, reinforcement_pressure_turns, rotation_look_ahead_turns,
+    ally_pressure_ratio, closer_enemy_target_margin, enemy_offset_lookahead,
+    frontier_pressure_ratio, offset_lookahead, reinforcement_pressure_decay,
+    reinforcement_pressure_turns, rotation_look_ahead_turns, secondary_enemy_pressure_weight,
     SUBSET_TOP_TARGETS,
 };
 use crate::apollo::early_game::OpeningEvent;
@@ -53,14 +54,16 @@ pub struct HellburnerModel<'a> {
     /// travel) to land a fleet on any enemy-owned (non-comet) planet, best-case
     /// over launch offsets `0..=OFFSET_LOOKAHEAD`. Drives the per-source
     /// closer-enemy gate in `collect_source_candidates`: a source only considers
-    /// combat targets whose own arrival is within `CLOSER_ENEMY_TARGET_MARGIN`
+    /// combat targets whose own arrival is within `closer_enemy_target_margin()`
     /// turns of this nearest-enemy arrival, so each source fights near its
     /// frontier rather than chasing distant planets. Both sides are measured on
     /// arrival (offset + travel), so a delayed-launch option counts its full
-    /// time-to-land (offset 2 + travel 5 = 7). Absent for a source that can
-    /// reach no enemy (gate inert — no enemy contact), keeping early/no-contact
-    /// play unchanged.
-    pub source_enemy_reach: HashMap<i64, i64>,
+    /// time-to-land (offset 2 + travel 5 = 7). A source that can reach no enemy
+    /// is absent from the map (gate inert for it — no enemy contact), keeping
+    /// early/no-contact play unchanged. `None` for the whole field means the
+    /// gate is disabled (`closer_enemy_target_margin() >= CLOSER_ENEMY_GATE_DISABLED`):
+    /// the map is never built and the gate never binds for any source.
+    pub source_enemy_reach: Option<HashMap<i64, i64>>,
     /// L1 hot cache for `plan_shot`: per-`HellburnerModel` (i.e. one bot turn)
     /// memoization of `(src, target, ships, launch_turn_offset) → aim`.
     /// Avoids repeated traffic to the L2 `EntityCache::aim_cache` inside the
@@ -129,10 +132,14 @@ impl<'a> HellburnerModel<'a> {
             outbound_edges,
             reinforcement_target: HashMap::default(),
             pressure_gated_targets: HashSet::default(),
-            source_enemy_reach: HashMap::default(),
+            source_enemy_reach: None,
             shot_cache: RefCell::new(HashMap::default()),
         };
-        model.source_enemy_reach = build_source_enemy_reach(state, &model);
+        // A margin of `CLOSER_ENEMY_GATE_DISABLED` or more can never bind (no
+        // reachable target arrives that far past the nearest enemy), so skip
+        // building the reach map entirely — `None` leaves the gate disabled.
+        model.source_enemy_reach = (closer_enemy_target_margin() < CLOSER_ENEMY_GATE_DISABLED)
+            .then(|| build_source_enemy_reach(state, &model));
         model.reinforcement_target = build_reinforcement_targets(state, &model, player);
         model.pressure_gated_targets = build_pressure_gate(state, &model);
         model
@@ -506,16 +513,8 @@ fn pressure_from(
         .sum()
 }
 
-/// Weight applied to every enemy owner's pressure except the single strongest
-/// one when combining per-owner pressures into one threat number. `1.0` is a
-/// full coalition (every enemy launches at once); `0.0` is only the strongest
-/// single opponent. The middle ground counts the most dangerous opponent fully
-/// while crediting the rest a discounted share — secondary opponents add real
-/// risk without assuming full coordination.
-const SECONDARY_ENEMY_PRESSURE_WEIGHT: f64 = 1.3;
-
 /// Combined enemy pressure on `target_id`: the strongest single enemy owner's
-/// pressure at full weight, plus `SECONDARY_ENEMY_PRESSURE_WEIGHT` × the summed
+/// pressure at full weight, plus `secondary_enemy_pressure_weight()` × the summed
 /// pressure of every other enemy owner. Models the most dangerous independent
 /// opponent fully while still crediting secondary opponents a discounted share,
 /// rather than an unrealistic full coalition (plain sum) or ignoring them
@@ -533,7 +532,7 @@ fn enemy_pressure_combined(
     let total: f64 = by_owner.values().sum();
     let strongest = by_owner.values().copied().fold(0.0, f64::max);
     // strongest at full weight + the remaining owners (total − strongest) discounted
-    strongest + SECONDARY_ENEMY_PRESSURE_WEIGHT * (total - strongest)
+    strongest + secondary_enemy_pressure_weight() * (total - strongest)
 }
 
 /// Enemy-owned targets failing the ally-pressure gate. For each enemy planet,
@@ -572,12 +571,10 @@ fn build_pressure_gate(state: &WorldState, model: &HellburnerModel) -> HashSet<i
     gated
 }
 
-/// Extra arrival turns a source is allowed to look past its nearest reachable
-/// enemy when choosing combat targets. A source ignores any target whose arrival
-/// (launch offset + travel) exceeds its nearest-enemy arrival by more than this,
-/// so each source fights near its own frontier instead of chasing distant
-/// planets. See [`HellburnerModel::source_enemy_reach`].
-const CLOSER_ENEMY_TARGET_MARGIN: i64 = 2;
+/// At or above this `closer_enemy_target_margin()` the closer-enemy gate is
+/// treated as disabled: no target can arrive this many turns past a source's
+/// nearest enemy, so the reach map is skipped and the gate stays inert.
+const CLOSER_ENEMY_GATE_DISABLED: i64 = 150;
 
 /// Build [`HellburnerModel::source_enemy_reach`]: per owned (non-comet) source,
 /// the soonest arrival (launch offset + travel) onto any enemy-owned planet,
@@ -1298,7 +1295,7 @@ fn collect_source_candidates(
         }
         // Closer-enemy gate — our combat selection only. This source ignores any
         // target whose arrival exceeds its nearest reachable enemy's arrival by
-        // more than `CLOSER_ENEMY_TARGET_MARGIN`. Measured on arrival (offset +
+        // more than `closer_enemy_target_margin()`. Measured on arrival (offset +
         // travel) on both sides, so a delayed launch counts its full
         // time-to-land. `None` ⇒ no reachable enemy (inert), and the gate is
         // skipped entirely for enemy-owner counter-option collection so the
@@ -1306,8 +1303,9 @@ fn collect_source_candidates(
         let arrival_cutoff = if owner == world.player {
             model
                 .source_enemy_reach
-                .get(&src_id)
-                .map(|reach| reach + CLOSER_ENEMY_TARGET_MARGIN)
+                .as_ref()
+                .and_then(|reach| reach.get(&src_id))
+                .map(|reach| reach + closer_enemy_target_margin())
         } else {
             None
         };
