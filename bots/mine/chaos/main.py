@@ -126,7 +126,7 @@ os.environ.setdefault("MKL_NUM_THREADS", _TORCH_THREADS)
 # Total per-turn wall target (IL pass + search). Submission builds flip
 # _USE_PROD_LIMITS to match aphrodite's production budget policy.
 _DEV_TURN_TARGET_MS = 600
-_SUBMISSION_TURN_TARGET_MS = 900
+_SUBMISSION_TURN_TARGET_MS = 850
 _USE_PROD_LIMITS = False
 # Never squeeze the search below this, no matter how slow the IL pass was.
 _MIN_SEARCH_MS = 250
@@ -398,7 +398,10 @@ def agent(obs, config=None):
     # checkpoint loads lazily the first turn its player-count is seen.
     num_players = _aph._infer_num_players(p)
     tag = "2p" if num_players == 2 else "4p"
-    if num_players >= 2 and p["step"] >= _il_skip_turns():
+    # The 4p IL (3-/4-player states) is disabled: only the 2p checkpoint runs.
+    # num_players == 2 covers both native 2p games and 4p games that have decayed
+    # to two survivors, so the 2p fallback is preserved.
+    if num_players == 2 and p["step"] >= _il_skip_turns():
         if _il_k() <= 0:
             cands = None
             il_desc = f"{tag}:k0"
@@ -408,9 +411,12 @@ def agent(obs, config=None):
                 p["il_candidates"] = [c["action"] for c in cands]
                 p["il_candidate_probs"] = [c["prob"] for c in cands]
                 p["il_candidate_logits"] = [c["logit"] for c in cands]
+    elif num_players >= 3:
+        cands = None
+        il_desc = f"{tag}:off"  # 4p IL disabled
     else:
         cands = None
-        il_desc = f"{tag}:skip" if num_players >= 2 else None
+        il_desc = f"{tag}:skip" if num_players == 2 else None
     # Dynamic split of the turn target: whatever the IL pass (or 4p skip) left
     # goes to the search. Sent per turn — the binary's env budget is unused.
     il_ms = (time.perf_counter() - t0) * 1000

@@ -55,10 +55,10 @@ const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
 // between them (we stop early once one move clearly separates). All in ms.
 
 /// Hard cap on overage spent beyond the base budget on any single turn.
-const OVERAGE_PER_TURN_CAP_MS: u64 = 1000;
+const OVERAGE_PER_TURN_CAP_MS: u64 = 800;
 /// Safety reserve to keep untouched in the engine's overage pool, computed as
 /// a base amount plus a per-turn multiplier
-const OVERAGE_SAFETY_BASE_MS: f64 = 2000.0;
+const OVERAGE_SAFETY_BASE_MS: f64 = 3000.0;
 const OVERAGE_SAFETY_PER_TURN_MS: f64 = 50.0;
 /// Grant overage in chunks this size, re-checking the decision gap between each.
 const OVERAGE_CHUNK_MS: u64 = 200;
