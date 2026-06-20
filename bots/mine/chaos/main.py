@@ -156,7 +156,7 @@ def _il_skip_turns() -> int:
     # Skip IL injection on the first N turns. Default 8 intentionally matches
     # APOLLO_ONLY_FIRST_TURNS in aphrodite's DUCT layer, so the tested opening
     # plays pure Apollo instead of spending IL work on turns the binary ignores.
-    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "8")))
+    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "12")))
 
 
 def _il_busy_fail_ms() -> int:
