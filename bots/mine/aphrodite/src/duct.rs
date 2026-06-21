@@ -99,6 +99,16 @@ fn min_instant(a: Instant, b: Instant) -> Instant {
     }
 }
 
+fn fixed_iters_limit() -> Option<u32> {
+    static V: OnceLock<Option<u32>> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("APHRODITE_FIXED_ITERS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&n| n > 0)
+    })
+}
+
 fn joint_4p_root_opponents_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
@@ -1307,6 +1317,9 @@ fn maybe_dump_candidate_decision(
             "root_visits": root.visits,
             "my_k": root.my_candidates.len(),
             "opp_k": root.opp_candidates.len(),
+            "nodes": count_nodes(root),
+            "leaves": count_leaves(root),
+            "max_depth": max_depth(root),
             "chosen_idx": best_i,
             "chosen_source": if best_i >= il_first_idx && best_i < il_first_idx + il_added { "il" } else { "apollo" },
             "chosen_label": root.my_labels.get(best_i).map(String::as_str).unwrap_or("unknown"),
@@ -1446,6 +1459,13 @@ pub fn best_move(
     let pre_search_ms = elapsed_ms(turn_t0);
     let search_t0 = Instant::now();
     let base_loop_deadline = min_instant(base_deadline, hard_deadline);
+    let fixed_iters = fixed_iters_limit();
+    let seed_deadline = if fixed_iters.is_some() {
+        Instant::now() + Duration::from_secs(86_400)
+    } else {
+        base_loop_deadline
+    };
+    let max_base_iters = fixed_iters.unwrap_or(100_000);
     let mut iters = 0u32;
     let il_forced_iters = if il_added > 0 {
         run_forced_root_visits(
@@ -1453,9 +1473,9 @@ pub fn best_move(
             me,
             il_first_idx,
             il_added,
-            base_loop_deadline,
+            seed_deadline,
             &mut iters,
-            100_000,
+            max_base_iters,
         )
     } else {
         0
@@ -1466,9 +1486,16 @@ pub fn best_move(
             state.step, me, il_forced_iters, IL_FORCED_VISITS
         );
     }
-    while before(base_loop_deadline) {
-        select_and_expand(&mut root, me, true);
-        iters += 1;
+    if let Some(limit) = fixed_iters {
+        while iters < limit {
+            select_and_expand(&mut root, me, true);
+            iters += 1;
+        }
+    } else {
+        while before(base_loop_deadline) {
+            select_and_expand(&mut root, me, true);
+            iters += 1;
+        }
     }
     let base_search_ms = elapsed_ms(search_t0);
 
@@ -1481,7 +1508,7 @@ pub fn best_move(
     let mut overage_final_gap = f64::INFINITY;
     let overage_t0 = Instant::now();
     let contested = extra_search_position_contested(&root.state);
-    if contested && before(hard_deadline) {
+    if fixed_iters.is_none() && contested && before(hard_deadline) {
         overage_initial_gap = root_top2_gap(&root);
         while root_top2_gap(&root) < OVERAGE_CLOSE_GAP && before(hard_deadline) {
             let chunk_t0 = Instant::now();

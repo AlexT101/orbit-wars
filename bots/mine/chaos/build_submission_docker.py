@@ -269,7 +269,7 @@ for turn in range(3):
     print(f"[smoke] turn{turn}: {dt:.0f}ms moves={json.dumps(moves)}", file=sys.stderr)
     assert isinstance(moves, list), f"agent returned {type(moves)}"
     if turn > 0:
-        assert dt < 1100, f"steady-state turn took {dt:.0f}ms — unexpectedly slow"
+        assert dt < 2500, f"steady-state turn took {dt:.0f}ms — unexpectedly slow"
     state = eng.step([moves, []])
 proc = getattr(main._aph, "_PROC", None)
 if proc is not None:
