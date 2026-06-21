@@ -472,8 +472,7 @@ fn best_pressure_contribution(
         if ships <= 0 {
             continue;
         }
-        let Some((_, travel_turns, _, _, _)) =
-            model.plan_shot(src.id, target_id, ships, offset)
+        let Some((_, travel_turns, _, _, _)) = model.plan_shot(src.id, target_id, ships, offset)
         else {
             continue;
         };

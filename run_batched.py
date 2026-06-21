@@ -14,6 +14,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import contextlib
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -117,7 +118,7 @@ def cleanup_agent_module(module):
             pass
 
 
-def run_one_match(bot_paths, seed, match_idx):
+def run_one_match(bot_paths, seed, match_idx, timing_config=None):
     from engine_parity_checker.candidates.rust import RustEngine
 
     modules = [
@@ -131,16 +132,49 @@ def run_one_match(bot_paths, seed, match_idx):
 
         total_time = [0.0] * len(agents)
         call_counts = [0] * len(agents)
+        timing_records = []
+        track_timing = bool(timing_config)
+        act_timeout_s = float((timing_config or {}).get("act_timeout_s", 1.0))
+        overage_s = [
+            float((timing_config or {}).get("initial_overage_s", 60.0))
+            for _ in agents
+        ]
+        config = {
+            "episodeSteps": MAX_STEPS,
+            "actTimeout": act_timeout_s,
+        }
 
         done = False
         steps_run = 0
         for _ in range(MAX_STEPS):
             actions = []
             for i in range(len(agents)):
+                obs_dict = obs[i].as_dict()
+                if track_timing:
+                    obs_dict["remainingOverageTime"] = overage_s[i]
+                    obs_dict["config"] = dict(config)
+                before_overage_s = overage_s[i]
                 start = perf_counter()
-                action = agents[i](obs[i].as_dict())
-                total_time[i] += perf_counter() - start
+                action = agents[i](obs_dict)
+                duration_s = perf_counter() - start
+                total_time[i] += duration_s
                 call_counts[i] += 1
+                if track_timing:
+                    overage_s[i] = max(0.0, overage_s[i] - max(0.0, duration_s - act_timeout_s))
+                    timing_records.append(
+                        {
+                            "match_idx": match_idx,
+                            "seed": seed,
+                            "step": int(obs[i].step),
+                            "slot": i,
+                            "duration_ms": duration_s * 1000.0,
+                            "act_timeout_ms": act_timeout_s * 1000.0,
+                            "remaining_overage_before_s": before_overage_s,
+                            "remaining_overage_after_s": overage_s[i],
+                            "over_budget": duration_s > act_timeout_s,
+                            "moves": len(action or []),
+                        }
+                    )
                 actions.append(action)
             obs, done = engine.step(actions)
             steps_run += 1
@@ -153,7 +187,7 @@ def run_one_match(bot_paths, seed, match_idx):
             (total_time[i] / call_counts[i] * 1000.0) if call_counts[i] else 0.0
             for i in range(len(agents))
         ]
-        return rewards, steps_run, avg_ms
+        return rewards, steps_run, avg_ms, timing_records
     finally:
         for module in modules:
             cleanup_agent_module(module)
@@ -171,10 +205,12 @@ def reorder_by_input(values, slot_order):
 
 
 def run_match_job(job):
-    bot_paths, seed, match_idx, slot_order = job
+    bot_paths, seed, match_idx, slot_order, timing_config = job
     slotted_bot_paths = [bot_paths[i] for i in slot_order]
-    rewards, steps, avg_ms = run_one_match(slotted_bot_paths, seed, match_idx)
-    return match_idx, seed, slot_order, rewards, steps, avg_ms
+    rewards, steps, avg_ms, timing_records = run_one_match(
+        slotted_bot_paths, seed, match_idx, timing_config
+    )
+    return match_idx, seed, slot_order, rewards, steps, avg_ms, timing_records
 
 
 def main():
@@ -193,6 +229,24 @@ def main():
         type=int,
         default=8,
         help="Number of matches to run concurrently. Use 1 for sequential execution.",
+    )
+    parser.add_argument(
+        "--timing-jsonl",
+        type=Path,
+        default=None,
+        help="Write per-agent call duration/overage records as JSONL.",
+    )
+    parser.add_argument(
+        "--initial-overage",
+        type=float,
+        default=60.0,
+        help="Initial synthetic remainingOverageTime in seconds for --timing-jsonl.",
+    )
+    parser.add_argument(
+        "--act-timeout",
+        type=float,
+        default=1.0,
+        help="Synthetic actTimeout in seconds for --timing-jsonl.",
     )
     args = parser.parse_args()
 
@@ -216,13 +270,28 @@ def main():
     draws = 0
     sum_steps = 0
     sum_avg_ms = [0.0, 0.0]
+    timing_out = None
+    if args.timing_jsonl is not None:
+        args.timing_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        timing_out = args.timing_jsonl.open("w", encoding="utf-8")
+    timing_config = None
+    if args.timing_jsonl is not None:
+        timing_config = {
+            "initial_overage_s": args.initial_overage,
+            "act_timeout_s": args.act_timeout,
+        }
 
     def record_result(result):
         nonlocal draws, sum_steps
 
-        _match_idx, seed, slot_order, rewards, steps, avg_ms = result
+        _match_idx, seed, slot_order, rewards, steps, avg_ms, timing_records = result
         rewards = reorder_by_input(rewards, slot_order)
         avg_ms = reorder_by_input(avg_ms, slot_order)
+        if timing_out is not None:
+            for record in timing_records:
+                record["input_bot"] = slot_order[record["slot"]]
+                timing_out.write(json.dumps(record, separators=(",", ":")) + "\n")
+            timing_out.flush()
         r0, r1 = rewards[0], rewards[1]
         if r0 is None or r1 is None:
             winner = "?"
@@ -254,24 +323,29 @@ def main():
             args.start_seed + k,
             k,
             slot_order_for_seed(args.start_seed + k),
+            timing_config,
         )
         for k in range(n)
     ]
-    if threads == 1:
-        for job in jobs:
-            record_result(run_match_job(job))
-    else:
-        results_by_idx = {}
-        next_to_print = 0
-        with ProcessPoolExecutor(max_workers=threads) as executor:
-            futures = [executor.submit(run_match_job, job) for job in jobs]
-            for future in as_completed(futures):
-                result = future.result()
-                match_idx = result[0]
-                results_by_idx[match_idx] = result
-                while next_to_print in results_by_idx:
-                    record_result(results_by_idx.pop(next_to_print))
-                    next_to_print += 1
+    try:
+        if threads == 1:
+            for job in jobs:
+                record_result(run_match_job(job))
+        else:
+            results_by_idx = {}
+            next_to_print = 0
+            with ProcessPoolExecutor(max_workers=threads) as executor:
+                futures = [executor.submit(run_match_job, job) for job in jobs]
+                for future in as_completed(futures):
+                    result = future.result()
+                    match_idx = result[0]
+                    results_by_idx[match_idx] = result
+                    while next_to_print in results_by_idx:
+                        record_result(results_by_idx.pop(next_to_print))
+                        next_to_print += 1
+    finally:
+        if timing_out is not None:
+            timing_out.close()
 
     decided = wins[0] + wins[1]
     p0_rate = (wins[0] / decided * 100.0) if decided else 0.0

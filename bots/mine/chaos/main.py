@@ -9,8 +9,9 @@ The aphrodite engine and subprocess management are reused from
 bots/mine/aphrodite. The `il_candidates` field is optional, and
 aphrodite's own wrapper never sends it.
 
-Time budgeting is dynamic per turn: the wrapper measures its own IL pass and
-sends the binary a `budget_ms` for the remaining search time.
+Time budgeting is dynamic per turn: the wrapper measures its own IL pass,
+tracks prior Python/Rust overhead, and sends the binary base/hard deadlines for
+the remaining search time.
 
 Failures are loud: a missing checkpoint, stale `orbit_wars_model` schema, or IL
 runtime error raises immediately.
@@ -32,6 +33,15 @@ Env knobs:
                          this many ms
   CHAOS_TORCH_THREADS   torch / OpenMP intra-op threads
   CHAOS_TURN_TARGET_MS  total per-turn wall target override
+  CHAOS_OVERAGE_RESERVE_MS
+                         minimum overage pool reserve before spending extra
+  CHAOS_PANIC_OVERAGE_MS
+                         skip IL/search when overage pool falls below this
+  CHAOS_OVERAGE_PER_TURN_CAP_MS
+                         max overage ms granted to Rust on one turn
+  CHAOS_PY_MARGIN_MS    minimum Python/IPC margin before Rust
+  CHAOS_RUST_POST_MARGIN_MS
+                         minimum Rust post-search margin for redirect/output
   CHAOS_IL_CHECKPOINT   override the 2p IL checkpoint path
   CHAOS_IL_CHECKPOINT_4P override the 4p IL checkpoint path
 """
@@ -109,21 +119,179 @@ os.environ.setdefault("MKL_NUM_THREADS", _TORCH_THREADS)
 _DEV_TURN_TARGET_MS = 700
 _SUBMISSION_TURN_TARGET_MS = 1000
 _USE_PROD_LIMITS = False
-# Never squeeze the search below this, no matter how slow the IL pass was.
+if os.environ.get("CHAOS_USE_PROD_LIMITS", "").strip().lower() not in ("", "0", "false"):
+    _USE_PROD_LIMITS = True
+    _aph._USE_PROD_LIMITS = True
+# Prefer not to squeeze the search below this when the hard deadline has room.
 _MIN_SEARCH_MS = 250
-# Margin between (target - il_elapsed) and the budget we hand the binary,
-# covering JSON encode + IPC + the binary's own dispatch overhead.
+# Minimum margin between (target - il_elapsed) and the budget we hand the
+# binary. Runtime telemetry can raise this when Python/IPC overhead is higher.
 _DISPATCH_MARGIN_MS = 30
+_DEFAULT_OVERAGE_RESERVE_MS = 1000
+_DEFAULT_PANIC_OVERAGE_MS = 1000
+_OVERAGE_PER_TURN_CAP_MS = 1000
+_DEFAULT_RUST_POST_MARGIN_MS = 80
 # Warmup architecture fallback. `_warm_arch()` prefers checkpoint config.
 _WARM_MODEL = "entity_transformer_ngpt_action_features"
 _WARM_HIDDEN = 128
 _WARM_LAYERS = 3
 _WARM_HEADS = 4
 
+_py_overhead_margin_ms = float(os.environ.get("CHAOS_PY_MARGIN_MS", _DISPATCH_MARGIN_MS))
+_rust_post_margin_ms = float(
+    os.environ.get("CHAOS_RUST_POST_MARGIN_MS", _DEFAULT_RUST_POST_MARGIN_MS)
+)
+_overage_burn_margin_ms = 0.0
+_last_remaining_overage_s: float | None = None
+_last_overage_step: int | None = None
+
 
 def _turn_target_ms() -> int:
     default = _SUBMISSION_TURN_TARGET_MS if _USE_PROD_LIMITS else _DEV_TURN_TARGET_MS
     return int(os.environ.get("CHAOS_TURN_TARGET_MS", default))
+
+
+def _env_int(name: str, default: int, lo: int = 0) -> int:
+    try:
+        return max(lo, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return max(lo, default)
+
+
+def _env_float(name: str, default: float, lo: float = 0.0) -> float:
+    try:
+        return max(lo, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return max(lo, default)
+
+
+def _overage_reserve_ms() -> int:
+    return _env_int("CHAOS_OVERAGE_RESERVE_MS", _DEFAULT_OVERAGE_RESERVE_MS)
+
+
+def _panic_overage_ms() -> int:
+    return _env_int("CHAOS_PANIC_OVERAGE_MS", _DEFAULT_PANIC_OVERAGE_MS)
+
+
+def _overage_per_turn_cap_ms() -> int:
+    return _env_int("CHAOS_OVERAGE_PER_TURN_CAP_MS", _OVERAGE_PER_TURN_CAP_MS)
+
+
+def _py_margin_floor_ms() -> float:
+    return _env_float("CHAOS_PY_MARGIN_MS", float(_DISPATCH_MARGIN_MS))
+
+
+def _rust_post_margin_floor_ms() -> float:
+    return _env_float("CHAOS_RUST_POST_MARGIN_MS", float(_DEFAULT_RUST_POST_MARGIN_MS))
+
+
+def _update_peakish(current: float, sample: float, floor: float) -> float:
+    sample = max(floor, float(sample))
+    current = max(floor, float(current))
+    alpha = 0.40 if sample > current else 0.05
+    return max(floor, current * (1.0 - alpha) + sample * alpha)
+
+
+def _act_timeout_ms(obs: dict) -> float:
+    cfg = obs.get("config") if isinstance(obs.get("config"), dict) else {}
+    raw = cfg.get("actTimeout")
+    if raw is None:
+        return float(_turn_target_ms())
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(_turn_target_ms())
+    return value * 1000.0
+
+
+def _remaining_overage_ms(obs: dict) -> float:
+    try:
+        return max(0.0, float(obs.get("remainingOverageTime", 0.0))) * 1000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _effective_reserve_ms() -> float:
+    py_margin_ms = max(_py_margin_floor_ms(), _py_overhead_margin_ms)
+    post_margin_ms = max(_rust_post_margin_floor_ms(), _rust_post_margin_ms)
+    return max(
+        float(_overage_reserve_ms()),
+        py_margin_ms + post_margin_ms + _overage_burn_margin_ms,
+    )
+
+
+def _overage_panic(obs: dict) -> bool:
+    return _USE_PROD_LIMITS and _remaining_overage_ms(obs) <= float(_panic_overage_ms())
+
+
+def _observe_overage(obs: dict) -> None:
+    global _last_remaining_overage_s, _last_overage_step, _overage_burn_margin_ms
+    if not _USE_PROD_LIMITS:
+        return
+    try:
+        step = int(obs.get("step", 0))
+        remaining_s = max(0.0, float(obs.get("remainingOverageTime", 0.0)))
+    except (TypeError, ValueError):
+        return
+    if (
+        _last_remaining_overage_s is not None
+        and _last_overage_step is not None
+        and step > _last_overage_step
+    ):
+        burn_ms = max(0.0, (_last_remaining_overage_s - remaining_s) * 1000.0)
+        burn_ms = min(burn_ms, float(_overage_per_turn_cap_ms() + 500))
+        _overage_burn_margin_ms = _update_peakish(_overage_burn_margin_ms, burn_ms, 0.0)
+    _last_remaining_overage_s = remaining_s
+    _last_overage_step = step
+
+
+def _budget_plan(obs: dict, elapsed_ms: float) -> tuple[int, int, int, float]:
+    turn_target_ms = float(_turn_target_ms())
+    act_timeout_ms = _act_timeout_ms(obs) if _USE_PROD_LIMITS else turn_target_ms
+    remaining_ms = _remaining_overage_ms(obs) if _USE_PROD_LIMITS else 0.0
+    py_margin_ms = max(_py_margin_floor_ms(), _py_overhead_margin_ms)
+    post_margin_ms = max(_rust_post_margin_floor_ms(), _rust_post_margin_ms)
+    reserve_ms = _effective_reserve_ms()
+    if _USE_PROD_LIMITS and remaining_ms <= float(_panic_overage_ms()):
+        return 0, 0, max(0, int(post_margin_ms)), 0.0
+    extra_ms = 0.0
+    if _USE_PROD_LIMITS:
+        extra_ms = min(float(_overage_per_turn_cap_ms()), max(0.0, remaining_ms - reserve_ms))
+
+    hard_total_ms = act_timeout_ms + extra_ms
+    base_total_ms = min(turn_target_ms, hard_total_ms)
+    base_available_ms = base_total_ms - elapsed_ms - py_margin_ms
+    hard_available_ms = hard_total_ms - elapsed_ms - py_margin_ms
+
+    hard_budget_ms = max(0, int(hard_available_ms))
+    base_budget_ms = max(0, min(int(base_available_ms), hard_budget_ms))
+    if base_budget_ms < _MIN_SEARCH_MS <= hard_budget_ms:
+        base_budget_ms = _MIN_SEARCH_MS
+    hard_budget_ms = max(base_budget_ms, hard_budget_ms)
+    return base_budget_ms, hard_budget_ms, max(0, int(post_margin_ms)), extra_ms
+
+
+def _update_timing_telemetry(timing: object, total_ms: float, il_ms: float) -> None:
+    global _py_overhead_margin_ms, _rust_post_margin_ms
+    if not isinstance(timing, dict):
+        return
+    try:
+        rust_total_ms = float(timing.get("rust_total_ms", 0.0) or 0.0)
+        redirect_ms = float(timing.get("redirect_ms", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return
+    if rust_total_ms > 0.0:
+        py_overhead_ms = max(0.0, total_ms - il_ms - rust_total_ms)
+        _py_overhead_margin_ms = _update_peakish(
+            _py_overhead_margin_ms,
+            py_overhead_ms + 10.0,
+            _py_margin_floor_ms(),
+        )
+    _rust_post_margin_ms = _update_peakish(
+        _rust_post_margin_ms,
+        redirect_ms + 25.0,
+        _rust_post_margin_floor_ms(),
+    )
 
 
 def _il_k() -> int:
@@ -404,8 +572,9 @@ def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None,
                 )
             return None, f"{tag}:busy"
 
+    dispatch_margin_ms = max(_DISPATCH_MARGIN_MS, int(_py_overhead_margin_ms))
     deadline_s = (
-        _turn_target_ms() - _MIN_SEARCH_MS - _DISPATCH_MARGIN_MS
+        _turn_target_ms() - _MIN_SEARCH_MS - dispatch_margin_ms
     ) / 1000.0 - (time.perf_counter() - t0)
     if deadline_s <= 0.0:
         if os.environ.get("OW_DEBUG"):
@@ -447,10 +616,15 @@ def agent(obs, config=None):
             p["config"] = cfg
 
     t0 = time.perf_counter()
+    _observe_overage(p)
     num_players = _aph._infer_num_players(p)
     tag = "2p" if num_players == 2 else "4p"
+    panic = _overage_panic(p)
     # Only live two-player states use IL.
-    if num_players == 2 and p["step"] >= _il_skip_turns():
+    if panic:
+        cands = None
+        il_desc = f"{tag}:panic"
+    elif num_players == 2 and p["step"] >= _il_skip_turns():
         if _il_k() <= 0:
             cands = None
             il_desc = f"{tag}:k0"
@@ -470,10 +644,21 @@ def agent(obs, config=None):
         cands = None
         il_desc = f"{tag}:skip" if num_players == 2 else None
     il_ms = (time.perf_counter() - t0) * 1000
-    p["budget_ms"] = max(_MIN_SEARCH_MS, int(_turn_target_ms() - il_ms - _DISPATCH_MARGIN_MS))
+    base_budget_ms, hard_budget_ms, post_margin_ms, extra_ms = _budget_plan(p, il_ms)
+    p["budget_ms"] = base_budget_ms
+    p["base_budget_ms"] = base_budget_ms
+    p["hard_budget_ms"] = hard_budget_ms
+    p["post_search_margin_ms"] = post_margin_ms
+    p["return_timing"] = True
     if os.environ.get("OW_DEBUG"):
         print(
-            f"[chaos] step={p['step']} il_ms={il_ms:.0f} budget_ms={p['budget_ms']} "
+            f"[chaos] step={p['step']} il_ms={il_ms:.0f} "
+            f"base_ms={base_budget_ms} hard_ms={hard_budget_ms} "
+            f"post_ms={post_margin_ms} extra_ms={extra_ms:.0f} "
+            f"py_margin={_py_overhead_margin_ms:.0f} rust_post={_rust_post_margin_ms:.0f} "
+            f"burn_margin={_overage_burn_margin_ms:.0f} "
+            f"reserve={_effective_reserve_ms():.0f} panic_cutoff={_panic_overage_ms()} "
+            f"panic={panic} "
             f"il={il_desc} il_candidates={cands}",
             file=sys.stderr,
         )
@@ -489,7 +674,12 @@ def agent(obs, config=None):
             raise RuntimeError(f"aphrodite binary died at step {p['step']}") from exc
         if not r:
             raise RuntimeError(f"aphrodite binary closed stdout at step {p['step']}")
-        return json.loads(r.decode())
+        response = json.loads(r.decode())
+        total_ms = (time.perf_counter() - t0) * 1000
+        if isinstance(response, dict):
+            _update_timing_telemetry(response.get("timing"), total_ms, il_ms)
+            return response.get("moves", [])
+        return response
 
 
 if _il_k() > 0:

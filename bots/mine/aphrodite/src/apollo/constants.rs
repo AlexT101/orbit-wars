@@ -291,9 +291,9 @@ pub fn secondary_enemy_pressure_weight() -> f64 {
 } // Weight applied to every enemy owner's pressure except the single strongest one when combining per-owner pressures into one threat number. `1.0` is a full coalition (every enemy launches at once); `0.0` is only the strongest single opponent. In 2p there is one enemy owner so this is inert.
 
 pub const EARLY_GAME_NODE_BUDGET: u64 = 50_000; // Hard cap on early-game DFS nodes; best plan found so far is kept on exhaustion.
-// The reachability probe fleet is clamped at SHIP_SPEED_SATURATION (see physics rules): fleet speed
-// saturates there, so a larger probe can't arrive earlier. The probe itself is sized from exact
-// achievable ships (owned + producible over the window).
+                                                // The reachability probe fleet is clamped at SHIP_SPEED_SATURATION (see physics rules): fleet speed
+                                                // saturates there, so a larger probe can't arrive earlier. The probe itself is sized from exact
+                                                // achievable ships (owned + producible over the window).
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 

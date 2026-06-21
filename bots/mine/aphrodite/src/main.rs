@@ -9,6 +9,29 @@ use aphrodite::{duct, parse_state, profiling};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
+use std::time::{Duration, Instant};
+
+const DEFAULT_POST_SEARCH_MARGIN_MS: u64 = 80;
+const DEFAULT_OVERAGE_HARD_CAP_MS: u64 = 2000;
+
+fn elapsed_ms(t0: Instant) -> u64 {
+    t0.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn min_instant(a: Instant, b: Instant) -> Instant {
+    if a <= b {
+        a
+    } else {
+        b
+    }
+}
+
+fn checked_deadline_minus(deadline: Instant, margin_ms: u64, floor: Instant) -> Instant {
+    deadline
+        .checked_sub(Duration::from_millis(margin_ms))
+        .filter(|t| *t >= floor)
+        .unwrap_or(floor)
+}
 
 fn main() -> io::Result<()> {
     let stdin = io::stdin();
@@ -49,6 +72,8 @@ fn main() -> io::Result<()> {
             out.flush()?;
             continue;
         }
+        let rust_turn_t0 = Instant::now();
+        let parse_t0 = Instant::now();
         let v: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => {
@@ -58,6 +83,7 @@ fn main() -> io::Result<()> {
             }
         };
         let state = parse_state(&v);
+        let parse_ms = elapsed_ms(parse_t0);
         // REQUIRED to make sure we set 4p mode correctly before any apollo code runs
         let alive = aphrodite::sim::alive_players(&state);
         aphrodite::apollo::constants::set_mode_for_alive(alive);
@@ -103,36 +129,43 @@ fn main() -> io::Result<()> {
         if prof_enabled {
             profiling::reset();
         }
-        let __turn_t0 = std::time::Instant::now();
-        // `remainingOverageTime` is reported in SECONDS by the engine. When it
-        // is nearly exhausted, shrink the base search cap to leave margin for
-        // wrapper/redirect overhead.
+        // `remainingOverageTime` is reported in SECONDS by the engine. The
+        // caller may pass an explicit hard budget; otherwise the daemon derives
+        // one from the base budget plus the normal per-turn overage cap.
         let remaining_overage_s = v["remainingOverageTime"].as_f64().unwrap_or(0.0);
-        // Optional per-turn budget override (the chaos wrapper sends one each
-        // turn: its turn target minus however long its IL pass just took).
-        // Absent in aphrodite's own payloads — the env budget then applies.
-        let turn_budget_ms = v
-            .get("budget_ms")
+        let return_timing = v
+            .get("return_timing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // Optional per-turn budget override. `base_budget_ms` is the preferred
+        // field; `budget_ms` remains a simple alias for older wrappers.
+        let base_budget_raw_ms = v
+            .get("base_budget_ms")
+            .or_else(|| v.get("budget_ms"))
             .and_then(Value::as_u64)
             .unwrap_or(budget_ms);
-        let turns_left = (500 - state.step).max(0) as f64;
-        let low_overage_threshold_s = 1.5 + 0.015 * turns_left;
-        let effective_budget_ms = if remaining_overage_s <= low_overage_threshold_s {
-            turn_budget_ms.min(900)
+        let effective_base_budget_ms = base_budget_raw_ms;
+        let post_search_margin_ms = v
+            .get("post_search_margin_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_POST_SEARCH_MARGIN_MS);
+        let default_hard_budget_ms = if use_overage {
+            effective_base_budget_ms.saturating_add(DEFAULT_OVERAGE_HARD_CAP_MS)
         } else {
-            turn_budget_ms
+            effective_base_budget_ms
         };
-        if effective_budget_ms < turn_budget_ms {
-            eprintln!(
-                "[aphrodite-panic] step={} player={} remaining_overage={:.3}s threshold={:.3}s budget={}ms->{}ms",
-                state.step,
-                state.player,
-                remaining_overage_s,
-                low_overage_threshold_s,
-                turn_budget_ms,
-                effective_budget_ms
-            );
-        }
+        let hard_budget_ms = v
+            .get("hard_budget_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(default_hard_budget_ms)
+            .max(effective_base_budget_ms);
+        let hard_deadline = rust_turn_t0 + Duration::from_millis(hard_budget_ms);
+        let search_hard_deadline =
+            checked_deadline_minus(hard_deadline, post_search_margin_ms, rust_turn_t0);
+        let base_deadline = min_instant(
+            rust_turn_t0 + Duration::from_millis(effective_base_budget_ms),
+            search_hard_deadline,
+        );
         // Convert to ms for the planner. 0.0 when overage use is disabled.
         let overage_ms = if use_overage {
             remaining_overage_s * 1000.0
@@ -170,11 +203,12 @@ fn main() -> io::Result<()> {
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_i64).collect())
             .unwrap_or_default();
-        let actions = duct::best_move(
+        let search = duct::best_move(
             &state,
             state.player,
-            effective_budget_ms,
-            overage_ms,
+            effective_base_budget_ms,
+            base_deadline,
+            search_hard_deadline,
             &il_candidates,
             &il_candidate_probs,
             &il_candidate_indices,
@@ -182,10 +216,13 @@ fn main() -> io::Result<()> {
         // Final no-loss reroute pass on the chosen plan — runs after the planner
         // has fully committed (apollo's `redirect_moves` tail, ported via the
         // bridge since `Action` tuples drop the target the pass needs).
-        let actions = aphrodite::apollo_bridge::redirect_actions(&state, state.player, actions);
+        let redirect_t0 = Instant::now();
+        let actions =
+            aphrodite::apollo_bridge::redirect_actions(&state, state.player, search.actions);
+        let redirect_ms = elapsed_ms(redirect_t0);
         if prof_enabled {
             profiling::TURN_TOTAL_NS.fetch_add(
-                __turn_t0.elapsed().as_nanos() as u64,
+                rust_turn_t0.elapsed().as_nanos() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
             profiling::dump(state.step, state.player);
@@ -228,7 +265,26 @@ fn main() -> io::Result<()> {
             .into_iter()
             .map(|(fid, ang, ships)| json!([fid, ang, ships]))
             .collect();
-        writeln!(out, "{}", Value::Array(arr))?;
+        if return_timing {
+            let timing = json!({
+                "rust_total_ms": elapsed_ms(rust_turn_t0),
+                "parse_ms": parse_ms,
+                "pre_search_ms": search.timing.pre_search_ms,
+                "search_ms": search.timing.search_ms,
+                "overage_search_ms": search.timing.overage_search_ms,
+                "redirect_ms": redirect_ms,
+                "iters": search.timing.iters,
+                "overage_ms": search.timing.overage_used_ms,
+                "root_visits": search.timing.root_visits,
+                "base_budget_ms": effective_base_budget_ms,
+                "hard_budget_ms": hard_budget_ms,
+                "post_search_margin_ms": post_search_margin_ms,
+                "remaining_overage_ms": overage_ms,
+            });
+            writeln!(out, "{}", json!({"moves": arr, "timing": timing}))?;
+        } else {
+            writeln!(out, "{}", Value::Array(arr))?;
+        }
         out.flush()?;
     }
     Ok(())

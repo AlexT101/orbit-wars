@@ -15,6 +15,7 @@
 use aphrodite::{duct, parse_state};
 use serde_json::Value;
 use std::io::{self, BufRead};
+use std::time::{Duration, Instant};
 
 fn main() -> io::Result<()> {
     let budget: u64 = std::env::var("APHRODITE_PROBE_BUDGET_MS")
@@ -37,7 +38,18 @@ fn main() -> io::Result<()> {
             Err(_) => continue,
         };
         let state = parse_state(&v);
-        let _ = duct::best_move(&state, state.player, budget, 0.0, &[], &[], &[]);
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(budget);
+        let _ = duct::best_move(
+            &state,
+            state.player,
+            budget,
+            deadline,
+            deadline,
+            &[],
+            &[],
+            &[],
+        );
         n += 1;
         if n % 25 == 0 {
             eprintln!("  ran {n} searches",);

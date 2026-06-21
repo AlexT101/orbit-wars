@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const EXPLORATION: f64 = 0.3;
 // A node is terminal once no further agent decision will be processed. The
@@ -44,31 +44,60 @@ const APOLLO_ONLY_FIRST_TURNS: i64 = 0;
 const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
 
 // ── overage-time budgeting ────────────────────────────────────────────────
-// When enabled (a nonzero `overage_remaining_ms` is passed into `best_move`, DUCT may
-// keep searching past the per-turn base budget by dipping into the engine's
-// shared overage pool, but ONLY on turns where extra computation can plausibly
-// change the chosen move:
+// The caller owns wall-clock safety and passes both a base deadline and a hard
+// deadline. DUCT may keep searching past the base deadline, but ONLY on turns
+// where extra computation can plausibly change the chosen move:
 //   * the position is still CONTESTED (no player dominates), and
 //   * the root decision is still CLOSE (top-two candidate values nearly tied).
-// Spend is bounded three ways: a per-turn hard cap, a safety reserve that must
-// remain in the pool, and small chunks so the decision gap is re-checked
-// between them (we stop early once one move clearly separates). All in ms.
+// Extra search is granted in chunks so the decision gap is re-checked between
+// them; search stops early once one move clearly separates. All in ms.
 
-/// Hard cap on overage spent beyond the base budget on any single turn.
-const OVERAGE_PER_TURN_CAP_MS: u64 = 2000;
-/// Safety reserve to keep untouched in the engine's overage pool, computed as
-/// a base amount plus a per-turn multiplier
-const OVERAGE_SAFETY_BASE_MS: f64 = 2000.0;
-const OVERAGE_SAFETY_PER_TURN_MS: f64 = 50.0;
 /// Grant overage in chunks this size, re-checking the decision gap between each.
 const OVERAGE_CHUNK_MS: u64 = 200;
 /// The root decision counts as "close" (worth more search) while the gap
 /// between the best and second-best candidate average values is below this.
 /// Values are clamped predictions in [-1, 1].
 const OVERAGE_CLOSE_GAP: f64 = 0.05;
-/// The position counts as "decided" (not worth extra search) once any single
-/// player controls at least this share of total ship strength.
-const OVERAGE_DECIDED_SHARE: f64 = 0.70;
+/// Extra search only treats material dominance as "decided" after this step.
+/// Earlier positions can be volatile because neutral planets are excluded from
+/// `max_player_ship_share`.
+const OVERAGE_DECIDED_GATE_STEP: i64 = 80;
+/// Two-player positions need a larger material edge before we skip extra search.
+const OVERAGE_DECIDED_SHARE_2P: f64 = 0.80;
+/// In 4p, a single player at 75% of owned+fleet ships is already dominant.
+const OVERAGE_DECIDED_SHARE_4P: f64 = 0.75;
+
+#[derive(Clone, Debug, Default)]
+pub struct SearchTiming {
+    pub pre_search_ms: u64,
+    pub search_ms: u64,
+    pub overage_search_ms: u64,
+    pub iters: u32,
+    pub overage_used_ms: u64,
+    pub root_visits: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SearchResult {
+    pub actions: Vec<Action>,
+    pub timing: SearchTiming,
+}
+
+fn elapsed_ms(t0: Instant) -> u64 {
+    t0.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn before(deadline: Instant) -> bool {
+    Instant::now() < deadline
+}
+
+fn min_instant(a: Instant, b: Instant) -> Instant {
+    if a <= b {
+        a
+    } else {
+        b
+    }
+}
 
 fn joint_4p_root_opponents_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
@@ -1177,6 +1206,18 @@ fn max_player_ship_share(state: &GameState) -> f64 {
     by.values().copied().max().unwrap_or(0) as f64 / total as f64
 }
 
+fn extra_search_position_contested(state: &GameState) -> bool {
+    if state.step < OVERAGE_DECIDED_GATE_STEP {
+        return true;
+    }
+    let threshold = if alive_players(state) <= 2 {
+        OVERAGE_DECIDED_SHARE_2P
+    } else {
+        OVERAGE_DECIDED_SHARE_4P
+    };
+    max_player_ship_share(state) < threshold
+}
+
 /// Gap between the best and second-best candidate average values at the root,
 /// over candidates that have been visited. Returns +inf when fewer than two
 /// candidates have stats (treated as "not close" so we never extend on a
@@ -1282,18 +1323,18 @@ fn maybe_dump_candidate_decision(
     });
 }
 
-/// `overage_remaining_ms` is the engine's `remainingOverageTime` (seconds,
-/// converted to ms by the caller) for THIS turn, or 0.0 when overage use is
 /// disabled (dev) — in which case the extension below is skipped entirely.
 pub fn best_move(
     state: &GameState,
     me: i32,
-    budget_ms: u64,
-    overage_remaining_ms: f64,
+    base_budget_ms: u64,
+    base_deadline: Instant,
+    hard_deadline: Instant,
     il_candidates: &[Action],
     il_candidate_probs: &[f64],
     il_candidate_indices: &[i64],
-) -> Vec<Action> {
+) -> SearchResult {
+    let turn_t0 = Instant::now();
     // REQUIRED to make sure we set 4p mode correctly before any apollo code runs
     crate::apollo::constants::set_mode_for_alive(alive_players(state));
     // Build/refresh the persistent shared apollo cache before any candidate
@@ -1355,9 +1396,21 @@ pub fn best_move(
             );
         }
         if root.my_candidates.is_empty() {
-            return Vec::new();
+            return SearchResult {
+                actions: Vec::new(),
+                timing: SearchTiming {
+                    pre_search_ms: elapsed_ms(turn_t0),
+                    ..SearchTiming::default()
+                },
+            };
         }
-        return root.my_candidates[0].clone();
+        return SearchResult {
+            actions: root.my_candidates[0].clone(),
+            timing: SearchTiming {
+                pre_search_ms: elapsed_ms(turn_t0),
+                ..SearchTiming::default()
+            },
+        };
     }
 
     let mut il_first_idx = 0usize;
@@ -1390,7 +1443,9 @@ pub fn best_move(
     SEARCH_STEP.with(|c| c.set(state.step));
     SEARCH_SEQ.with(|c| c.set(c.get() + 1));
     LEAVES_THIS_SEARCH.with(|c| c.set(0));
-    let deadline = Instant::now() + std::time::Duration::from_millis(budget_ms);
+    let pre_search_ms = elapsed_ms(turn_t0);
+    let search_t0 = Instant::now();
+    let base_loop_deadline = min_instant(base_deadline, hard_deadline);
     let mut iters = 0u32;
     let il_forced_iters = if il_added > 0 {
         run_forced_root_visits(
@@ -1398,7 +1453,7 @@ pub fn best_move(
             me,
             il_first_idx,
             il_added,
-            deadline,
+            base_loop_deadline,
             &mut iters,
             100_000,
         )
@@ -1411,59 +1466,51 @@ pub fn best_move(
             state.step, me, il_forced_iters, IL_FORCED_VISITS
         );
     }
-    while Instant::now() < deadline {
+    while before(base_loop_deadline) {
         select_and_expand(&mut root, me, true);
         iters += 1;
-        if iters > 100_000 {
-            break;
-        }
     }
+    let base_search_ms = elapsed_ms(search_t0);
 
     // ── overage extension ────────────────────────────────────────────────
-    // Past the base budget, optionally keep searching by dipping into the
-    // engine's overage pool — but only on a contested position with a still-
-    // close root decision, bounded by a per-turn cap and a pool safety reserve.
-    // Granted in chunks so the gap is re-checked (and search stops early once a
-    // move separates). `overage_remaining_ms == 0.0` (disabled) skips all of it.
+    // Past the base budget, optionally keep searching until the caller's hard
+    // deadline, but only on a contested position with a still-close root
+    // decision. Chunks let us re-check the gap and stop once a move separates.
     let mut overage_used_ms: u64 = 0;
-    let remaining_turns = (TERMINAL_STEP - state.step).max(0) as f64;
-    let safety_buffer_ms = OVERAGE_SAFETY_BASE_MS + OVERAGE_SAFETY_PER_TURN_MS * remaining_turns;
-    let mut overage_turn_cap_ms: u64 = 0;
     let mut overage_initial_gap = f64::INFINITY;
     let mut overage_final_gap = f64::INFINITY;
-    if overage_remaining_ms > safety_buffer_ms {
-        let available = overage_remaining_ms - safety_buffer_ms;
-        let turn_cap = (available.floor() as u64).min(OVERAGE_PER_TURN_CAP_MS);
-        overage_turn_cap_ms = turn_cap;
-        let contested = max_player_ship_share(&root.state) < OVERAGE_DECIDED_SHARE;
-        if turn_cap >= OVERAGE_CHUNK_MS && contested {
-            overage_initial_gap = root_top2_gap(&root);
-            while overage_used_ms + OVERAGE_CHUNK_MS <= turn_cap
-                && root_top2_gap(&root) < OVERAGE_CLOSE_GAP
-            {
-                let ext_deadline =
-                    Instant::now() + std::time::Duration::from_millis(OVERAGE_CHUNK_MS);
-                while Instant::now() < ext_deadline {
-                    select_and_expand(&mut root, me, true);
-                    iters += 1;
-                    if iters > 1_000_000 {
-                        break;
-                    }
-                }
-                overage_used_ms += OVERAGE_CHUNK_MS;
+    let overage_t0 = Instant::now();
+    let contested = extra_search_position_contested(&root.state);
+    if contested && before(hard_deadline) {
+        overage_initial_gap = root_top2_gap(&root);
+        while root_top2_gap(&root) < OVERAGE_CLOSE_GAP && before(hard_deadline) {
+            let chunk_t0 = Instant::now();
+            let ext_deadline = min_instant(
+                chunk_t0 + Duration::from_millis(OVERAGE_CHUNK_MS),
+                hard_deadline,
+            );
+            while before(ext_deadline) {
+                select_and_expand(&mut root, me, true);
+                iters += 1;
             }
-            overage_final_gap = root_top2_gap(&root);
+            let chunk_ms = elapsed_ms(chunk_t0);
+            if chunk_ms == 0 {
+                break;
+            }
+            overage_used_ms += chunk_ms.min(OVERAGE_CHUNK_MS);
+            if chunk_ms < OVERAGE_CHUNK_MS {
+                break;
+            }
         }
+        overage_final_gap = root_top2_gap(&root);
     }
+    let overage_search_ms = elapsed_ms(overage_t0);
     if overage_used_ms > 0 {
         eprintln!(
-            "[duck-overage] step={} player={} spent={}ms remaining={:.0}ms safety={:.0}ms cap={}ms gap={:.3}->{:.3} iters={} root_visits={}",
+            "[duck-overage] step={} player={} spent={}ms gap={:.3}->{:.3} iters={} root_visits={}",
             state.step,
             me,
             overage_used_ms,
-            overage_remaining_ms,
-            safety_buffer_ms,
-            overage_turn_cap_ms,
             overage_initial_gap,
             overage_final_gap,
             iters,
@@ -1472,10 +1519,7 @@ pub fn best_move(
     }
 
     if prof_enabled() {
-        crate::profiling::ITERATIONS.fetch_add(
-            iters as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        crate::profiling::ITERATIONS.fetch_add(iters as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Flush the leaf dump for this search and append a tree-shape row (both
@@ -1545,7 +1589,7 @@ pub fn best_move(
         let eval_ns = PROF_EVAL_NS.with(|c| c.get());
         let eval_n = PROF_EVAL_N.with(|c| c.get());
         let eval_ms = eval_ns as f64 / 1e6;
-        let budget = budget_ms as f64;
+        let budget = base_budget_ms as f64;
         let pct = |x: f64| {
             if budget > 0.0 {
                 x / budget * 100.0
@@ -1562,13 +1606,23 @@ pub fn best_move(
         };
         eprintln!(
             "[prof] step={} iters={} budget={}ms | leaf_eval={:.1}ms ({:.0}%, n={}, {:.2}µs/call); rest=tree+candidates",
-            state.step, iters, budget_ms,
+            state.step, iters, base_budget_ms,
             eval_ms, pct(eval_ms), eval_n, per(eval_ns, eval_n),
         );
     }
 
     if root.my_candidates.is_empty() {
-        return Vec::new();
+        return SearchResult {
+            actions: Vec::new(),
+            timing: SearchTiming {
+                pre_search_ms,
+                search_ms: base_search_ms,
+                overage_search_ms,
+                iters,
+                overage_used_ms,
+                root_visits: root.visits,
+            },
+        };
     }
     // Pick by raw max in my marginal stats.
     let mut best_i = 0usize;
@@ -1635,6 +1689,7 @@ pub fn best_move(
         il_candidate_indices,
     );
     let chosen = root.my_candidates[best_i].clone();
+    let root_visits = root.visits;
 
     // Stash root for next turn's reuse (so we can match observed state to
     // a joint child).
@@ -1644,7 +1699,17 @@ pub fn best_move(
             *cell.borrow_mut() = Some((next_step, Box::new(root)));
         });
     }
-    chosen
+    SearchResult {
+        actions: chosen,
+        timing: SearchTiming {
+            pre_search_ms,
+            search_ms: base_search_ms,
+            overage_search_ms,
+            iters,
+            overage_used_ms,
+            root_visits,
+        },
+    }
 }
 
 #[cfg(test)]

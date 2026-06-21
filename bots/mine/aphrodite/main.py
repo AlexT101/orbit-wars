@@ -12,8 +12,8 @@ import sys
 import threading
 
 # Update these contants if training new weights
-_WEIGHTS_2P_NAME = "xgb_2p_6_08_6_14.json"
-_WEIGHTS_4P_NAME = "xgb_4p_6_08_6_14.json"
+_WEIGHTS_2P_NAME = "xgb_2p_qsweep_r3_top20_floor050_dropdec.json"
+_WEIGHTS_4P_NAME = "xgb_4p_qsweep_top20_floor050_dropdec.json"
 
 # Local testing uses lower limits for speed
 _DEV_BUDGET_MS = "700"
@@ -283,6 +283,9 @@ def agent(obs, config=None):
         if not r:
             return []
         try:
-            return json.loads(r.decode())
+            response = json.loads(r.decode())
+            if isinstance(response, dict) and "moves" in response:
+                return response["moves"]
+            return response
         except json.JSONDecodeError:
             return []
