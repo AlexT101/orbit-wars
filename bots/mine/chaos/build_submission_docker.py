@@ -1,32 +1,9 @@
-"""Build a Kaggle-ready submission bundle for chaos.
+"""Build a flat Kaggle submission bundle for chaos.
 
-Bundle layout (flat, everything at the archive root):
-
-  main.py                    chaos wrapper (verbatim — detects the flat layout)
-  aphrodite_wrapper.py       copy of bots/mine/aphrodite/main.py (subprocess
-                             management; its _locate finds the binary/weights
-                             next to itself)
-  aphrodite                  Linux glibc binary built inside Kaggle's own image
-  xgb_*.json                 value-net weights (names from aphrodite's main.py)
-  config*.json               apollo runtime configs read by the aphrodite binary
-  osteo_il_2p_latest.pt      2p IL checkpoint (2-player states)
-  osteo_il_4p_latest.pt      4p IL checkpoint (3- and 4-player states)
-  features.py, model.py, constants.py
-                             IL support (from experimental_arch/train_transformer)
-  orbit_wars_model.abi3.so   Rust feature encoder (Linux .so built in Docker)
-  orbit_wars_engine.abi3.so  Rust engine (for chaos's schema validation + warmup)
-
-torch and gymnasium are NOT bundled — Kaggle's python image ships them.
-
-Build steps:
-  1. docker-build env_model + env_engine into Linux Python extension modules.
-  2. docker-build the aphrodite binary
-     (reuses aphrodite/target-docker; pass --skip-docker to reuse an existing
-     binary and existing extension modules).
-  3. Stage everything flat in a temp dir.
-  4. SMOKE TEST: import the staged main.py and play one real turn through the
-     staged binary + staged .so's. The build fails loudly if anything is off.
-  5. tar.gz it.
+The bundle contains the Chaos wrapper, Aphrodite wrapper/binary, value-net
+weights, Apollo configs, IL support modules, runtime IL checkpoints, and native
+Orbit Wars extension modules. Torch and gymnasium are expected from the Kaggle
+Python image.
 
 Usage:
     python bots/mine/chaos/build_submission_docker.py [--skip-docker]
@@ -69,12 +46,7 @@ CONFIGS = [
     APHRODITE / "config_4p.json",
 ]
 
-# Build the binary against glibc 2.31 (bullseye): older than any plausible
-# Kaggle runtime glibc, and binaries built against an older glibc run on newer
-# ones. aphrodite's script builds inside the full Kaggle image instead, but
-# that image is a tens-of-GB pull; rust:slim-bullseye is ~250MB and gives the
-# same compatibility guarantee. (musl cross-builds are NOT safe — they died
-# silently on the Kaggle worker; see aphrodite/build_submission.py.)
+# Build the Rust daemon in a Linux container for submission compatibility.
 BUILD_IMAGE = "rust:1-slim-bullseye"
 KAGGLE_IMAGE = "gcr.io/kaggle-images/python:latest"
 BIN_OUT = APHRODITE / "target-docker" / "release" / "aphrodite"
@@ -230,17 +202,12 @@ SMOKE_SCRIPT = r"""
 import json, sys, time
 sys.path.insert(0, ".")
 t0 = time.perf_counter()
-import main  # eager init: torch + schema validation + warmup; checkpoint loads lazily
+import main
 print(f"[smoke] import+init: {(time.perf_counter()-t0)*1000:.0f}ms", file=sys.stderr)
 assert main._BUNDLE, "staged main.py did not detect the flat bundle layout"
 from orbit_wars_engine import OrbitWarsEngine
 eng = OrbitWarsEngine(num_players=2)
 state = eng.reset(seed=123)
-# Turn 0 includes the one-time binary spawn + XGB weight parse; it may exceed
-# 1s and land on Kaggle's 60s overage pool (by design — same as aphrodite).
-# Steady-state turns should stay close to the 1s act timeout. Allow a little
-# smoke-test jitter because prod Chaos intentionally targets the full turn and
-# Kaggle has an overage pool for occasional spills.
 for turn in range(3):
     obs = state["observations"][0]
     obs.setdefault("player", 0)

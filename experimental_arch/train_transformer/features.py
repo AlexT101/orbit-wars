@@ -236,6 +236,19 @@ def encode_obs(obs: dict[str, Any], player: int | None = None) -> EncodedObs:
     return encoded_from_feat(feat, obs=obs)
 
 
+def encode_obs_and_feat(
+    obs: dict[str, Any], player: int | None = None
+) -> tuple[EncodedObs, dict[str, Any]]:
+    """Encode once, returning both the model-ready `EncodedObs` and the raw
+    feature dict. Lets a caller run the policy forward and then decode several
+    action indices (via `decode_index_from_feat`) off a single encode, instead
+    of paying the Rust trajectory build once per decoded move."""
+    if player is None:
+        player = int(obs.get("player", 0))
+    feat = _rust_encode_obs(obs, player)
+    return encoded_from_feat(feat, obs=obs), feat
+
+
 def flat_action_mask(feat: dict[str, Any]) -> np.ndarray:
     return policy_action_mask(feat).astype(bool).ravel()
 
@@ -260,8 +273,14 @@ def discrete_action_mask(feat: dict[str, Any]) -> np.ndarray:
     return out
 
 
-def decode_move(obs: dict[str, Any], index: int) -> list[list[float]]:
-    feat = _rust_encode_obs(obs, int(obs.get("player", 0)))
+def decode_index_from_feat(feat: dict[str, Any], index: int) -> list[list[float]]:
+    """Decode a flat policy index into a launch using an already-computed raw
+    feature dict (from `orbit_wars_model.encode_obs`).
+
+    Pure — does no encoding. A caller that has already encoded the observation
+    (e.g. for the policy forward) can decode many indices without re-running the
+    costly Rust trajectory build once per index. `decode_move` is the
+    encode-then-decode convenience wrapper."""
     decoded = decode_action_index(index)
     if decoded is None:
         return []
@@ -277,6 +296,11 @@ def decode_move(obs: dict[str, Any], index: int) -> list[list[float]]:
     if source_id < 0 or ships <= 0:
         return []
     return [[source_id, float(feat["angles"][raw_idx]), ships]]
+
+
+def decode_move(obs: dict[str, Any], index: int) -> list[list[float]]:
+    feat = _rust_encode_obs(obs, int(obs.get("player", 0)))
+    return decode_index_from_feat(feat, index)
 
 
 def decode_action(feat: dict[str, Any], action: np.ndarray) -> list[list[float]]:

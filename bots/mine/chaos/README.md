@@ -1,109 +1,66 @@
 # chaos
 
-Aphrodite's DUCT search + XGB value net, with the osteo IL transformer policy
-injected as extra root candidates. The idea: the IL policy (LB ~1250, close to
-aphrodite's ~1300) proposes moves apollo's heuristics can never generate, while
-the search and value net veto its tactical blunders (the failure mode that
-makes search-free osteo-il-latest exploitable).
+Chaos wraps Aphrodite and adds imitation-learning policy suggestions to the
+root candidate set. The shared Aphrodite binary accepts optional IL fields, so
+Aphrodite itself can keep using the same binary without sending IL data.
 
-## How it works
+## Runtime
 
-Per turn, `main.py`:
+Per turn, `main.py` may:
 
-1. Runs the osteo IL transformer once (~70ms, CPU) and takes its top-k actions
-   above a probability floor (deduped, noop dropped).
-2. Sends the normal aphrodite payload to the **aphrodite binary** with one
-   extra field: `"il_candidates": [[from_id, angle, ships], ...]`.
+1. Run the osteo IL transformer and decode its best legal launch actions.
+2. Add `il_candidates`, `il_candidate_probs`, and `il_candidate_logits` to the
+   payload sent to the Aphrodite daemon.
+3. Send a per-turn `budget_ms` after accounting for wrapper-side IL time.
 
-On the Rust side (`bots/mine/aphrodite/src/duct.rs::inject_root_candidates`),
-the IL actions are appended to the root's candidate set after deduping against
-apollo's plans. Priors are rebuilt as a virtual interleave (apollo#0, il#0,
-apollo#1, il#1, …) with sqrt(0.5) decay per slot, which preserves apollo's
-existing 0.5-per-rank prior ratios exactly. Appending (rather than reordering)
-keeps reused-subtree `children` indices valid.
+Rust appends non-duplicate IL actions to the root candidate set in
+`bots/mine/aphrodite/src/duct.rs::inject_root_candidates`. The search and value
+net then choose among Apollo and IL-rooted plans.
 
-The field is optional: aphrodite's own wrapper never sends it, so the shared
-binary behaves identically for aphrodite.
+Current runtime IL is enabled only for live two-player states. Three- and
+four-player states pass through Aphrodite without IL injection. A four-player
+game that later becomes a 1v1 uses the two-player IL path.
 
-Scope (v1): root node only (per-node IL is ~1000x too slow), my side only.
-IL injection runs in every live game: the 2p checkpoint feeds 2-player states,
-the 4p checkpoint feeds 3- and 4-player states, and a 4p game that decays to two
-survivors switches back to the 2p checkpoint on that turn. Each checkpoint loads
-lazily the first turn its player-count is seen. (An earlier 4p Isaiah policy
-regressed chaos and was removed; the current 4p checkpoint is the osteo
-last-third factored policy — retest its ladder effect before trusting it.)
+The wrapper loads IL checkpoints lazily. Submission builds stage stripped
+runtime checkpoints containing only model weights and config.
 
-**Failures are loud:** a missing checkpoint, stale `orbit_wars_model` schema,
-IL runtime error, or dead binary raises immediately. If chaos is playing, the
-IL injection is provably active.
+## Build
 
-**Time budgeting** is dynamic per turn: the wrapper times its IL pass and
-sends the binary `budget_ms = target - il_elapsed - 100` (floor 250ms) in the
-payload, overriding the binary's env budget. The source default is a
-conservative 600ms target for dev runs; `build_submission.py` flips prod limits
-on, giving Chaos a 900ms target. Aphrodite's Rust panic clamp also caps the
-effective search budget at 900ms when the remaining overage pool is low.
+Use the Docker builder for Kaggle-compatible native artifacts:
 
-## Requirements
+```bash
+python bots/mine/chaos/build_submission_docker.py
+```
 
-- The aphrodite binary built from `bots/mine/aphrodite` (auto-built on first
-  run if cargo is available).
-- A fresh `orbit_wars_model` install (tokens `(4,44,15)`, pair outcomes
-  `(44,44,3,4)`): `cd experimental_arch/env_model && maturin build --release`
-  then pip install the wheel.
-- The IL checkpoint at
-  `experimental_arch/imitation_learning/checkpoints/osteo_bc_transformer/latest.pt`.
+For local development, the wrapper reuses `bots/mine/aphrodite/main.py` for
+daemon startup, binary location, and value-net selection.
 
-## Env knobs
+## Env Knobs
 
-| Var | Default | Meaning |
+Values live in `main.py`; this table describes behavior only.
+
+| Var | Meaning |
+|---|---|
+| `CHAOS_IL_K` | max IL candidates injected per turn; `0` disables the IL forward |
+| `CHAOS_IL_MIN_PROB` | drop decoded IL suggestions below this policy probability |
+| `CHAOS_IL_SKIP_TURNS` | skip IL injection before this step |
+| `CHAOS_IL_BUSY_FAIL_MS` | fail if a timed-out IL worker remains busy too long |
+| `CHAOS_TORCH_THREADS` | torch / OpenMP intra-op threads |
+| `CHAOS_TURN_TARGET_MS` | total per-turn wall target for IL plus search |
+| `CHAOS_IL_CHECKPOINT` | override the two-player IL checkpoint path |
+| `CHAOS_IL_CHECKPOINT_4P` | override the four-player IL checkpoint path |
+
+`OW_DEBUG=1` prints wrapper timing and candidate details to stderr. Aphrodite's
+DUCT debug lines come from the Rust daemon.
+
+## Opening Gates
+
+There are two separate early-turn gates:
+
+| Knob | Layer | Effect |
 |---|---|---|
-| `CHAOS_IL_K` | 4 | max IL candidates injected per turn; `0` disables the IL forward entirely |
-| `CHAOS_IL_MIN_PROB` | 0.02 | drop IL suggestions below this policy prob |
-| `CHAOS_IL_SKIP_TURNS` | 8 | skip IL injection on the first N turns, matching the tested Apollo-only opening |
-| `CHAOS_IL_BUSY_FAIL_MS` | 5000 | fail loudly if a timed-out IL worker is still busy after this many ms |
-| `CHAOS_TORCH_THREADS` | 2 | torch / OpenMP intra-op threads |
-| `CHAOS_TURN_TARGET_MS` | 600 dev / 900 submission | total per-turn wall target (IL + search) |
-| `CHAOS_IL_CHECKPOINT` | repo 2p checkpoint | override the 2p IL checkpoint path |
-| `CHAOS_IL_CHECKPOINT_4P` | repo 4p checkpoint | override the 4p IL checkpoint path |
+| `CHAOS_IL_SKIP_TURNS` | Chaos wrapper env var | skips the IL forward and root injection |
+| `APOLLO_ONLY_FIRST_TURNS` | Aphrodite Rust constant | skips DUCT and leaf eval, then plays Apollo's first candidate |
 
-`OW_DEBUG=1` prints per-turn `[chaos]` (wrapper: IL mode, ms + candidates) and
-`[chaos-il]` (Rust: offered/added/root_K) lines to stderr.
-
-## Opening shortcuts (why IL / eval might look "disabled")
-
-Two independent knobs deliberately bypass IL and/or DUCT on the first few turns.
-If injection or search looks like it isn't running early in a game, check both
-before assuming a bug — they live in **different layers**:
-
-| Knob | Layer | Default | Effect |
-|---|---|---|---|
-| `CHAOS_IL_SKIP_TURNS` | this wrapper (env var, `main.py`) | 8 | skip the IL forward + injection for steps `< N`, matching the tested Apollo-only opening. `0` = inject from step 0. |
-| `APOLLO_ONLY_FIRST_TURNS` | aphrodite binary (`const` in `src/duct.rs`) | 8 | skip DUCT search + leaf eval for steps `< N` and play apollo's top candidate directly. **Compile-time constant — needs a rebuild, not an env var.** `0` = search from step 0. |
-
-They are **not** coupled in code, but the checked-in defaults are both `8` from
-testing: the opening plays pure Apollo and avoids spending IL work on turns whose
-candidates the binary would ignore. If you change one, consider whether the other
-should change too.
-
-With `OW_DEBUG=1`, an apollo-only turn prints `[duck-apollo-only]` (instead of
-`[duck]`) and an IL-skipped turn shows `il=2p:skip` in the `[chaos]` line.
-
-## 4p IL training
-
-The policy IL tooling lives under `experimental_arch/imitation_learning`.
-`build_dataset_from_zips.py` can stream `ladder_replays/*.zip` into the chunked
-manifest format consumed by `train.py`; see that directory's README for the
-full 4p workflow. The bundled 4p checkpoint (`osteo_il_4p_latest.pt`) is a frozen
-copy of `train.py`'s `best.pt` from the last-third factored run; refresh it by
-re-copying when a better checkpoint is trained, then rebuild the submission.
-Note: an earlier 4p IL policy regressed chaos, so confirm the current one helps
-on the ladder before trusting it.
-
-## Future work
-
-- Kaggle `build_submission.py` (bundle: aphrodite binary + torch + checkpoint +
-  `orbit_wars_model` .so — crib from triplepoint1 + aphrodite).
-- IL priors from actual policy probabilities instead of rank interleave.
-- Opponent-side IL candidates (second inference per turn).
-- IL value head as a mixing term in leaf evaluation.
+They are not coupled. If either value changes, update only the source constant
+or env var value rather than copying the number into docs.

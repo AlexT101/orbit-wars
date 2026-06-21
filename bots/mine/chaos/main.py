@@ -1,46 +1,30 @@
-"""chaos — aphrodite's DUCT search seeded with the osteo IL policy's moves.
+"""chaos: Aphrodite's DUCT search seeded with osteo IL policy moves.
 
 Per turn:
-  1. Run the osteo IL transformer once (~70ms) and take its top-k actions.
+  1. Run the osteo IL transformer and decode top legal actions.
   2. Send the observation to the aphrodite binary with an extra
-     `il_candidates` field; the Rust side splices them into the root
-     candidate set (see `duct::inject_root_candidates`), where the search
-     and the XGB value net arbitrate between apollo's plans and the IL
-     policy's suggestions.
+     `il_candidates` field; the Rust side adds them to the root candidate set.
 
 The aphrodite engine and subprocess management are reused from
-bots/mine/aphrodite (same binary - the `il_candidates` field is optional and
-aphrodite's own wrapper never sends it).
+bots/mine/aphrodite. The `il_candidates` field is optional, and
+aphrodite's own wrapper never sends it.
 
-Time budgeting is dynamic per turn: Kaggle gives 1s/turn + a 60s overage pool
-on unknown hardware, so the wrapper measures its own IL pass each turn and
-sends the binary `budget_ms` = turn target minus elapsed. The target is a
-conservative 600ms in dev and 900ms in submission builds. The Rust side still
-clamps the effective budget to 900ms when the remaining overage pool is low.
+Time budgeting is dynamic per turn: the wrapper measures its own IL pass and
+sends the binary a `budget_ms` for the remaining search time.
 
-Failures are LOUD by design: a missing checkpoint, stale `orbit_wars_model`
-schema, or IL runtime error raises and kills the bot. No silent degradation -
-if chaos is running, the IL injection is running.
+Failures are loud: a missing checkpoint, stale `orbit_wars_model` schema, or IL
+runtime error raises immediately.
 
-IL injection runs in every live game: the 2p checkpoint feeds 2-player states,
-the 4p checkpoint feeds 3- and 4-player states (a 4p game that decays to two
-survivors switches to the 2p checkpoint automatically). The right checkpoint
-loads lazily on the first turn its player-count is seen. Startup is split so the
-costly, reusable part is paid once, with no checkpoint loaded: `import torch` +
-threadpool/kernel warmup + the orbit_wars_model schema check happen at module
-load (`_warm_torch`); the schema is player-count independent, so one warmup
-covers both checkpoints.
+Runtime IL is currently enabled for live two-player states. Three- and
+four-player states pass through Aphrodite without IL injection.
 
 Env knobs:
-  CHAOS_IL_K            max IL candidates injected per turn; 0 disables the IL
-                         forward entirely (default 4)
-  CHAOS_IL_MIN_PROB     drop IL suggestions below this policy prob (default 0.02)
-  CHAOS_IL_SKIP_TURNS   skip IL injection on the first N turns (default 8 =
-                         match the Apollo-only opening shortcut)
+  CHAOS_IL_K            max IL candidates injected per turn; 0 disables IL
+  CHAOS_IL_MIN_PROB     drop IL suggestions below this policy probability
+  CHAOS_IL_SKIP_TURNS   skip IL injection before this step
   CHAOS_IL_BUSY_FAIL_MS fail loudly if a timed-out IL worker is still busy after
-                         this many ms (default 5000)
-  CHAOS_TORCH_THREADS   torch / OpenMP intra-op threads (default 2; set before
-                         `import torch`)
+                         this many ms
+  CHAOS_TORCH_THREADS   torch / OpenMP intra-op threads
   CHAOS_TURN_TARGET_MS  total per-turn wall target override
   CHAOS_IL_CHECKPOINT   override the 2p IL checkpoint path
   CHAOS_IL_CHECKPOINT_4P override the 4p IL checkpoint path
@@ -84,9 +68,7 @@ def _repo_root() -> Path:
 
 
 HERE = _here()
-# Flat Kaggle bundle: everything (wrapper copy, IL support files, .so modules,
-# checkpoint, binary, weights) sits next to main.py. Dev: resolve through the
-# repo layout instead.
+# Flat bundle: runtime files sit next to main.py. Dev resolves through the repo.
 _BUNDLE = (HERE / "aphrodite_wrapper.py").is_file()
 if _BUNDLE:
     _APH_WRAPPER = HERE / "aphrodite_wrapper.py"
@@ -111,20 +93,13 @@ _spec.loader.exec_module(_aph)
 
 warnings.filterwarnings("ignore", message="enable_nested_tensor is True.*")
 
-# Set BEFORE `import torch` (which happens in _warm_torch / _ILPolicy, both run
-# after this). Kaggle ships a CUDA torch build; on a CPU-only sim node it still
-# enumerates the (absent) CUDA driver during import, which costs seconds — all
-# charged to turn 1. The IL forward is tiny, so an OpenMP pool sized to the full
-# vCPU count just slows `import torch` and then contends with the aphrodite
-# binary's DUCT search threads each turn. Both are setdefault, so an explicit
-# GPU/thread override from the environment still wins.
+# Set before importing torch. Environment overrides still win.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 _TORCH_THREADS = os.environ.get("CHAOS_TORCH_THREADS", "2")
 os.environ.setdefault("OMP_NUM_THREADS", _TORCH_THREADS)
 os.environ.setdefault("MKL_NUM_THREADS", _TORCH_THREADS)
 
-# Total per-turn wall target (IL pass + search). Submission builds flip
-# _USE_PROD_LIMITS to match aphrodite's production budget policy.
+# Total per-turn wall target for IL plus search.
 _DEV_TURN_TARGET_MS = 600
 _SUBMISSION_TURN_TARGET_MS = 850
 _USE_PROD_LIMITS = False
@@ -133,10 +108,11 @@ _MIN_SEARCH_MS = 250
 # Margin between (target - il_elapsed) and the budget we hand the binary,
 # covering JSON encode + IPC + the binary's own dispatch overhead.
 _DISPATCH_MARGIN_MS = 100
-# Architecture of the deployed 2p IL checkpoint. Only used to warm torch's
-# kernels/threadpool at startup with a throwaway model; the real architecture
-# and weights come from the checkpoint's own config at load time.
+# Warmup architecture fallback. `_warm_arch()` prefers checkpoint config.
 _WARM_MODEL = "entity_transformer_ngpt_action_features"
+_WARM_HIDDEN = 128
+_WARM_LAYERS = 3
+_WARM_HEADS = 4
 
 
 def _turn_target_ms() -> int:
@@ -153,9 +129,6 @@ def _il_min_prob() -> float:
 
 
 def _il_skip_turns() -> int:
-    # Skip IL injection on the first N turns. Default 8 intentionally matches
-    # APOLLO_ONLY_FIRST_TURNS in aphrodite's DUCT layer, so the tested opening
-    # plays pure Apollo instead of spending IL work on turns the binary ignores.
     return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "12")))
 
 
@@ -194,7 +167,7 @@ class _ILPolicy:
     def __init__(self, path: Path) -> None:
         if str(_IL_SYS_PATH) not in sys.path:
             sys.path.insert(0, str(_IL_SYS_PATH))
-        import torch  # already imported + warmed by _warm_torch() at module load
+        import torch
         from model import build_policy
 
         self._torch = torch
@@ -210,19 +183,17 @@ class _ILPolicy:
         )
         self.model.load_state_dict(checkpoint["model"])
         self.model.eval()
-        # No warmup forward and no schema check here: both are paid once in
-        # _warm_torch() at module load. With torch's kernels/threadpool already
-        # warm, the first top_actions() forward for this checkpoint is ~10ms even
-        # when this policy is built mid-game (a 4p board decaying to two players).
 
     def top_actions(self, obs: dict, k: int, min_prob: float) -> list[dict]:
         if k <= 0:
             return []
         torch = self._torch
-        from features import decode_move, encode_obs
+        from features import decode_index_from_feat, encode_obs_and_feat
         from model import tensorize
 
-        batch = tensorize(encode_obs(obs, player=int(obs.get("player", 0))))
+        # Reuse the raw feature dict to decode every candidate index below.
+        encoded, feat = encode_obs_and_feat(obs, player=int(obs.get("player", 0)))
+        batch = tensorize(encoded)
         with torch.inference_mode():
             logits, _value = self.model(**batch)
             probs = torch.softmax(logits[0], dim=-1)
@@ -233,7 +204,7 @@ class _ILPolicy:
         for idx, prob in zip(top.indices.tolist(), top.values.tolist()):
             if len(actions) >= k or prob < min_prob:
                 break
-            move = decode_move(obs, int(idx))
+            move = decode_index_from_feat(feat, int(idx))
             if not move:
                 continue  # noop or invalid under the live mask
             src, angle, ships = move[0]
@@ -256,8 +227,7 @@ _IL_4P: _ILPolicy | None = None
 
 
 def _il_2p() -> _ILPolicy:
-    """Construct the 2p IL policy on first use. Failures propagate — chaos must
-    never silently degrade to pure aphrodite."""
+    """Construct the 2p IL policy on first use."""
     global _IL_2P
     if _IL_2P is None:
         _IL_2P = _ILPolicy(_checkpoint_path_2p())
@@ -276,19 +246,31 @@ def _il_for(num_players: int) -> _ILPolicy:
     return _il_2p() if num_players == 2 else _il_4p()
 
 
+def _warm_arch() -> tuple[str, int, int, int]:
+    """Return the checkpoint architecture used to size the warmup model."""
+    import torch
+
+    try:
+        # weights_only=True + mmap reads just the config (no arbitrary pickle,
+        # no weight materialization); the lazy _ILPolicy load pays the real load.
+        ckpt = torch.load(
+            _checkpoint_path_2p(), map_location="cpu", weights_only=True, mmap=True
+        )
+        cfg = ckpt.get("config", {}) or {}
+        return (
+            str(cfg.get("model", _WARM_MODEL)),
+            int(cfg.get("hidden", _WARM_HIDDEN)),
+            int(cfg.get("transformer_layers", _WARM_LAYERS)),
+            int(cfg.get("transformer_heads", _WARM_HEADS)),
+        )
+    except Exception as exc:
+        if os.environ.get("OW_DEBUG"):
+            print(f"[chaos] warm-arch fell back to defaults: {exc}", file=sys.stderr)
+        return (_WARM_MODEL, _WARM_HIDDEN, _WARM_LAYERS, _WARM_HEADS)
+
+
 def _warm_torch() -> None:
-    """Pay the IL startup cost once, at module load.
-
-    This is the expensive, reusable part: `import torch`, the OpenMP/threadpool
-    spin-up, torch's kernel dispatch caches, and the live `orbit_wars_model`
-    schema check. Crucially it loads NO checkpoint — the 2p weights load lazily
-    on the first turn IL is needed (see `agent`), which in a native 4p game only
-    happens if/when it decays to two surviving players. The schema (token/pair
-    shapes) is player-count independent, so validating it here once is enough.
-
-    Failures are loud, exactly as before: a stale `orbit_wars_model` schema
-    raises here, before chaos ever plays a turn.
-    """
+    """Warm torch and validate the feature schema without loading checkpoints."""
     if str(_IL_SYS_PATH) not in sys.path:
         sys.path.insert(0, str(_IL_SYS_PATH))
     import torch
@@ -310,19 +292,16 @@ def _warm_torch() -> None:
             f"stale orbit_wars_model feature schema: tokens_shape={tokens_shape} "
             f"pair_outcome_features_shape={pair_shape}"
         )
-    # One throwaway forward (random weights, discarded) warms torch's kernels and
-    # threadpool on the exact tensor shapes the real per-turn forwards use, so a
-    # checkpoint loaded later — even mid-game — gets a ~10ms first forward.
-    warm = build_policy(_WARM_MODEL, hidden=128, transformer_layers=3, transformer_heads=4)
+    # Throwaway forward to initialize torch kernels/thread pools.
+    model_type, hidden, layers, heads = _warm_arch()
+    warm = build_policy(model_type, hidden=hidden, transformer_layers=layers, transformer_heads=heads)
     warm.eval()
     with torch.inference_mode():
         warm(**tensorize(encode_obs(sample, player=0)))
 
 
-# IL forwards run in a single background worker so a cold/slow turn can be
-# abandoned (its result discarded) without ever blocking the turn past the IL
-# deadline — apollo candidate-gen + DUCT run inside the binary regardless, so a
-# skipped injection only forfeits that turn's IL candidates, never the search.
+# IL forwards run in one worker. Timed-out results are discarded if they finish
+# after their turn.
 _IL_EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chaos-il")
 _IL_FUTURE = None  # in-flight task from a turn whose IL deadline expired
 _IL_FUTURE_STARTED_AT: float | None = None
@@ -337,13 +316,7 @@ def _il_candidates(obs: dict, num_players: int) -> list[dict]:
 
 
 def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None, str]:
-    """Run the IL forward under a wall-clock deadline; return (candidates, desc).
-
-    The deadline is whatever the turn target leaves after reserving the search
-    floor, so IL gets the slack but can never push the search below
-    `_MIN_SEARCH_MS`. On a cold turn (first inference, or the 4p->2p checkpoint
-    load) the worker keeps running in the background and populates the cache for
-    the next turn; we never reuse its result for a later, different obs."""
+    """Run the IL forward under a wall-clock deadline."""
     global _IL_FUTURE, _IL_FUTURE_STARTED_AT, _IL_FUTURE_STEP
     tag = "2p" if num_players == 2 else "4p"
     if _IL_FUTURE is not None:
@@ -366,7 +339,7 @@ def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None,
                     f"current_step={obs.get('step')} busy_ms={busy_ms:.0f} "
                     f"limit_ms={limit_ms}"
                 )
-            return None, f"{tag}:busy"  # prior forward still running
+            return None, f"{tag}:busy"
 
     deadline_s = (
         _turn_target_ms() - _MIN_SEARCH_MS - _DISPATCH_MARGIN_MS
@@ -376,11 +349,9 @@ def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None,
     try:
         cands = fut.result(timeout=max(0.0, deadline_s))
     except _FutureTimeout:
-        _IL_FUTURE = fut  # let it finish; its checkpoint/cache warms the next turn
+        _IL_FUTURE = fut
         _IL_FUTURE_STARTED_AT = submitted_at
         _IL_FUTURE_STEP = obs.get("step")
-        # Loud by design: a deadline cut is rare post-warmup (a cold first
-        # forward or the 4p->2p checkpoint load), so surface it unconditionally.
         print(
             f"[chaos] IL deadline cut at step={obs.get('step')} {tag} "
             f"deadline_ms={max(0.0, deadline_s) * 1000:.0f}; search runs without "
@@ -403,15 +374,9 @@ def agent(obs, config=None):
             p["config"] = cfg
 
     t0 = time.perf_counter()
-    # IL injects in every live game. _infer_num_players counts surviving owners:
-    # 2 uses the 2p checkpoint, 3/4 use the 4p checkpoint, and a 4p game decaying
-    # to two players switches back to the 2p checkpoint on that turn. The relevant
-    # checkpoint loads lazily the first turn its player-count is seen.
     num_players = _aph._infer_num_players(p)
     tag = "2p" if num_players == 2 else "4p"
-    # The 4p IL (3-/4-player states) is disabled: only the 2p checkpoint runs.
-    # num_players == 2 covers both native 2p games and 4p games that have decayed
-    # to two survivors, so the 2p fallback is preserved.
+    # Only live two-player states use IL.
     if num_players == 2 and p["step"] >= _il_skip_turns():
         if _il_k() <= 0:
             cands = None
@@ -424,12 +389,10 @@ def agent(obs, config=None):
                 p["il_candidate_logits"] = [c["logit"] for c in cands]
     elif num_players >= 3:
         cands = None
-        il_desc = f"{tag}:off"  # 4p IL disabled
+        il_desc = f"{tag}:off"
     else:
         cands = None
         il_desc = f"{tag}:skip" if num_players == 2 else None
-    # Dynamic split of the turn target: whatever the IL pass (or 4p skip) left
-    # goes to the search. Sent per turn — the binary's env budget is unused.
     il_ms = (time.perf_counter() - t0) * 1000
     p["budget_ms"] = max(_MIN_SEARCH_MS, int(_turn_target_ms() - il_ms - _DISPATCH_MARGIN_MS))
     if os.environ.get("OW_DEBUG"):
@@ -453,9 +416,4 @@ def agent(obs, config=None):
         return json.loads(r.decode())
 
 
-# Eager init at module load (Kaggle's setup window / first-turn overage): pay
-# `import torch` + threadpool/kernel warmup + the schema check ONCE, loading no
-# checkpoint. The 2p checkpoint loads lazily on the first turn IL is needed, so a
-# native 4p game never loads it unless it decays to two players.
-# A stale orbit_wars_model schema still raises here, before any turn is played.
 _warm_torch()

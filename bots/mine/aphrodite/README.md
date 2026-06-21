@@ -1,32 +1,24 @@
 # aphrodite
 
 Kaggle Orbit Wars bot: DUCT simultaneous-move search using Apollo's candidate
-generator and final redirect pass, with a fixed-extrapolation XGBoost value net.
+generator and final redirect pass, with XGBoost leaf evaluation.
 
 ## Runtime
 
-`main.py` is the Kaggle/dev wrapper. It launches the Rust `aphrodite` daemon
-and pins leaf evaluation to the current fixed XGB models:
+`main.py` launches the Rust `aphrodite` daemon and points it at the checked-in
+value-net weights and Apollo runtime configs.
 
-- 2p: `train/weights/xgb_2p_qsweep_r3_top20_floor050_dropdec.json`
-- 4p: `train/weights/xgb_4p_qsweep_top20_floor050_dropdec.json`
-- 4p late 1v1 leaves also get `APHRODITE_VALUE_NET_PATH_2P` pointing at the
-  2p model.
+The Rust bot uses DUCT, Apollo candidate generation, and Apollo's final
+`redirect_moves`-style pass in the active path. Four-player games that collapse
+to a live 1v1 expose the two-player value net through
+`APHRODITE_VALUE_NET_PATH_2P`.
 
-The corrected fleet extrapolation is now the Rust default.
+### Opening Shortcut
 
-The Rust bot uses DUCT only. Apollo candidate generation and Apollo's final
-`redirect_moves`-style pass are part of the active path.
-
-### Opening shortcut: `APOLLO_ONLY_FIRST_TURNS`
-
-> **Heads up — if DUCT/eval looks "disabled" on the opening turns, check this
-> first.** `APOLLO_ONLY_FIRST_TURNS` (a `const` in `src/duct.rs`, default `8`)
-> makes `best_move` skip the whole DUCT search + leaf eval for steps `< 8` and
-> play apollo's top-ranked candidate (`my_candidates[0]`) directly. Setting it to
-> `0` makes search run from step 0. It is a compile-time constant, **not** an env
-> var, so changing it requires a rebuild. With `OW_DEBUG=1` an apollo-only turn
-> prints a `[duck-apollo-only]` line instead of `[duck]`.
+`APOLLO_ONLY_FIRST_TURNS` is a compile-time constant in `src/duct.rs`. While it
+is active, `best_move` skips DUCT and leaf eval on opening turns and plays
+Apollo's first candidate directly. Changing it requires a rebuild. With
+`OW_DEBUG=1`, an Apollo-only turn prints a `[duck-apollo-only]` line.
 
 ## Build
 
@@ -40,22 +32,15 @@ Kaggle bundle:
 python build_submission.py
 ```
 
-The bundle contains only:
-
-- `main.py`
-- `aphrodite`
-- `xgb_2p_qsweep_r3_top20_floor050_dropdec.json`
-- `xgb_4p_qsweep_top20_floor050_dropdec.json`
-- `config.json`
-- `config_4p.json`
+The bundle contains the Python wrapper, Rust binary, XGBoost weights, and Apollo
+runtime configs.
 
 ## Training
 
-The remaining training tree is focused on replay/data collection, SummaryV2
-feature extraction for 2p, SummaryV3 feature extraction for 4p, and XGBoost
-training. See `train/README.md` for the full ladder pipeline.
+The training tree contains replay/data collection, feature extraction, and
+XGBoost training. See `train/README.md` for the ladder pipeline.
 
-Train from an already-combined/gated dataset (full preprocessing):
+Train from an already-combined/gated dataset:
 
 ```bash
 python train/train_xgb.py \
@@ -65,8 +50,5 @@ python train/train_xgb.py \
   --rounds 2000 --model-out train/weights/xgb_2p.json
 ```
 
-For 4p replay extraction, pass `--players 4` to `build_from_zip.py` or
-`collect.py`, then train the 4p model.
-
-Useful support scripts include `collect.py`, `build_from_zip.py`,
-`build_ladder.py`, `eval.py`, and `feature_importance.py`.
+For four-player replay extraction, pass `--players 4` to `build_from_zip.py` or
+`collect.py`, then train the four-player model.
