@@ -175,6 +175,7 @@ from orbit_wars_engine import OrbitWarsEngine
 def _obs0(state):
     obs = state["observations"][0]
     obs.setdefault("player", 0)
+    obs.setdefault("remainingOverageTime", 60.0)
     return obs
 
 
@@ -221,6 +222,7 @@ state = eng.reset(seed=123)
 for turn in range(3):
     obs = state["observations"][0]
     obs.setdefault("player", 0)
+    obs.setdefault("remainingOverageTime", 60.0)
     t0 = time.perf_counter()
     moves = main.agent(obs, {"actTimeout": 1, "episodeSteps": 500})
     dt = (time.perf_counter() - t0) * 1000
@@ -241,6 +243,7 @@ eng4 = OrbitWarsEngine(num_players=4)
 state4 = eng4.reset(seed=456)
 obs4 = state4["observations"][0]
 obs4.setdefault("player", 0)
+obs4.setdefault("remainingOverageTime", 60.0)
 t0 = time.perf_counter()
 moves4 = main.agent(obs4, {"actTimeout": 1, "episodeSteps": 500})
 dt4 = (time.perf_counter() - t0) * 1000
