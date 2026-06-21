@@ -38,8 +38,6 @@ SEND_FRACTIONS = (0.50, 1.00)
 DISCRETE_ACTION_DIM = 1 + PLANET_SLOTS * PLANET_SLOTS * len(SEND_FRACTIONS)
 ACTION_DIM = DISCRETE_ACTION_DIM
 
-LEGACY_TOKEN_DIM = 11
-
 
 @dataclass(frozen=True)
 class EncodedObs:
@@ -103,34 +101,12 @@ def _shape_from_feat(feat: dict[str, Any], key: str, default: tuple[int, ...]) -
     return tuple(int(x) for x in raw)
 
 
-def _production_onehot(obs: dict[str, Any], feat: dict[str, Any], frames: int) -> np.ndarray:
-    by_id: dict[int, int] = {}
-    for planet in obs.get("planets", []) or []:
-        if len(planet) >= 7:
-            by_id[int(planet[0])] = int(planet[6])
-    planet_ids = [int(x) for x in feat.get("planet_ids", [])]
-    out = np.zeros((frames, PLANET_SLOTS, 5), dtype=np.float32)
-    for slot, planet_id in enumerate(planet_ids[:PLANET_SLOTS]):
-        prod = by_id.get(planet_id)
-        if prod is None:
-            continue
-        idx = max(0, min(4, prod - 1))
-        out[:, slot, idx] = 1.0
-    return out
-
-
-def _tokens_from_feat(obs: dict[str, Any], feat: dict[str, Any]) -> np.ndarray:
+def _tokens_from_feat(feat: dict[str, Any]) -> np.ndarray:
     raw_shape = _shape_from_feat(feat, "tokens", TOKEN_SHAPE)
     tokens = feat["tokens"].reshape(raw_shape).astype(np.float32)
-    if raw_shape == TOKEN_SHAPE:
-        return tokens
-    if raw_shape == (TOKEN_SHAPE[0], TOKEN_SHAPE[1], LEGACY_TOKEN_DIM):
-        upgraded = np.zeros(TOKEN_SHAPE, dtype=np.float32)
-        upgraded[..., :5] = tokens[..., :5]
-        upgraded[..., 5:10] = _production_onehot(obs, feat, raw_shape[0])
-        upgraded[..., 10:] = tokens[..., 5:10]
-        return upgraded
-    raise ValueError(f"unexpected token shape {raw_shape}, expected {TOKEN_SHAPE}")
+    if raw_shape != TOKEN_SHAPE:
+        raise ValueError(f"unexpected token shape {raw_shape}, expected {TOKEN_SHAPE}")
+    return tokens
 
 
 def _array_from_feat(feat: dict[str, Any], key: str, shape: tuple[int, ...], dtype) -> np.ndarray:
@@ -175,7 +151,7 @@ def alive_players_from_obs(obs: dict[str, Any]) -> int:
 
 def encode_features(obs: dict[str, Any], player: int) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     feat = _rust_encode_obs(obs, player)
-    tokens = _tokens_from_feat(obs, feat)
+    tokens = _tokens_from_feat(feat)
     model_obs = {
         "globals": feat["globals"].astype(np.float32),
         "tokens": tokens,
@@ -203,7 +179,7 @@ def encoded_from_feat(feat: dict[str, Any], obs: dict[str, Any] | None = None) -
         player_id = 0
         alive_players = 0
     else:
-        tokens = _tokens_from_feat(obs, feat)
+        tokens = _tokens_from_feat(feat)
         owner_ids = owner_ids_from_obs(obs, feat)
         player_id = int(obs.get("player", 0))
         alive_players = alive_players_from_obs(obs)

@@ -216,7 +216,7 @@ class _ILPolicy:
                 {
                     "action": [int(src), float(angle), int(ships)],
                     "prob": float(prob),
-                    "logit": int(idx),
+                    "index": int(idx),
                 }
             )
         return actions
@@ -396,7 +396,7 @@ def agent(obs, config=None):
             if cands:
                 p["il_candidates"] = [c["action"] for c in cands]
                 p["il_candidate_probs"] = [c["prob"] for c in cands]
-                p["il_candidate_logits"] = [c["logit"] for c in cands]
+                p["il_candidate_indices"] = [c["index"] for c in cands]
     elif num_players >= 3:
         cands = None
         il_desc = f"{tag}:off"

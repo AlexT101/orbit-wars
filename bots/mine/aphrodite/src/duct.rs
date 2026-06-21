@@ -452,7 +452,7 @@ fn inject_root_candidates(
     me: i32,
     extra: &[Action],
     probs: &[f64],
-    logits: &[i64],
+    indices: &[i64],
 ) -> (usize, usize) {
     let base_n = node.my_candidates.len();
     for (rank, &a) in extra.iter().enumerate() {
@@ -465,12 +465,12 @@ fn inject_root_candidates(
         }
         node.my_candidates.push(plan);
         let prob = probs.get(rank).copied().unwrap_or(f64::NAN);
-        let logit = logits.get(rank).copied().unwrap_or(-1);
+        let index = indices.get(rank).copied().unwrap_or(-1);
         node.my_labels.push(format!(
-            "il:solo:rank={}:prob={:.6}:logit={}",
+            "il:solo:rank={}:prob={:.6}:index={}",
             rank + 1,
             prob,
-            logit
+            index
         ));
         node.my_stats.push(ActionStats {
             visits: 0,
@@ -1189,7 +1189,7 @@ fn maybe_dump_candidate_decision(
     il_added: usize,
     il_candidates: &[Action],
     il_candidate_probs: &[f64],
-    il_candidate_logits: &[i64],
+    il_candidate_indices: &[i64],
 ) {
     CANDIDATE_DECISIONS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -1241,7 +1241,7 @@ fn maybe_dump_candidate_decision(
             "il_offered": il_candidates.len(),
             "il_added": il_added,
             "il_probs": il_candidate_probs,
-            "il_logits": il_candidate_logits,
+            "il_indices": il_candidate_indices,
             "candidates": candidates,
         });
         let _ = writeln!(f, "{}", record);
@@ -1259,7 +1259,7 @@ pub fn best_move(
     overage_remaining_ms: f64,
     il_candidates: &[Action],
     il_candidate_probs: &[f64],
-    il_candidate_logits: &[i64],
+    il_candidate_indices: &[i64],
 ) -> Vec<Action> {
     // REQUIRED to make sure we set 4p mode correctly before any apollo code runs
     crate::apollo::constants::set_mode_for_alive(alive_players(state));
@@ -1335,7 +1335,7 @@ pub fn best_move(
             me,
             il_candidates,
             il_candidate_probs,
-            il_candidate_logits,
+            il_candidate_indices,
         );
         if std::env::var("OW_DEBUG").is_ok() {
             eprintln!(
@@ -1594,7 +1594,7 @@ pub fn best_move(
         il_added,
         il_candidates,
         il_candidate_probs,
-        il_candidate_logits,
+        il_candidate_indices,
     );
     let chosen = root.my_candidates[best_i].clone();
 

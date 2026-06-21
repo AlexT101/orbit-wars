@@ -9,7 +9,7 @@ Aphrodite itself can keep using the same binary without sending IL data.
 Per turn, `main.py` may:
 
 1. Run the osteo IL transformer and decode its best legal launch actions.
-2. Add `il_candidates`, `il_candidate_probs`, and `il_candidate_logits` to the
+2. Add `il_candidates`, `il_candidate_probs`, and `il_candidate_indices` to the
    payload sent to the Aphrodite daemon.
 3. Send a per-turn `budget_ms` after accounting for wrapper-side IL time.
 

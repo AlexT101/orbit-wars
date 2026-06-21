@@ -165,8 +165,8 @@ fn main() -> io::Result<()> {
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_f64).collect())
             .unwrap_or_default();
-        let il_candidate_logits: Vec<i64> = v
-            .get("il_candidate_logits")
+        let il_candidate_indices: Vec<i64> = v
+            .get("il_candidate_indices")
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_i64).collect())
             .unwrap_or_default();
@@ -177,7 +177,7 @@ fn main() -> io::Result<()> {
             overage_ms,
             &il_candidates,
             &il_candidate_probs,
-            &il_candidate_logits,
+            &il_candidate_indices,
         );
         // Final no-loss reroute pass on the chosen plan — runs after the planner
         // has fully committed (apollo's `redirect_moves` tail, ported via the
