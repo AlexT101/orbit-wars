@@ -155,13 +155,67 @@ def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
 
 
 SMOKE_SCRIPT = r"""
-import json, sys, time
+import json, os, sys, time
+from pathlib import Path
+
+os.environ["CHAOS_IL_SKIP_TURNS"] = "0"
+os.environ["CHAOS_IL_MIN_PROB"] = "0"
+os.environ["CHAOS_IL_K"] = "4"
+os.environ["CHAOS_CANDIDATE_DECISIONS_PATH"] = "candidate_decisions.jsonl"
+Path(os.environ["CHAOS_CANDIDATE_DECISIONS_PATH"]).unlink(missing_ok=True)
+
 sys.path.insert(0, ".")
 t0 = time.perf_counter()
 import main
 print(f"[smoke] import+init: {(time.perf_counter()-t0)*1000:.0f}ms", file=sys.stderr)
 assert main._BUNDLE, "staged main.py did not detect the flat bundle layout"
 from orbit_wars_engine import OrbitWarsEngine
+
+
+def _obs0(state):
+    obs = state["observations"][0]
+    obs.setdefault("player", 0)
+    return obs
+
+
+def _find_live_il_state():
+    for seed in (123, 456, 789, 1, 2, 3, 4, 5, 10, 42):
+        eng = OrbitWarsEngine(num_players=2)
+        state = eng.reset(seed=seed)
+        for _ in range(10):
+            state = eng.step([[], []])
+        for _ in range(20):
+            obs = _obs0(state)
+            cands = main._il_candidates(obs, 2)
+            if cands:
+                return eng, state, obs, cands, seed
+            state = eng.step([[], []])
+    raise AssertionError("2p smoke could not find a live state with IL candidates")
+
+
+eng, state, obs, warm_cands, seed = _find_live_il_state()
+print(
+    f"[smoke] found IL state seed={seed} step={obs.get('step')} "
+    f"warm_cands={len(warm_cands)}",
+    file=sys.stderr,
+)
+t0 = time.perf_counter()
+moves = main.agent(obs, {"actTimeout": 1, "episodeSteps": 500})
+dt = (time.perf_counter() - t0) * 1000
+print(f"[smoke] 2p il turn: {dt:.0f}ms moves={json.dumps(moves)}", file=sys.stderr)
+assert isinstance(moves, list), f"agent returned {type(moves)}"
+
+record_path = Path(os.environ["CHAOS_CANDIDATE_DECISIONS_PATH"])
+records = [json.loads(line) for line in record_path.read_text().splitlines() if line.strip()]
+matching = [r for r in records if r.get("step") == obs.get("step")]
+assert matching, "candidate decision dump was empty for the live IL smoke turn"
+record = matching[-1]
+assert record.get("il_offered", 0) > 0, "Rust candidate path saw no offered IL candidates"
+print(
+    f"[smoke] il offered={record.get('il_offered')} added={record.get('il_added')}",
+    file=sys.stderr,
+)
+
 eng = OrbitWarsEngine(num_players=2)
 state = eng.reset(seed=123)
 for turn in range(3):

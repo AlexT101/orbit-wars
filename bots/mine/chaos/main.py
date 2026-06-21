@@ -344,6 +344,16 @@ def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None,
     deadline_s = (
         _turn_target_ms() - _MIN_SEARCH_MS - _DISPATCH_MARGIN_MS
     ) / 1000.0 - (time.perf_counter() - t0)
+    if deadline_s <= 0.0:
+        if os.environ.get("OW_DEBUG"):
+            print(
+                f"[chaos] IL skipped at step={obs.get('step')} {tag} "
+                f"deadline_ms={deadline_s * 1000:.0f}; search runs without "
+                f"IL candidates this turn",
+                file=sys.stderr,
+            )
+        return None, f"{tag}:deadline0"
+
     submitted_at = time.perf_counter()
     fut = _IL_EXEC.submit(_il_candidates, obs, num_players)
     try:
@@ -416,4 +426,7 @@ def agent(obs, config=None):
         return json.loads(r.decode())
 
 
-_warm_torch()
+if _il_k() > 0:
+    _warm_torch()
+elif os.environ.get("OW_DEBUG"):
+    print("[chaos] IL disabled by CHAOS_IL_K=0; skipping torch warmup", file=sys.stderr)

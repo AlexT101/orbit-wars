@@ -436,14 +436,29 @@ fn enumerate_player_labeled(
 /// per virtual slot (apollo#0, il#0, apollo#1, il#1, …), which preserves the
 /// apollo candidates' existing 0.5-per-rank ratios exactly while giving il#j
 /// the geometric mean of apollo#j and apollo#j+1.
+fn valid_il_action(state: &GameState, me: i32, action: Action) -> bool {
+    let (from_id, angle, ships, owner) = action;
+    if owner != me || ships <= 0 || !angle.is_finite() {
+        return false;
+    }
+    state
+        .planets
+        .iter()
+        .any(|p| p.id == from_id && p.owner == me && p.ships >= ships)
+}
+
 fn inject_root_candidates(
     node: &mut Node,
+    me: i32,
     extra: &[Action],
     probs: &[f64],
     logits: &[i64],
 ) -> (usize, usize) {
     let base_n = node.my_candidates.len();
     for (rank, &a) in extra.iter().enumerate() {
+        if !valid_il_action(&node.state, me, a) {
+            continue;
+        }
         let plan = vec![a];
         if node.my_candidates.iter().any(|c| actions_equal(c, &plan)) {
             continue;
@@ -1317,6 +1332,7 @@ pub fn best_move(
     if !il_candidates.is_empty() {
         (il_first_idx, il_added) = inject_root_candidates(
             &mut root,
+            me,
             il_candidates,
             il_candidate_probs,
             il_candidate_logits,
@@ -1625,6 +1641,17 @@ mod tests {
             max_speed: 6.0,
             comet_speed: 4.0,
         }
+    }
+
+    #[test]
+    fn valid_il_action_requires_owned_source_with_available_ships() {
+        let s = state(10, vec![planet(0, 0, 10), planet(1, 1, 20)]);
+        assert!(valid_il_action(&s, 0, (0, 0.5, 10, 0)));
+        assert!(!valid_il_action(&s, 0, (0, 0.5, 11, 0)));
+        assert!(!valid_il_action(&s, 0, (1, 0.5, 1, 0)));
+        assert!(!valid_il_action(&s, 0, (99, 0.5, 1, 0)));
+        assert!(!valid_il_action(&s, 0, (0, 0.5, 1, 1)));
+        assert!(!valid_il_action(&s, 0, (0, f64::NAN, 1, 0)));
     }
 
     #[test]
