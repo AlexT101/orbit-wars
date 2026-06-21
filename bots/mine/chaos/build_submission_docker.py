@@ -176,6 +176,20 @@ def _with_prod_limits(src: Path, label: str) -> str:
     return text.replace(old_line, new_line)
 
 
+def _write_runtime_checkpoint(src: Path, dst: Path) -> None:
+    import torch
+
+    if not src.is_file():
+        sys.exit(f"missing source file: {src}")
+    checkpoint = torch.load(src, map_location="cpu", weights_only=False)
+    runtime_checkpoint = {
+        "format": "chaos_il_runtime_v1",
+        "model": checkpoint["model"],
+        "config": checkpoint.get("config", {}),
+    }
+    torch.save(runtime_checkpoint, dst)
+
+
 def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
     staged = []
     (td / "main.py").write_text(
@@ -189,10 +203,13 @@ def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
     )
     staged.append("aphrodite_wrapper.py")
 
+    _write_runtime_checkpoint(CHECKPOINT_2P, td / "osteo_il_2p_latest.pt")
+    staged.append("osteo_il_2p_latest.pt")
+    _write_runtime_checkpoint(CHECKPOINT_4P, td / "osteo_il_4p_latest.pt")
+    staged.append("osteo_il_4p_latest.pt")
+
     files: list[tuple[Path, str]] = [
         (BIN_OUT, "aphrodite"),
-        (CHECKPOINT_2P, "osteo_il_2p_latest.pt"),
-        (CHECKPOINT_4P, "osteo_il_4p_latest.pt"),
         (TRAIN_DIR / "features.py", "features.py"),
         (TRAIN_DIR / "model.py", "model.py"),
         (TRAIN_DIR / "constants.py", "constants.py"),

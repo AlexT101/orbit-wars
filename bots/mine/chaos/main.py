@@ -177,6 +177,17 @@ def _checkpoint_path_4p() -> Path:
     return DEFAULT_CHECKPOINT_4P
 
 
+def _load_checkpoint(torch, path: Path) -> dict:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+    except Exception:
+        if _BUNDLE:
+            raise
+        return torch.load(path, map_location="cpu", weights_only=False)
+
+
 class _ILPolicy:
     """Loads the osteo IL transformer and yields top-k decoded actions."""
 
@@ -187,7 +198,7 @@ class _ILPolicy:
         from model import build_policy
 
         self._torch = torch
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        checkpoint = _load_checkpoint(torch, path)
         config = checkpoint.get("config", {})
         self.checkpoint_path = path
         self.dataset_name = str(config.get("dataset_name", "unknown"))
