@@ -22,6 +22,12 @@ Env knobs:
   CHAOS_IL_K            max IL candidates injected per turn; 0 disables IL
   CHAOS_IL_MIN_PROB     drop IL suggestions below this policy probability
   CHAOS_IL_SKIP_TURNS   skip IL injection before this step
+  CHAOS_IL_LEAD_SKIP_STEP
+                         skip IL at/after this step when far ahead
+  CHAOS_IL_LEAD_SHIP_RATIO
+                         own ships multiplier for the far-ahead IL skip
+  CHAOS_IL_LEAD_PROD_RATIO
+                         own production multiplier for the far-ahead IL skip
   CHAOS_IL_BUSY_FAIL_MS fail loudly if a timed-out IL worker is still busy after
                          this many ms
   CHAOS_TORCH_THREADS   torch / OpenMP intra-op threads
@@ -130,6 +136,18 @@ def _il_min_prob() -> float:
 
 def _il_skip_turns() -> int:
     return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "1")))
+
+
+def _il_lead_skip_step() -> int:
+    return max(0, int(os.environ.get("CHAOS_IL_LEAD_SKIP_STEP", "100")))
+
+
+def _il_lead_ship_ratio() -> float:
+    return float(os.environ.get("CHAOS_IL_LEAD_SHIP_RATIO", "3.0"))
+
+
+def _il_lead_prod_ratio() -> float:
+    return float(os.environ.get("CHAOS_IL_LEAD_PROD_RATIO", "2.0"))
 
 
 def _il_busy_fail_ms() -> int:
@@ -315,6 +333,51 @@ def _il_candidates(obs: dict, num_players: int) -> list[dict]:
     return _il_for(num_players).top_actions(obs, k, _il_min_prob())
 
 
+def _ratio_met(mine: float, theirs: float, ratio: float) -> bool:
+    if mine <= 0.0:
+        return False
+    if theirs <= 0.0:
+        return True
+    return mine >= ratio * theirs
+
+
+def _il_winning_skip(obs: dict) -> bool:
+    if int(obs.get("step", 0)) < _il_lead_skip_step():
+        return False
+    me = int(obs.get("player", 0))
+    my_ships = 0.0
+    other_ships = 0.0
+    my_prod = 0.0
+    other_prod = 0.0
+
+    for planet in obs.get("planets", []) or []:
+        if len(planet) < 7:
+            continue
+        owner = int(planet[1])
+        ships = max(0.0, float(planet[5]))
+        production = max(0.0, float(planet[6]))
+        if owner == me:
+            my_ships += ships
+            my_prod += production
+        elif owner >= 0:
+            other_ships += ships
+            other_prod += production
+
+    for fleet in obs.get("fleets", []) or []:
+        if len(fleet) < 7:
+            continue
+        owner = int(fleet[1])
+        ships = max(0.0, float(fleet[6]))
+        if owner == me:
+            my_ships += ships
+        elif owner >= 0:
+            other_ships += ships
+
+    return _ratio_met(my_ships, other_ships, _il_lead_ship_ratio()) and _ratio_met(
+        my_prod, other_prod, _il_lead_prod_ratio()
+    )
+
+
 def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None, str]:
     """Run the IL forward under a wall-clock deadline."""
     global _IL_FUTURE, _IL_FUTURE_STARTED_AT, _IL_FUTURE_STEP
@@ -391,6 +454,9 @@ def agent(obs, config=None):
         if _il_k() <= 0:
             cands = None
             il_desc = f"{tag}:k0"
+        elif _il_winning_skip(p):
+            cands = None
+            il_desc = f"{tag}:leadskip"
         else:
             cands, il_desc = _il_pass(p, t0, num_players)
             if cands:
