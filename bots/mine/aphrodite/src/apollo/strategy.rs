@@ -326,18 +326,23 @@ fn build_reinforcement_targets(
         if route.next_hop == p.id {
             continue;
         }
-        // Flow toward a strictly better sink by (pressure, attraction): a
-        // higher-pressure combat sink as before, or — when pressure ties — a
-        // more frontier-facing one (the early-game drift).
-        let better = (route.sink_pressure, route.sink_attraction) > (own_pressure, own_attraction);
+        // Flow toward a higher-pressure combat sink as before. Attraction-only
+        // drift is limited to zero-pressure positions; equal nonzero pressure
+        // can still mean "this frontier matters", so do not drain it just
+        // because a neighbor is closer to non-owned territory.
+        let pressure_better = route.sink_pressure > own_pressure;
+        let zero_pressure_drift = route.sink_pressure <= 0.0
+            && own_pressure <= 0.0
+            && route.sink_attraction > own_attraction;
+        let better = pressure_better || zero_pressure_drift;
         if !better {
             continue;
         }
         // The frontier-ratio gate guards *combat* draining only — a frontier
         // planet must not bleed its own defense into a higher-pressure sink.
-        // Pure drift (equal pressure, higher attraction) is exempt: pulling
-        // idle ships toward the frontier is the entire point.
-        let pressure_drain = route.sink_pressure > own_pressure;
+        // Zero-pressure drift is exempt: pulling idle ships toward the frontier
+        // is the entire point.
+        let pressure_drain = pressure_better;
         let frontier_source = is_reinforcement_frontier(state, model, p.id, player);
         let clears_frontier_ratio = !pressure_drain
             || !frontier_source
