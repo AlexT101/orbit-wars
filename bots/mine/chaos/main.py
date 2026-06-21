@@ -100,14 +100,14 @@ os.environ.setdefault("OMP_NUM_THREADS", _TORCH_THREADS)
 os.environ.setdefault("MKL_NUM_THREADS", _TORCH_THREADS)
 
 # Total per-turn wall target for IL plus search.
-_DEV_TURN_TARGET_MS = 600
-_SUBMISSION_TURN_TARGET_MS = 850
+_DEV_TURN_TARGET_MS = 700
+_SUBMISSION_TURN_TARGET_MS = 1000
 _USE_PROD_LIMITS = False
 # Never squeeze the search below this, no matter how slow the IL pass was.
 _MIN_SEARCH_MS = 250
 # Margin between (target - il_elapsed) and the budget we hand the binary,
 # covering JSON encode + IPC + the binary's own dispatch overhead.
-_DISPATCH_MARGIN_MS = 100
+_DISPATCH_MARGIN_MS = 30
 # Warmup architecture fallback. `_warm_arch()` prefers checkpoint config.
 _WARM_MODEL = "entity_transformer_ngpt_action_features"
 _WARM_HIDDEN = 128
@@ -121,7 +121,7 @@ def _turn_target_ms() -> int:
 
 
 def _il_k() -> int:
-    return max(0, int(os.environ.get("CHAOS_IL_K", "4")))
+    return max(0, int(os.environ.get("CHAOS_IL_K", "5")))
 
 
 def _il_min_prob() -> float:
@@ -129,7 +129,7 @@ def _il_min_prob() -> float:
 
 
 def _il_skip_turns() -> int:
-    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "12")))
+    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "1")))
 
 
 def _il_busy_fail_ms() -> int:

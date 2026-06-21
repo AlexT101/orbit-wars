@@ -38,7 +38,7 @@ const K_NON_ROOT_DEFAULT: usize = 4;
 /// search + leaf eval entirely and just play apollo's top-ranked plan
 /// (`my_candidates[0]`, what pure apollo would play). 0 disables this — normal
 /// search runs from step 0, i.e. previous behavior.
-const APOLLO_ONLY_FIRST_TURNS: i64 = 10;
+const APOLLO_ONLY_FIRST_TURNS: i64 = 0;
 /// Minimum root expansions to spend on each newly-added IL candidate, by IL
 /// rank. Change to e.g. `&[4, 2, 1]` to seed the third injected candidate too.
 const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
@@ -55,10 +55,10 @@ const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];
 // between them (we stop early once one move clearly separates). All in ms.
 
 /// Hard cap on overage spent beyond the base budget on any single turn.
-const OVERAGE_PER_TURN_CAP_MS: u64 = 800;
+const OVERAGE_PER_TURN_CAP_MS: u64 = 2000;
 /// Safety reserve to keep untouched in the engine's overage pool, computed as
 /// a base amount plus a per-turn multiplier
-const OVERAGE_SAFETY_BASE_MS: f64 = 3000.0;
+const OVERAGE_SAFETY_BASE_MS: f64 = 2000.0;
 const OVERAGE_SAFETY_PER_TURN_MS: f64 = 50.0;
 /// Grant overage in chunks this size, re-checking the decision gap between each.
 const OVERAGE_CHUNK_MS: u64 = 200;
@@ -69,6 +69,18 @@ const OVERAGE_CLOSE_GAP: f64 = 0.05;
 /// The position counts as "decided" (not worth extra search) once any single
 /// player controls at least this share of total ship strength.
 const OVERAGE_DECIDED_SHARE: f64 = 0.70;
+
+fn joint_4p_root_opponents_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("APHRODITE_JOINT_4P_ROOT_OPPONENTS")
+            .map(|v| {
+                let v = v.trim();
+                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    })
+}
 
 thread_local! {
     /// Stash the root after each turn, so next turn's matching state can
@@ -787,7 +799,7 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     } else {
         None
     };
-    let __ec_t0 = std::time::Instant::now();
+    let __ec_t0 = prof_start();
     let k = if root {
         K_ROOT_DEFAULT
     } else {
@@ -804,7 +816,8 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     // Only the genuine root expansion runs apollo's early-game opening DFS;
     // every non-root node suppresses it (rollout_internal), mirroring apollo's
     // in-rollout reply policy.
-    let (my_alts, my_labels, opp_alts, opp_labels) = if alive >= 3 && root {
+    let joint_4p_root = alive >= 3 && root && joint_4p_root_opponents_enabled();
+    let (my_alts, my_labels, opp_alts, opp_labels) = if joint_4p_root {
         let (my_alts, my_labels) = enumerate_player_labeled(&node.state, me, k, false);
         let (opp_alts, opp_labels) = joint_opponent_candidates(&node.state, me, true);
         (my_alts, my_labels, opp_alts, opp_labels)
@@ -820,10 +833,10 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
             .collect();
         (my_alts, my_labels, opp_alts, opp_labels)
     };
-    // In the real 4p root, `opp_candidates` is a joint action list over all
-    // opponents. Below the root we keep the old cheaper model: branch the
-    // dominant enemy and fix minor players to their greedy replies.
-    node.other_launches = if alive >= 3 && root {
+    // When enabled, the real 4p root uses a joint action list over all opponents.
+    // Default/off keeps the old cheaper model everywhere: branch the dominant
+    // enemy and fix minor players to greedy replies.
+    node.other_launches = if joint_4p_root {
         Vec::new()
     } else {
         let others = minor_players(&node.state, me, opp);
@@ -878,8 +891,8 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     node.opp_labels = opp_labels;
     node.candidates_initialized = true;
     node.candidates_root = root;
-    crate::profiling::add(&crate::profiling::ENSURE_CANDIDATES_NS, __ec_t0);
-    crate::profiling::inc(&crate::profiling::ENSURE_CANDIDATES_CALLS);
+    prof_add(&crate::profiling::ENSURE_CANDIDATES_NS, __ec_t0);
+    prof_inc(&crate::profiling::ENSURE_CANDIDATES_CALLS);
 }
 
 // ── profiling (OW_PROFILE) ───────────────────────────────────────────────
@@ -889,6 +902,26 @@ fn prof_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| std::env::var("OW_PROFILE").is_ok())
 }
+
+#[inline]
+fn prof_start() -> Option<Instant> {
+    prof_enabled().then(Instant::now)
+}
+
+#[inline]
+fn prof_add(counter: &'static std::sync::atomic::AtomicU64, start: Option<Instant>) {
+    if let Some(start) = start {
+        crate::profiling::add(counter, start);
+    }
+}
+
+#[inline]
+fn prof_inc(counter: &'static std::sync::atomic::AtomicU64) {
+    if prof_enabled() {
+        crate::profiling::inc(counter);
+    }
+}
+
 thread_local! {
     static PROF_EVAL_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
     static PROF_EVAL_N: std::cell::Cell<u64> = std::cell::Cell::new(0);
@@ -919,15 +952,15 @@ fn evaluate_inner(state: &GameState, me: i32) -> f64 {
     let alive = alive_players(state);
     crate::apollo::constants::set_mode_for_alive(alive);
     maybe_dump_leaf(state, me);
-    let __vn_t0 = std::time::Instant::now();
+    let __vn_t0 = prof_start();
     // Reuse the persistent per-search EntityCache (geometry/aim) for value-net
     // feature extraction instead of building one per leaf. `with_cache_at` sets
     // the cache's current turn to this leaf's step before scoring.
     let __pred = with_cache_at(state.step, |cache| {
         EVAL_L1.with(|l1| crate::value_net::predict_with_cache(state, me, cache, Some(l1), alive))
     });
-    crate::profiling::add(&crate::profiling::VALUE_NET_NS, __vn_t0);
-    crate::profiling::inc(&crate::profiling::VALUE_NET_CALLS);
+    prof_add(&crate::profiling::VALUE_NET_NS, __vn_t0);
+    prof_inc(&crate::profiling::VALUE_NET_CALLS);
     // The value net is always loaded in production; if weights are somehow
     // absent, fall back to a neutral score rather than a heuristic.
     __pred.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(0.0)
@@ -993,32 +1026,32 @@ fn select_and_expand_forced_my(
         return v;
     }
     ensure_candidates(node, me, is_root);
-    let __sel_t0 = std::time::Instant::now();
+    let __sel_t0 = prof_start();
     let my_idx = forced_my_idx
         .filter(|&i| i < node.my_candidates.len())
         .unwrap_or_else(|| select_my(node));
     let opp_idx = select_opp(node);
-    crate::profiling::add(&crate::profiling::SELECTION_NS, __sel_t0);
-    crate::profiling::inc(&crate::profiling::SELECTION_CALLS);
+    prof_add(&crate::profiling::SELECTION_NS, __sel_t0);
+    prof_inc(&crate::profiling::SELECTION_CALLS);
     let value: f64;
     if !node.children.contains_key(&(my_idx, opp_idx)) {
-        let __tree_t0 = std::time::Instant::now();
+        let __tree_t0 = prof_start();
         let mut s = node.state.clone();
-        crate::profiling::add(&crate::profiling::TREE_OPS_NS, __tree_t0);
-        crate::profiling::inc(&crate::profiling::TREE_OPS_CALLS);
+        prof_add(&crate::profiling::TREE_OPS_NS, __tree_t0);
+        prof_inc(&crate::profiling::TREE_OPS_CALLS);
         // Expand: apply both actions, tick, create new node, rollout.
-        let __al_t0 = std::time::Instant::now();
+        let __al_t0 = prof_start();
         apply_launches(&mut s, &node.my_candidates[my_idx]);
         apply_launches(&mut s, &node.opp_candidates[opp_idx]);
         // Minor players' fixed greedy replies (empty in 2p).
         apply_launches(&mut s, &node.other_launches);
-        crate::profiling::add(&crate::profiling::APPLY_LAUNCHES_NS, __al_t0);
-        let __tick_t0 = std::time::Instant::now();
+        prof_add(&crate::profiling::APPLY_LAUNCHES_NS, __al_t0);
+        let __tick_t0 = prof_start();
         tick(&mut s);
-        crate::profiling::add(&crate::profiling::TICK_NS, __tick_t0);
-        crate::profiling::inc(&crate::profiling::TICK_CALLS);
+        prof_add(&crate::profiling::TICK_NS, __tick_t0);
+        prof_inc(&crate::profiling::TICK_CALLS);
         let rollout_value = terminal_value(&s, me).unwrap_or_else(|| evaluate(&s, me));
-        let __tree_t1 = std::time::Instant::now();
+        let __tree_t1 = prof_start();
         let child = Node {
             state: s,
             visits: 1,
@@ -1036,7 +1069,7 @@ fn select_and_expand_forced_my(
             candidates_root: false,
         };
         node.children.insert((my_idx, opp_idx), Box::new(child));
-        crate::profiling::add(&crate::profiling::TREE_OPS_NS, __tree_t1);
+        prof_add(&crate::profiling::TREE_OPS_NS, __tree_t1);
         value = rollout_value;
     } else {
         // Recurse.
@@ -1044,14 +1077,14 @@ fn select_and_expand_forced_my(
         value = select_and_expand(child, me, false);
     }
     // Backprop: update both marginal stats + joint node.
-    let __bp_t0 = std::time::Instant::now();
+    let __bp_t0 = prof_start();
     node.visits += 1;
     node.my_stats[my_idx].visits += 1;
     node.my_stats[my_idx].sum_value += value;
     node.opp_stats[opp_idx].visits += 1;
     node.opp_stats[opp_idx].sum_value += value;
-    crate::profiling::add(&crate::profiling::BACKPROP_NS, __bp_t0);
-    crate::profiling::inc(&crate::profiling::BACKPROP_CALLS);
+    prof_add(&crate::profiling::BACKPROP_NS, __bp_t0);
+    prof_inc(&crate::profiling::BACKPROP_CALLS);
     value
 }
 
@@ -1438,7 +1471,12 @@ pub fn best_move(
         );
     }
 
-    crate::profiling::ITERATIONS.fetch_add(iters as u64, std::sync::atomic::Ordering::Relaxed);
+    if prof_enabled() {
+        crate::profiling::ITERATIONS.fetch_add(
+            iters as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 
     // Flush the leaf dump for this search and append a tree-shape row (both
     // no-ops unless their env var named a file).

@@ -451,15 +451,61 @@ fn reinforcement_pressure(state: &WorldState, model: &HellburnerModel) -> HashMa
     pressure
 }
 
+fn best_pressure_contribution(
+    state: &WorldState,
+    model: &HellburnerModel,
+    src: &Planet,
+    target_id: i64,
+    max_offset: i64,
+) -> f64 {
+    if src.id == target_id || !model.non_comet_ids.contains(&src.id) {
+        return 0.0;
+    }
+    let mut best_contribution = 0.0;
+    for offset in 0..=max_offset.min(reinforcement_pressure_turns()) {
+        let ships = owner_available_to_launch_at(state, src.id, src.owner, offset);
+        if ships <= 0 {
+            continue;
+        }
+        let Some((_, travel_turns, _, _, _)) =
+            model.plan_shot(src.id, target_id, ships, offset)
+        else {
+            continue;
+        };
+        let arrival = (offset + travel_turns).max(1);
+        if arrival <= reinforcement_pressure_turns() {
+            let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
+            if contribution > best_contribution {
+                best_contribution = contribution;
+            }
+        }
+    }
+    best_contribution
+}
+
+/// Total pressure `sources` exert on `target_id`: per source, the best
+/// time-decayed deliverable force over launch offsets `0..=max_offset`,
+/// summed directly without owner bucketing.
+fn pressure_total(
+    state: &WorldState,
+    model: &HellburnerModel,
+    target_id: i64,
+    sources: &[Planet],
+    max_offset: i64,
+) -> f64 {
+    sources
+        .iter()
+        .map(|src| best_pressure_contribution(state, model, src, target_id, max_offset))
+        .sum()
+}
+
 /// Owner-bucketed pressure on `target_id`: for each source planet, the best
 /// time-decayed deliverable force over launch offsets `0..=max_offset`
 /// (`ships × reinforcement_pressure_weight(arrival)`), accumulated into the
 /// source's owner. Planets owned by the same player cooperate (summed within an
-/// owner); the caller decides how to combine across owners (`pressure_from`
-/// sums, `enemy_pressure_combined` maxes the strongest owner and discounts the
-/// rest). Availability is read from
-/// baseline timelines only, so the result is plan-independent and safe to
-/// compute once per model build.
+/// owner); callers that need a plain sum should use `pressure_total` to avoid
+/// bucket overhead. Availability is read from baseline timelines only, so the
+/// result is plan-independent and safe to compute once per model build.
 fn pressure_by_owner(
     state: &WorldState,
     model: &HellburnerModel,
@@ -469,28 +515,8 @@ fn pressure_by_owner(
 ) -> HashMap<i64, f64> {
     let mut by_owner: HashMap<i64, f64> = HashMap::default();
     for src in sources {
-        if src.id == target_id || !model.non_comet_ids.contains(&src.id) {
-            continue;
-        }
-        let mut best_contribution = 0.0;
-        for offset in 0..=max_offset.min(reinforcement_pressure_turns()) {
-            let ships = owner_available_to_launch_at(state, src.id, src.owner, offset);
-            if ships <= 0 {
-                continue;
-            }
-            let Some((_, travel_turns, _, _, _)) =
-                model.plan_shot(src.id, target_id, ships, offset)
-            else {
-                continue;
-            };
-            let arrival = (offset + travel_turns).max(1);
-            if arrival <= reinforcement_pressure_turns() {
-                let contribution = ships as f64 * reinforcement_pressure_weight(arrival);
-                if contribution > best_contribution {
-                    best_contribution = contribution;
-                }
-            }
-        }
+        let best_contribution =
+            best_pressure_contribution(state, model, src, target_id, max_offset);
         if best_contribution > 0.0 {
             *by_owner.entry(src.owner).or_insert(0.0) += best_contribution;
         }
@@ -508,9 +534,7 @@ fn pressure_from(
     sources: &[Planet],
     max_offset: i64,
 ) -> f64 {
-    pressure_by_owner(state, model, target_id, sources, max_offset)
-        .values()
-        .sum()
+    pressure_total(state, model, target_id, sources, max_offset)
 }
 
 /// Combined enemy pressure on `target_id`: the strongest single enemy owner's
@@ -528,11 +552,15 @@ fn enemy_pressure_combined(
     sources: &[Planet],
     max_offset: i64,
 ) -> f64 {
+    let secondary_weight = secondary_enemy_pressure_weight();
+    if state.num_players <= 2 || secondary_weight == 1.0 {
+        return pressure_total(state, model, target_id, sources, max_offset);
+    }
     let by_owner = pressure_by_owner(state, model, target_id, sources, max_offset);
     let total: f64 = by_owner.values().sum();
     let strongest = by_owner.values().copied().fold(0.0, f64::max);
     // strongest at full weight + the remaining owners (total − strongest) discounted
-    strongest + secondary_enemy_pressure_weight() * (total - strongest)
+    strongest + secondary_weight * (total - strongest)
 }
 
 /// Enemy-owned targets failing the ally-pressure gate. For each enemy planet,
@@ -2215,9 +2243,9 @@ pub fn search_candidates_subsets_labeled(world: &WorldState) -> Vec<(String, Vec
         HashMap::with_capacity_and_hasher(k, Default::default());
     let mut dirty: HashSet<i64> = HashSet::default();
     for mask in 0u32..(1u32 << k) {
-        if k == SUBSET_TOP_TARGETS && mask == (1u32 << k) - 1 {
-            continue;
-        }
+        //  if k == SUBSET_TOP_TARGETS && mask == (1u32 << k) - 1 {
+        //     continue;
+        // }
         subset_ids.clear();
         for i in 0..k {
             if mask & (1u32 << i) != 0 {
