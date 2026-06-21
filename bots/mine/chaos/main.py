@@ -127,9 +127,9 @@ _MIN_SEARCH_MS = 250
 # Minimum margin between (target - il_elapsed) and the budget we hand the
 # binary. Runtime telemetry can raise this when Python/IPC overhead is higher.
 _DISPATCH_MARGIN_MS = 30
-_DEFAULT_OVERAGE_RESERVE_MS = 1000
-_DEFAULT_PANIC_OVERAGE_MS = 1000
-_OVERAGE_PER_TURN_CAP_MS = 1000
+_DEFAULT_OVERAGE_RESERVE_MS = 2000
+_DEFAULT_PANIC_OVERAGE_MS = 500
+_OVERAGE_PER_TURN_CAP_MS = 800
 _DEFAULT_RUST_POST_MARGIN_MS = 80
 # Warmup architecture fallback. `_warm_arch()` prefers checkpoint config.
 _WARM_MODEL = "entity_transformer_ngpt_action_features"

@@ -29,7 +29,6 @@ ENV_MODEL = REPO_ROOT / "experimental_arch" / "env_model"
 ENV_ENGINE = REPO_ROOT / "experimental_arch" / "env_engine"
 _IL_CHECKPOINT_DIR = REPO_ROOT / "experimental_arch" / "imitation_learning" / "checkpoints"
 CHECKPOINT_2P = _IL_CHECKPOINT_DIR / "osteo_bc_transformer" / "latest.pt"
-CHECKPOINT_4P = _IL_CHECKPOINT_DIR / "osteo_il_4p_latest.pt"
 BUNDLE = HERE / "submission.tar.gz"
 
 # Weight filenames come from aphrodite's main.py (single source of truth).
@@ -177,9 +176,6 @@ def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
 
     _write_runtime_checkpoint(CHECKPOINT_2P, td / "osteo_il_2p_latest.pt")
     staged.append("osteo_il_2p_latest.pt")
-    _write_runtime_checkpoint(CHECKPOINT_4P, td / "osteo_il_4p_latest.pt")
-    staged.append("osteo_il_4p_latest.pt")
-
     files: list[tuple[Path, str]] = [
         (BIN_OUT, "aphrodite"),
         (TRAIN_DIR / "features.py", "features.py"),

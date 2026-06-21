@@ -250,13 +250,24 @@ pub fn resolve_shot(
     result
 }
 
+/// When false, expansion-attraction drift is disabled: reinforcement flow is
+/// driven purely by enemy combat pressure (the original behavior). When true,
+/// idle ships in zero-pressure positions drift toward the frontier.
+const ATTRACTION_REINFORCEMENT_ENABLED: bool = false;
+
 fn build_reinforcement_targets(
     state: &WorldState,
     model: &HellburnerModel,
     player: i64,
 ) -> HashMap<i64, i64> {
     let pressure = reinforcement_pressure(state, model);
-    let attraction = expansion_attraction(state, model, player);
+    // Skip the attraction computation entirely when disabled; an empty map
+    // leaves every attraction at NEG_INFINITY so the drift branch never fires.
+    let attraction = if ATTRACTION_REINFORCEMENT_ENABLED {
+        expansion_attraction(state, model, player)
+    } else {
+        HashMap::default()
+    };
     let mut best: HashMap<i64, ReinforcementRoute> = HashMap::default();
     let mut queue: Vec<i64> = Vec::new();
 

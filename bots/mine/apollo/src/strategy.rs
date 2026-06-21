@@ -249,13 +249,24 @@ impl<'a> HellburnerModel<'a> {
     }
 }
 
+/// When false, expansion-attraction drift is disabled: reinforcement flow is
+/// driven purely by enemy combat pressure (the original behavior). When true,
+/// idle ships in zero-pressure positions drift toward the frontier.
+const ATTRACTION_REINFORCEMENT_ENABLED: bool = false;
+
 fn build_reinforcement_targets(
     state: &WorldState,
     model: &HellburnerModel,
     player: i64,
 ) -> HashMap<i64, i64> {
     let pressure = reinforcement_pressure(state, model);
-    let attraction = expansion_attraction(state, model, player);
+    // Skip the attraction computation entirely when disabled; an empty map
+    // leaves every attraction at NEG_INFINITY so the drift branch never fires.
+    let attraction = if ATTRACTION_REINFORCEMENT_ENABLED {
+        expansion_attraction(state, model, player)
+    } else {
+        HashMap::default()
+    };
     let mut best: HashMap<i64, ReinforcementRoute> = HashMap::default();
     let mut queue: Vec<i64> = Vec::new();
 
@@ -330,7 +341,8 @@ fn build_reinforcement_targets(
         // can still mean "this frontier matters", so do not drain it just
         // because a neighbor is closer to non-owned territory.
         let pressure_better = route.sink_pressure > own_pressure;
-        let zero_pressure_drift = route.sink_pressure <= 0.0
+        let zero_pressure_drift = ATTRACTION_REINFORCEMENT_ENABLED
+            && route.sink_pressure <= 0.0
             && own_pressure <= 0.0
             && route.sink_attraction > own_attraction;
         let better = pressure_better || zero_pressure_drift;
