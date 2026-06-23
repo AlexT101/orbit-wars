@@ -1,21 +1,25 @@
 # chaos
 
 Chaos wraps Aphrodite and adds imitation-learning policy suggestions to the
-root candidate set. The shared Aphrodite binary accepts optional IL fields, so
+root candidate set. In two-player states it also asks the IL policy from the
+enemy's perspective and adds up to three of those actions to the opponent root
+candidate set. The shared Aphrodite binary accepts optional IL fields, so
 Aphrodite itself can keep using the same binary without sending IL data.
 
 ## Runtime
 
 Per turn, `main.py` may:
 
-1. Run the osteo IL transformer and decode its best legal launch actions.
+1. Run the osteo IL transformer and decode its best legal launch actions for
+   us and, in 2p, for the enemy.
 2. Add `il_candidates`, `il_candidate_probs`, and `il_candidate_indices` to the
-   payload sent to the Aphrodite daemon.
+   payload sent to the Aphrodite daemon. Enemy actions use the matching
+   `opp_il_*` fields and are capped at three candidates.
 3. Send a per-turn `budget_ms` after accounting for wrapper-side IL time.
 
-Rust appends non-duplicate IL actions to the root candidate set in
-`bots/mine/aphrodite/src/duct.rs::inject_root_candidates`. The search and value
-net then choose among Apollo and IL-rooted plans.
+Rust appends non-duplicate IL actions to the root candidate sets in
+`bots/mine/aphrodite/src/duct.rs`. The search and value net then choose among
+Apollo and IL-rooted plans.
 
 Current runtime IL is enabled only for live two-player states. Three- and
 four-player states pass through Aphrodite without IL injection. A four-player

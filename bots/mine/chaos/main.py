@@ -1,9 +1,12 @@
 """chaos: Aphrodite's DUCT search seeded with osteo IL policy moves.
 
 Per turn:
-  1. Run the osteo IL transformer and decode top legal actions.
+  1. Run the osteo IL transformer and decode top legal actions for us and,
+     in live 2p states, for the enemy.
   2. Send the observation to the aphrodite binary with an extra
-     `il_candidates` field; the Rust side adds them to the root candidate set.
+     `il_candidates` field; the Rust side adds them to our root candidate set.
+     Enemy suggestions are sent as `opp_il_candidates` and become opponent root
+     candidates.
 
 The aphrodite engine and subprocess management are reused from
 bots/mine/aphrodite. The `il_candidates` field is optional, and
@@ -136,6 +139,7 @@ _WARM_MODEL = "entity_transformer_ngpt_action_features"
 _WARM_HIDDEN = 128
 _WARM_LAYERS = 3
 _WARM_HEADS = 4
+_MAX_OPPONENT_IL_CANDIDATES = 3
 
 _py_overhead_margin_ms = float(os.environ.get("CHAOS_PY_MARGIN_MS", _DISPATCH_MARGIN_MS))
 _rust_post_margin_ms = float(
@@ -494,11 +498,64 @@ _IL_FUTURE_STARTED_AT: float | None = None
 _IL_FUTURE_STEP = None
 
 
-def _il_candidates(obs: dict, num_players: int) -> list[dict]:
-    k = _il_k()
+def _il_candidates(
+    obs: dict,
+    num_players: int,
+    player: int | None = None,
+    k: int | None = None,
+) -> list[dict]:
+    k = _il_k() if k is None else max(0, int(k))
     if k <= 0:
         return []
+    if player is not None and int(obs.get("player", 0)) != int(player):
+        obs = dict(obs)
+        obs["player"] = int(player)
     return _il_for(num_players).top_actions(obs, k, _il_min_prob())
+
+
+def _live_players(obs: dict) -> list[int]:
+    seen: set[int] = set()
+    for planet in obs.get("planets", []) or []:
+        try:
+            owner = int(planet[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if owner >= 0:
+            seen.add(owner)
+    for fleet in obs.get("fleets", []) or []:
+        try:
+            owner = int(fleet[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if owner >= 0:
+            seen.add(owner)
+    return sorted(seen)
+
+
+def _opponent_player_2p(obs: dict) -> int | None:
+    me = int(obs.get("player", 0))
+    opponents = [p for p in _live_players(obs) if p != me]
+    return opponents[0] if len(opponents) == 1 else None
+
+
+def _il_candidate_bundle(obs: dict, num_players: int) -> dict:
+    mine = _il_candidates(obs, num_players)
+    opponent: list[dict] = []
+    opponent_player = None
+    if num_players == 2:
+        opponent_player = _opponent_player_2p(obs)
+        if opponent_player is not None:
+            opponent = _il_candidates(
+                obs,
+                num_players,
+                player=opponent_player,
+                k=min(_il_k(), _MAX_OPPONENT_IL_CANDIDATES),
+            )
+    return {
+        "mine": mine,
+        "opponent": opponent,
+        "opponent_player": opponent_player,
+    }
 
 
 def _ratio_met(mine: float, theirs: float, ratio: float) -> bool:
@@ -546,7 +603,7 @@ def _il_winning_skip(obs: dict) -> bool:
     )
 
 
-def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None, str]:
+def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[dict | None, str]:
     """Run the IL forward under a wall-clock deadline."""
     global _IL_FUTURE, _IL_FUTURE_STARTED_AT, _IL_FUTURE_STEP
     tag = "2p" if num_players == 2 else "4p"
@@ -587,9 +644,9 @@ def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None,
         return None, f"{tag}:deadline0"
 
     submitted_at = time.perf_counter()
-    fut = _IL_EXEC.submit(_il_candidates, obs, num_players)
+    fut = _IL_EXEC.submit(_il_candidate_bundle, obs, num_players)
     try:
-        cands = fut.result(timeout=max(0.0, deadline_s))
+        bundle = fut.result(timeout=max(0.0, deadline_s))
     except _FutureTimeout:
         _IL_FUTURE = fut
         _IL_FUTURE_STARTED_AT = submitted_at
@@ -601,7 +658,7 @@ def _il_pass(obs: dict, t0: float, num_players: int) -> tuple[list[dict] | None,
             file=sys.stderr,
         )
         return None, f"{tag}:deferred"
-    return cands, f"{tag}:{_il_for(num_players).dataset_name}"
+    return bundle, f"{tag}:{_il_for(num_players).dataset_name}"
 
 
 def agent(obs, config=None):
@@ -620,28 +677,31 @@ def agent(obs, config=None):
     num_players = _aph._infer_num_players(p)
     tag = "2p" if num_players == 2 else "4p"
     panic = _overage_panic(p)
+    cands = None
+    opp_cands = None
     # Only live two-player states use IL.
     if panic:
-        cands = None
         il_desc = f"{tag}:panic"
     elif num_players == 2 and p["step"] >= _il_skip_turns():
         if _il_k() <= 0:
-            cands = None
             il_desc = f"{tag}:k0"
         elif _il_winning_skip(p):
-            cands = None
             il_desc = f"{tag}:leadskip"
         else:
-            cands, il_desc = _il_pass(p, t0, num_players)
+            bundle, il_desc = _il_pass(p, t0, num_players)
+            cands = bundle.get("mine") if bundle else None
+            opp_cands = bundle.get("opponent") if bundle else None
             if cands:
                 p["il_candidates"] = [c["action"] for c in cands]
                 p["il_candidate_probs"] = [c["prob"] for c in cands]
                 p["il_candidate_indices"] = [c["index"] for c in cands]
+            if opp_cands:
+                p["opp_il_candidates"] = [c["action"] for c in opp_cands]
+                p["opp_il_candidate_probs"] = [c["prob"] for c in opp_cands]
+                p["opp_il_candidate_indices"] = [c["index"] for c in opp_cands]
     elif num_players >= 3:
-        cands = None
         il_desc = f"{tag}:off"
     else:
-        cands = None
         il_desc = f"{tag}:skip" if num_players == 2 else None
     il_ms = (time.perf_counter() - t0) * 1000
     base_budget_ms, hard_budget_ms, post_margin_ms, extra_ms = _budget_plan(p, il_ms)
@@ -659,7 +719,7 @@ def agent(obs, config=None):
             f"burn_margin={_overage_burn_margin_ms:.0f} "
             f"reserve={_effective_reserve_ms():.0f} panic_cutoff={_panic_overage_ms()} "
             f"panic={panic} "
-            f"il={il_desc} il_candidates={cands}",
+            f"il={il_desc} il_candidates={cands} opp_il_candidates={opp_cands}",
             file=sys.stderr,
         )
 

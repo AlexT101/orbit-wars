@@ -480,7 +480,7 @@ fn enumerate_player_labeled(
 }
 
 /// Splice externally supplied single-launch candidates (the chaos IL policy's
-/// top-k moves) into the root's MY candidate set. Entries are appended, never
+/// top-k moves) into one side's root candidate set. Entries are appended, never
 /// interleaved in place: `children` is keyed by candidate index, so existing
 /// entries — including a reused subtree's — must keep their positions. The
 /// interleave instead happens in the prior vector: weights decay by sqrt(0.5)
@@ -498,42 +498,48 @@ fn valid_il_action(state: &GameState, me: i32, action: Action) -> bool {
         .any(|p| p.id == from_id && p.owner == me && p.ships >= ships)
 }
 
-fn inject_root_candidates(
-    node: &mut Node,
-    me: i32,
+fn inject_side_root_candidates(
+    state: &GameState,
+    player: i32,
+    candidates: &mut Vec<Vec<Action>>,
+    labels: &mut Vec<String>,
+    priors: &mut Vec<f64>,
+    stats: &mut Vec<ActionStats>,
+    label_prefix: &str,
     extra: &[Action],
     probs: &[f64],
     indices: &[i64],
 ) -> (usize, usize) {
-    let base_n = node.my_candidates.len();
+    let base_n = candidates.len();
     for (rank, &a) in extra.iter().enumerate() {
-        if !valid_il_action(&node.state, me, a) {
+        if !valid_il_action(state, player, a) {
             continue;
         }
         let plan = vec![a];
-        if node.my_candidates.iter().any(|c| actions_equal(c, &plan)) {
+        if candidates.iter().any(|c| actions_equal(c, &plan)) {
             continue;
         }
-        node.my_candidates.push(plan);
+        candidates.push(plan);
         let prob = probs.get(rank).copied().unwrap_or(f64::NAN);
         let index = indices.get(rank).copied().unwrap_or(-1);
-        node.my_labels.push(format!(
-            "il:solo:rank={}:prob={:.6}:index={}",
+        labels.push(format!(
+            "{}:solo:rank={}:prob={:.6}:index={}",
+            label_prefix,
             rank + 1,
             prob,
             index
         ));
-        node.my_stats.push(ActionStats {
+        stats.push(ActionStats {
             visits: 0,
             sum_value: 0.0,
         });
     }
-    let added = node.my_candidates.len() - base_n;
+    let added = candidates.len() - base_n;
     if added == 0 {
         return (base_n, 0);
     }
     let half = std::f64::consts::FRAC_1_SQRT_2;
-    let mut raw: Vec<f64> = Vec::with_capacity(node.my_candidates.len());
+    let mut raw: Vec<f64> = Vec::with_capacity(candidates.len());
     for r in 0..base_n {
         raw.push(half.powi((2 * r) as i32));
     }
@@ -541,8 +547,51 @@ fn inject_root_candidates(
         raw.push(half.powi((2 * j + 1) as i32));
     }
     let z: f64 = raw.iter().sum();
-    node.my_priors = raw.into_iter().map(|w| w / z).collect();
+    *priors = raw.into_iter().map(|w| w / z).collect();
     (base_n, added)
+}
+
+fn inject_my_root_candidates(
+    node: &mut Node,
+    me: i32,
+    extra: &[Action],
+    probs: &[f64],
+    indices: &[i64],
+) -> (usize, usize) {
+    inject_side_root_candidates(
+        &node.state,
+        me,
+        &mut node.my_candidates,
+        &mut node.my_labels,
+        &mut node.my_priors,
+        &mut node.my_stats,
+        "il",
+        extra,
+        probs,
+        indices,
+    )
+}
+
+fn inject_opp_root_candidates(
+    node: &mut Node,
+    opp: i32,
+    extra: &[Action],
+    probs: &[f64],
+    indices: &[i64],
+) -> (usize, usize) {
+    let limit = extra.len().min(3);
+    inject_side_root_candidates(
+        &node.state,
+        opp,
+        &mut node.opp_candidates,
+        &mut node.opp_labels,
+        &mut node.opp_priors,
+        &mut node.opp_stats,
+        "opp-il",
+        &extra[..limit],
+        probs,
+        indices,
+    )
 }
 
 fn actions_equal(a: &[Action], b: &[Action]) -> bool {
@@ -1274,6 +1323,8 @@ fn maybe_dump_candidate_decision(
     il_candidates: &[Action],
     il_candidate_probs: &[f64],
     il_candidate_indices: &[i64],
+    opp_il_candidates: &[Action],
+    opp_il_added: usize,
 ) {
     CANDIDATE_DECISIONS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -1329,6 +1380,8 @@ fn maybe_dump_candidate_decision(
             "il_added": il_added,
             "il_probs": il_candidate_probs,
             "il_indices": il_candidate_indices,
+            "opp_il_offered": opp_il_candidates.len(),
+            "opp_il_added": opp_il_added,
             "candidates": candidates,
         });
         let _ = writeln!(f, "{}", record);
@@ -1346,6 +1399,9 @@ pub fn best_move(
     il_candidates: &[Action],
     il_candidate_probs: &[f64],
     il_candidate_indices: &[i64],
+    opp_il_candidates: &[Action],
+    opp_il_candidate_probs: &[f64],
+    opp_il_candidate_indices: &[i64],
 ) -> SearchResult {
     let turn_t0 = Instant::now();
     // REQUIRED to make sure we set 4p mode correctly before any apollo code runs
@@ -1429,7 +1485,7 @@ pub fn best_move(
     let mut il_first_idx = 0usize;
     let mut il_added = 0usize;
     if !il_candidates.is_empty() {
-        (il_first_idx, il_added) = inject_root_candidates(
+        (il_first_idx, il_added) = inject_my_root_candidates(
             &mut root,
             me,
             il_candidates,
@@ -1444,6 +1500,29 @@ pub fn best_move(
                 il_candidates.len(),
                 il_added,
                 root.my_candidates.len()
+            );
+        }
+    }
+    let mut opp_il_added = 0usize;
+    if alive_players(&root.state) == 2 && !opp_il_candidates.is_empty() {
+        let opp = dominant_enemy(&root.state, me).unwrap_or(1 - me);
+        let (_opp_il_first_idx, added) = inject_opp_root_candidates(
+            &mut root,
+            opp,
+            opp_il_candidates,
+            opp_il_candidate_probs,
+            opp_il_candidate_indices,
+        );
+        opp_il_added = added;
+        if std::env::var("OW_DEBUG").is_ok() {
+            eprintln!(
+                "[chaos-opp-il] step={} player={} opp={} il_offered={} il_added={} opp_root_K={}",
+                state.step,
+                me,
+                opp,
+                opp_il_candidates.len(),
+                opp_il_added,
+                root.opp_candidates.len()
             );
         }
     }
@@ -1714,6 +1793,8 @@ pub fn best_move(
         il_candidates,
         il_candidate_probs,
         il_candidate_indices,
+        opp_il_candidates,
+        opp_il_added,
     );
     let chosen = root.my_candidates[best_i].clone();
     let root_visits = root.visits;

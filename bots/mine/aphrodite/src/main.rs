@@ -33,6 +33,60 @@ fn checked_deadline_minus(deadline: Instant, margin_ms: u64, floor: Instant) -> 
         .unwrap_or(floor)
 }
 
+fn dominant_enemy_id(state: &aphrodite::GameState, me: i32) -> Option<i32> {
+    let mut best: Option<(i32, i64)> = None;
+    let mut visit_player = |p: i32| {
+        if p == -1 || p == me {
+            return;
+        }
+        let score = aphrodite::sim::player_score(state, p);
+        if best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
+            best = Some((p, score));
+        }
+    };
+    for p in &state.planets {
+        visit_player(p.owner);
+    }
+    for f in &state.fleets {
+        visit_player(f.owner);
+    }
+    best.map(|(p, _)| p)
+}
+
+fn parse_il_candidates(v: &Value, key: &str, owner: i32) -> Vec<aphrodite::sim::Action> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| {
+                    let arr = m.as_array()?;
+                    let from_id = aphrodite::as_i64(arr.get(0)?)?;
+                    let angle = aphrodite::as_f64(arr.get(1)?);
+                    let ships = aphrodite::as_i64(arr.get(2)?)?;
+                    if ships <= 0 {
+                        return None;
+                    }
+                    Some((from_id, angle, ships, owner))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_f64_array(v: &Value, key: &str) -> Vec<f64> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default()
+}
+
+fn parse_i64_array(v: &Value, key: &str) -> Vec<i64> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default()
+}
+
 fn main() -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -175,34 +229,13 @@ fn main() -> io::Result<()> {
         // Optional externally proposed root candidates (the chaos wrapper's IL
         // policy moves), each `[from_id, angle, ships]`. Absent in aphrodite's
         // own wrapper payloads, in which case behavior is unchanged.
-        let il_candidates: Vec<aphrodite::sim::Action> = v
-            .get("il_candidates")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|m| {
-                        let arr = m.as_array()?;
-                        let from_id = aphrodite::as_i64(arr.get(0)?)?;
-                        let angle = aphrodite::as_f64(arr.get(1)?);
-                        let ships = aphrodite::as_i64(arr.get(2)?)?;
-                        if ships <= 0 {
-                            return None;
-                        }
-                        Some((from_id, angle, ships, state.player))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let il_candidate_probs: Vec<f64> = v
-            .get("il_candidate_probs")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_f64).collect())
-            .unwrap_or_default();
-        let il_candidate_indices: Vec<i64> = v
-            .get("il_candidate_indices")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_i64).collect())
-            .unwrap_or_default();
+        let il_candidates = parse_il_candidates(&v, "il_candidates", state.player);
+        let il_candidate_probs = parse_f64_array(&v, "il_candidate_probs");
+        let il_candidate_indices = parse_i64_array(&v, "il_candidate_indices");
+        let opp_player = dominant_enemy_id(&state, state.player).unwrap_or(1 - state.player);
+        let opp_il_candidates = parse_il_candidates(&v, "opp_il_candidates", opp_player);
+        let opp_il_candidate_probs = parse_f64_array(&v, "opp_il_candidate_probs");
+        let opp_il_candidate_indices = parse_i64_array(&v, "opp_il_candidate_indices");
         let search = duct::best_move(
             &state,
             state.player,
@@ -212,6 +245,9 @@ fn main() -> io::Result<()> {
             &il_candidates,
             &il_candidate_probs,
             &il_candidate_indices,
+            &opp_il_candidates,
+            &opp_il_candidate_probs,
+            &opp_il_candidate_indices,
         );
         // Final no-loss reroute pass on the chosen plan — runs after the planner
         // has fully committed (apollo's `redirect_moves` tail, ported via the
