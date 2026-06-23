@@ -6,7 +6,10 @@ Orbit Wars extension modules. Torch and gymnasium are expected from the Kaggle
 Python image.
 
 Usage:
-    python bots/mine/chaos/build_submission_docker.py [--skip-docker]
+    python bots/mine/chaos/build_submission_docker.py [--skip-docker] [--no-opp-il]
+
+Pass --no-opp-il to build an A/B variant with opponent IL disabled (our own IL
+candidates are still used).
 
 Output: bots/mine/chaos/submission.tar.gz
 """
@@ -147,6 +150,22 @@ def _with_prod_limits(src: Path, label: str) -> str:
     return text.replace(old_line, new_line)
 
 
+def _disable_opponent_il(text: str, label: str) -> str:
+    """Drop opponent IL from the build by capping its candidate count at 0.
+
+    With ``_MAX_OPPONENT_IL_CANDIDATES = 0`` the bundle builder asks for 0
+    opponent IL actions, so ``_il_candidate_bundle`` always returns an empty
+    opponent list and the staged main.py never emits ``opp_il_candidates``.
+    Our own IL candidates are unaffected.
+    """
+    old_line = "_MAX_OPPONENT_IL_CANDIDATES = 3"
+    new_line = "_MAX_OPPONENT_IL_CANDIDATES = 0"
+    if text.count(old_line) != 1:
+        sys.exit(f"expected exactly one {old_line!r} in chaos main.py")
+    print(f"  submission tweak: {label} opponent IL disabled (max candidates -> 0)")
+    return text.replace(old_line, new_line)
+
+
 def _write_runtime_checkpoint(src: Path, dst: Path) -> None:
     import torch
 
@@ -161,12 +180,12 @@ def _write_runtime_checkpoint(src: Path, dst: Path) -> None:
     torch.save(runtime_checkpoint, dst)
 
 
-def _stage(td: Path, cdylibs: dict[str, Path]) -> list[str]:
+def _stage(td: Path, cdylibs: dict[str, Path], disable_opp_il: bool = False) -> list[str]:
     staged = []
-    (td / "main.py").write_text(
-        _with_prod_limits(HERE / "main.py", "chaos"),
-        encoding="utf-8",
-    )
+    chaos_main = _with_prod_limits(HERE / "main.py", "chaos")
+    if disable_opp_il:
+        chaos_main = _disable_opponent_il(chaos_main, "chaos")
+    (td / "main.py").write_text(chaos_main, encoding="utf-8")
     staged.append("main.py")
     (td / "aphrodite_wrapper.py").write_text(
         _with_prod_limits(APHRODITE / "main.py", "aphrodite wrapper"),
@@ -318,12 +337,15 @@ def _smoke_test(td: Path) -> None:
 
 def main() -> int:
     skip_docker = "--skip-docker" in sys.argv
+    disable_opp_il = "--no-opp-il" in sys.argv
+    if disable_opp_il:
+        print("Building WITHOUT opponent IL (--no-opp-il)")
     cdylibs = _build_cdylibs(skip_docker)
     _build_binary(skip_docker)
     BUNDLE.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         td = Path(tmp)
-        staged = _stage(td, cdylibs)
+        staged = _stage(td, cdylibs, disable_opp_il=disable_opp_il)
         _smoke_test(td)
         with tarfile.open(BUNDLE, "w:gz") as tar:
             for name in staged:
