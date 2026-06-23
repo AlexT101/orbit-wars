@@ -341,7 +341,7 @@ impl Config {
 }
 
 // Simulation rules
-pub const NUDGE_SCAN: i64 = 32; // Baseline number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
+pub const NUDGE_SCAN: i64 = 16; // Baseline number of angle steps per side scanned inside a blocked target's valid aim cone to find an alternate recoverable angle after the direct angle fails.
                                 // Coarsest angular step (radians) the cone scan will use. The cone half-width is
                                 // the target's *swept-chord* span during the turn (not just its disk radius), so
                                 // it can be wide for a fast/long-turn target; the probe count scales up to keep
@@ -368,5 +368,10 @@ pub const MAX_CONE_PROBES: i64 = 256;
 // 24	96.6%	1×
 // 48	98.7%	2×
 
-// For bot submissions, NUDGE_SCAN should be increased if we have remaining runtime.
-// 32 balances test runtime against nudge recovery coverage for local testing.
+// Profiled in the submission DUCT loop: the cone scan is ~50% of aim-solve time
+// and ~6-12% of the turn, and (2p) every scan sits at the NUDGE_SCAN floor — cones
+// are narrow, so phi_max/MAX_CONE_STEP never exceeds it and MAX_CONE_PROBES is
+// never reached. NUDGE_SCAN therefore scales scan cost ~linearly. 32->16 frees
+// ~3-4% of the turn (measured as median mid-game iters/turn) for ~1% recovery loss
+// (96% vs ~97% per the table). More nodes beat the rare miracle shot, so 16 is the
+// pick; 8 (94% recovery) is the more aggressive option if win-rate A/B holds.
