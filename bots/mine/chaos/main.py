@@ -121,6 +121,14 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 _TORCH_THREADS = os.environ.get("CHAOS_TORCH_THREADS", "2")
 os.environ.setdefault("OMP_NUM_THREADS", _TORCH_THREADS)
 os.environ.setdefault("MKL_NUM_THREADS", _TORCH_THREADS)
+# The IL forward and the Rust DUCT search are sequential phases of a turn, but
+# they share one CPU allocation (~1.6 cores on Kaggle). By default Intel OpenMP
+# keeps the torch worker threads spinning for KMP_BLOCKTIME=200ms after the IL
+# pass returns, which burns cores during the immediately following search. Make
+# idle threads sleep at once so the search gets the full allocation. Must be set
+# before the OpenMP runtime initializes (i.e. before torch is imported).
+os.environ.setdefault("KMP_BLOCKTIME", "0")  # Intel OpenMP (libiomp): sleep immediately
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")  # libgomp fallback
 
 # Total per-turn wall target for IL plus search.
 _DEV_TURN_TARGET_MS = 700
