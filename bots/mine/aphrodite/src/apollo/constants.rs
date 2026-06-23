@@ -303,9 +303,13 @@ pub const EARLY_GAME_NODE_BUDGET: u64 = 50_000; // Hard cap on early-game DFS no
 
 pub const REACTIVE_TURNS: i64 = 2; // Number of turns to forward simulate ally/enemy steps during rollouts
 
-// `search_candidates_subsets`: number of top-ranked targets whose 2^k include/
-// exclude combinations seed the diversified candidate sweep.
-pub const SUBSET_TOP_TARGETS: usize = 3;
+// `search_candidates_subsets`: the diversified candidate sweep ranks every
+// winnable target by its independent (no-reservation) single-target plan, keeps
+// the top `SUBSET_POOL_TARGETS` as the enumeration pool, and forms every
+// source-disjoint subset of that pool. The `SUBSET_MAX_CANDIDATES` highest-scoring
+// unique subsets are emitted (pool size bounds the sweep at 2^N masks).
+pub const SUBSET_POOL_TARGETS: usize = 8;
+pub const SUBSET_MAX_CANDIDATES: usize = 5;
 
 // Fixed look-ahead used by the aimer when capping a shot's feasible arrival turn
 pub const AIM_HORIZON: i64 = 30;

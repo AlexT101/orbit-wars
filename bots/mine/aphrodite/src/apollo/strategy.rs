@@ -26,7 +26,7 @@ use crate::apollo::constants::{
     ally_pressure_ratio, closer_enemy_target_margin, early_game_combat_reserve_margin,
     enemy_offset_lookahead, frontier_pressure_ratio, offset_lookahead,
     reinforcement_pressure_decay, reinforcement_pressure_turns, rotation_look_ahead_turns,
-    secondary_enemy_pressure_weight, SUBSET_TOP_TARGETS,
+    secondary_enemy_pressure_weight, SUBSET_MAX_CANDIDATES, SUBSET_POOL_TARGETS,
 };
 use crate::apollo::early_game::OpeningEvent;
 use crate::apollo::engine::{MoveAction, Planet};
@@ -2189,21 +2189,29 @@ pub fn search_candidates(world: &WorldState) -> Vec<Vec<MoveAction>> {
 /// Diversity-oriented candidate generator. The three-strategy `search_candidates`
 /// usually converges (the strategies pick the same plan once trial-timeline
 /// ownership binds), yielding ~1 unique candidate. This instead fixes a single
-/// strategy (`ScorePerShip`) and varies *which* targets the greedy loop may
-/// commit: it evaluates every target once against the empty plan, takes the top
-/// [`SUBSET_TOP_TARGETS`] by selection key, and runs the greedy loop restricted
-/// to each of the `2^k` include/exclude subsets of those targets (the empty
-/// subset yields a reinforcement-only candidate).
+/// strategy (`ScorePerShip`) and builds *original* multi-target plans by
+/// combining targets that don't fight over the same launch planets.
 ///
-/// Efficiency is the whole point: the `2^k` subsets all share the one-time seed
-/// evaluation (`evaluate_target` over every target vs. the empty plan), and each
-/// subset run only re-evaluates the ≤k-1 of its own targets a commit dirties —
-/// not `2^k` independent planner passes. The model is built once.
+/// Each winnable target is evaluated once against the empty plan to get its
+/// single-target-optimal commitment — crucially **without reserving** its sources
+/// before the next target is evaluated, so two targets that both want the same
+/// source each see the full ship pool. Targets are ranked by the `ScorePerShip`
+/// key and the top [`SUBSET_POOL_TARGETS`] form the enumeration pool. We then form
+/// every subset of that pool whose members have **pairwise-disjoint source sets**
+/// (no shared launch planet); each surviving subset's plan is just the union of
+/// its members' independent orders (disjoint sources keep the union conflict-free).
+/// The [`SUBSET_MAX_CANDIDATES`] highest-scoring (sum of member scores) unique
+/// subsets are emitted.
 ///
-/// The unrestricted `ScorePerShip` greedy (today's `plan()` output, which can
-/// capture more than `k` targets) is emitted as the first candidate so the
-/// subset cap never costs us the aggressive baseline. Reinforcements are appended
-/// to every candidate and duplicates are deduped.
+/// The point is diversity, not single-turn optimality: when two high-value targets
+/// want the same source the greedy path would hand it to one and give the other a
+/// degraded plan, whereas here they simply never share a subset — yielding more
+/// distinct plans for the DUCT layer to score under real opponent replies.
+///
+/// The unrestricted `ScorePerShip` greedy (today's `plan()` output) is still
+/// emitted as the first candidate (the aggressive baseline, highest DUCT prior),
+/// and the empty subset yields the reinforcement-only fallback. Reinforcements are
+/// appended to every candidate and duplicate move sets are deduped.
 pub fn search_candidates_subsets(world: &WorldState) -> Vec<Vec<MoveAction>> {
     search_candidates_subsets_labeled(world)
         .into_iter()
@@ -2226,107 +2234,159 @@ pub fn search_candidates_subsets_labeled(world: &WorldState) -> Vec<(String, Vec
     let opening = crate::apollo::early_game::plan_opening(&model);
 
     // Baseline first: the unrestricted greedy (== `plan()`), capturing every
-    // winnable target. Mirrors the old `search_candidates` first-entry contract.
+    // winnable target. Mirrors the old `search_candidates` first-entry contract
+    // (candidate 0, the highest DUCT prior).
     let (full_moves, _) = run_strategy(world, &model, strategy, &opening);
     out.push(("apollo:full".to_string(), full_moves));
 
-    // Seed: evaluate every candidate target once against the empty plan. Every
-    // subset run reuses these for its first (empty-plan) pick.
+    // Per-target independent plans: evaluate every candidate target once against
+    // the EMPTY plan. Unlike the greedy path we never reserve one target's sources
+    // before evaluating the next, so every target sees the full ship pool and gets
+    // its single-target-optimal commitment. Source conflicts between targets are
+    // resolved later (by only combining source-disjoint targets), not here.
     let empty_plan = PlanState::default();
-    let mut seed: HashMap<i64, Option<(f64, FrontlineWin)>> =
-        HashMap::with_capacity_and_hasher(candidate_ids.len(), Default::default());
+    let mut plans: Vec<TargetPlan> = Vec::with_capacity(candidate_ids.len());
     for &tid in &candidate_ids {
-        let eval = evaluate_target(world, &model, &empty_plan, world.planet(tid), &mut scratch);
-        seed.insert(tid, eval);
+        let Some((score, win)) =
+            evaluate_target(world, &model, &empty_plan, world.planet(tid), &mut scratch)
+        else {
+            continue;
+        };
+        let production = world.planet(tid).production;
+        let ships_total: i64 = win.orders.iter().map(|o| o.ships).sum();
+        let key = strategy.key(score, production, ships_total);
+        let mut sources: Vec<i64> = win.orders.iter().map(|o| o.src_id).collect();
+        sources.sort_unstable();
+        sources.dedup();
+        plans.push(TargetPlan {
+            tid,
+            score,
+            key,
+            orders: win.orders,
+            sources,
+        });
     }
 
-    // Rank winnable targets by the `ScorePerShip` key. Scan `candidate_ids` in
-    // fixed order then stable-sort descending, so ties keep the deterministic
-    // candidate order.
-    let mut ranked: Vec<(f64, i64)> = Vec::new();
-    for &tid in &candidate_ids {
-        if let Some(Some((score, win))) = seed.get(&tid) {
-            let production = world.planet(tid).production;
-            let ships_total: i64 = win.orders.iter().map(|o| o.ships).sum();
-            ranked.push((strategy.key(*score, production, ships_total), tid));
+    // Rank by the `ScorePerShip` key (candidate_ids fixed order, then stable-sort
+    // descending so ties stay deterministic) and keep the top pool. A target's
+    // 1-based position here is its `rank`, reported in the candidate label.
+    plans.sort_by(|a, b| b.key.partial_cmp(&a.key).unwrap_or(std::cmp::Ordering::Equal));
+    plans.truncate(SUBSET_POOL_TARGETS);
+    let n = plans.len();
+
+    // Enumerate every subset of the pool (the empty subset included — it yields the
+    // reinforcement-only fallback). A subset survives only if its members' source
+    // sets are pairwise disjoint: the moment two members share a launch planet the
+    // whole subset is rejected. Score is the sum of member scores.
+    let mut subsets: Vec<(f64, u32)> = Vec::new();
+    let mut used: Vec<i64> = Vec::new();
+    'mask: for mask in 0u32..(1u32 << n) {
+        used.clear();
+        let mut score = 0.0;
+        for i in 0..n {
+            if mask & (1u32 << i) == 0 {
+                continue;
+            }
+            for &s in &plans[i].sources {
+                if used.contains(&s) {
+                    continue 'mask;
+                }
+            }
+            used.extend_from_slice(&plans[i].sources);
+            score += plans[i].score;
         }
+        subsets.push((score, mask));
     }
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let top: Vec<i64> = ranked
-        .iter()
-        .take(SUBSET_TOP_TARGETS)
-        .map(|(_, tid)| *tid)
-        .collect();
-    let k = top.len();
-    let top_desc = top
-        .iter()
-        .enumerate()
-        .map(|(i, tid)| format!("{}:{}", i + 1, tid))
-        .collect::<Vec<_>>()
-        .join(",");
 
-    // Every subset of the top-k targets, including the empty set. Buffers are
-    // reused across masks; the per-subset cache is reseeded from `seed` with
-    // `dirty` empty so each run's first pick reuses the shared evaluations.
-    let mut subset_ids: Vec<i64> = Vec::with_capacity(k);
-    let mut cache: HashMap<i64, Option<(f64, FrontlineWin)>> =
-        HashMap::with_capacity_and_hasher(k, Default::default());
-    let mut dirty: HashSet<i64> = HashSet::default();
-    for mask in 0u32..(1u32 << k) {
-        //  if k == SUBSET_TOP_TARGETS && mask == (1u32 << k) - 1 {
-        //     continue;
-        // }
-        subset_ids.clear();
-        for i in 0..k {
-            if mask & (1u32 << i) != 0 {
-                subset_ids.push(top[i]);
+    // Highest-scoring subsets first (DUCT priors decay by candidate rank). Stable
+    // tie-break on the mask keeps the order deterministic.
+    subsets.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    });
+
+    // Materialize unique move sets. Each subset commits its members' precomputed
+    // orders into a fresh `PlanState` (emitting only launch-this-turn fleets,
+    // future offsets staying reservations just as the greedy path does), then
+    // appends reinforcements. Dedupe against everything already queued, including
+    // `apollo:full`. The aggressive (non-empty) subsets are capped at
+    // `SUBSET_MAX_CANDIDATES`; the empty subset (the reinforcement-only fallback,
+    // `ranks=none`) is always emitted regardless of the cap so the 4p
+    // opponent-branch splitter still finds its rank-0 fallback.
+    let mut emitted = 0usize;
+    for &(score, mask) in &subsets {
+        if mask != 0 && emitted >= SUBSET_MAX_CANDIDATES {
+            continue;
+        }
+        let mut state = PlanState::default();
+        let mut moves: Vec<MoveAction> = Vec::new();
+        for i in 0..n {
+            if mask & (1u32 << i) == 0 {
+                continue;
+            }
+            let plan = &plans[i];
+            for o in &plan.orders {
+                state.commit(o.src_id, plan.tid, o.ships, o.arrival, world.player);
+                if o.effective_offset == 0 {
+                    moves.push(MoveAction {
+                        from_id: o.src_id,
+                        angle: o.angle,
+                        ships: o.ships,
+                        target: plan.tid,
+                    });
+                }
             }
         }
-        cache.clear();
-        for &tid in &subset_ids {
-            cache.insert(tid, seed.get(&tid).cloned().flatten());
-        }
-        dirty.clear();
-
-        let (mut moves, state) = greedy_commit(
-            world,
-            &model,
-            strategy,
-            &subset_ids,
-            &[],
-            &mut cache,
-            &mut dirty,
-            &mut scratch,
-        );
         moves.extend(send_reinforcements(world, &model, &state));
-        if !out.iter().any(|(_, prev)| prev == &moves) {
-            let ranks = (0..k)
-                .filter(|&i| mask & (1u32 << i) != 0)
-                .map(|i| (i + 1).to_string())
-                .collect::<Vec<_>>();
-            let ranks = if ranks.is_empty() {
-                "none".to_string()
-            } else {
-                ranks.join("+")
-            };
-            let ids = subset_ids
+        if out.iter().any(|(_, prev)| prev == &moves) {
+            continue;
+        }
+
+        // Label keeps the `ranks=`/`:ids=` shape the 4p opponent-branch splitter
+        // (`duct::subset_rank_count`) parses: rank count 1|2 ⇒ preferred alt,
+        // 0 (the empty subset) ⇒ rank-0 fallback.
+        let members: Vec<usize> = (0..n).filter(|&i| mask & (1u32 << i) != 0).collect();
+        let ranks = if members.is_empty() {
+            "none".to_string()
+        } else {
+            members
                 .iter()
-                .map(|tid| tid.to_string())
-                .collect::<Vec<_>>();
-            let ids = if ids.is_empty() {
-                "none".to_string()
-            } else {
-                ids.join("+")
-            };
-            out.push((
-                format!(
-                    "apollo:subset:ranks={}:ids={}:mask={:#05b}:top={}",
-                    ranks, ids, mask, top_desc
-                ),
-                moves,
-            ));
+                .map(|&i| (i + 1).to_string())
+                .collect::<Vec<_>>()
+                .join("+")
+        };
+        let ids = if members.is_empty() {
+            "none".to_string()
+        } else {
+            members
+                .iter()
+                .map(|&i| plans[i].tid.to_string())
+                .collect::<Vec<_>>()
+                .join("+")
+        };
+        out.push((
+            format!("apollo:subset:ranks={}:ids={}:score={:.3}", ranks, ids, score),
+            moves,
+        ));
+        if mask != 0 {
+            emitted += 1;
         }
     }
 
     out
+}
+
+/// One target's independent (no-reservation) single-target plan, used by
+/// [`search_candidates_subsets_labeled`] to assemble source-disjoint subsets.
+struct TargetPlan {
+    tid: i64,
+    /// Timeline-delta score of this target's commitment vs. the empty plan.
+    score: f64,
+    /// `ScorePerShip` selection key, used only to rank targets into the pool.
+    key: f64,
+    orders: Vec<PlannedOrder>,
+    /// Distinct launch planets this plan draws from, sorted. Two subsets members
+    /// may not share any of these.
+    sources: Vec<i64>,
 }
