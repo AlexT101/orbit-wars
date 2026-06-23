@@ -639,13 +639,22 @@ fn build_source_enemy_reach(state: &WorldState, model: &HellburnerModel) -> Hash
             continue;
         }
         let mut best: Option<i64> = None;
-        for enemy in &state.enemy_planets {
-            if !model.non_comet_ids.contains(&enemy.id) {
+        // Offset outer (was enemy outer): `arrival = (offset + travel).max(1)` is
+        // always `>= offset`, so once `offset` reaches the soonest arrival found so
+        // far no later offset can beat it — break. And availability depends only on
+        // (src, offset), not the enemy target, so it is computed once per offset
+        // here instead of once per (enemy, offset). Both changes are pure pruning /
+        // hoisting: the resulting `best` (hence the map) is bit-identical.
+        for offset in 0..=offset_lookahead() {
+            if best.is_some_and(|b| offset >= b) {
+                break;
+            }
+            let ships = baseline_available_at_for_owner(state, src.id, player, offset);
+            if ships <= 0 {
                 continue;
             }
-            for offset in 0..=offset_lookahead() {
-                let ships = baseline_available_at_for_owner(state, src.id, player, offset);
-                if ships <= 0 {
+            for enemy in &state.enemy_planets {
+                if !model.non_comet_ids.contains(&enemy.id) {
                     continue;
                 }
                 let Some((_, travel_turns, _, _, _)) =
