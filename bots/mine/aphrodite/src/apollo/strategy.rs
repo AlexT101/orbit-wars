@@ -23,10 +23,10 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::apollo::cache::{AimCacheVerdict, EntityCache, InvariantVerdict};
 use crate::apollo::constants::{
-    ally_pressure_ratio, closer_enemy_target_margin, enemy_offset_lookahead,
-    frontier_pressure_ratio, offset_lookahead, reinforcement_pressure_decay,
-    reinforcement_pressure_turns, rotation_look_ahead_turns, secondary_enemy_pressure_weight,
-    SUBSET_TOP_TARGETS,
+    ally_pressure_ratio, closer_enemy_target_margin, early_game_combat_reserve_margin,
+    enemy_offset_lookahead, frontier_pressure_ratio, offset_lookahead,
+    reinforcement_pressure_decay, reinforcement_pressure_turns, rotation_look_ahead_turns,
+    secondary_enemy_pressure_weight, SUBSET_TOP_TARGETS,
 };
 use crate::apollo::early_game::OpeningEvent;
 use crate::apollo::engine::{MoveAction, Planet};
@@ -135,10 +135,16 @@ impl<'a> HellburnerModel<'a> {
             source_enemy_reach: None,
             shot_cache: RefCell::new(HashMap::default()),
         };
-        // A margin of `CLOSER_ENEMY_GATE_DISABLED` or more can never bind (no
-        // reachable target arrives that far past the nearest enemy), so skip
-        // building the reach map entirely — `None` leaves the gate disabled.
-        model.source_enemy_reach = (closer_enemy_target_margin() < CLOSER_ENEMY_GATE_DISABLED)
+        // The reach map feeds two gates: the combat closer-enemy gate
+        // (`closer_enemy_target_margin`) and the opening's combat-reserve gate
+        // (`early_game_combat_reserve_margin`). Build it if either is live. A
+        // combat margin of `CLOSER_ENEMY_GATE_DISABLED` or more can never bind
+        // (no reachable target arrives that far past the nearest enemy), and a
+        // reserve margin `<= 0` reserves nothing, so when both are inert the map
+        // is skipped and `None` leaves both gates disabled.
+        let combat_gate_live = closer_enemy_target_margin() < CLOSER_ENEMY_GATE_DISABLED;
+        let reserve_gate_live = early_game_combat_reserve_margin() > 0;
+        model.source_enemy_reach = (combat_gate_live || reserve_gate_live)
             .then(|| build_source_enemy_reach(state, &model));
         model.reinforcement_target = build_reinforcement_targets(state, &model, player);
         model.pressure_gated_targets = build_pressure_gate(state, &model);

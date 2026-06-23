@@ -79,6 +79,7 @@ struct AgentConsts {
     early_game_race_margin: i64,
     early_game_score_horizon: i64,
     early_game_max_child_fund: usize,
+    early_game_combat_reserve_margin: i64,
     // ── Combat target selection (see strategy.rs) ───────────────────────────
     closer_enemy_target_margin: i64,
     secondary_enemy_pressure_weight: f64,
@@ -141,6 +142,7 @@ fn parse_consts(env_key: &str, default_name: &str) -> AgentConsts {
         early_game_race_margin: i("early_game_race_margin"),
         early_game_score_horizon: i("early_game_score_horizon"),
         early_game_max_child_fund: i("early_game_max_child_fund") as usize,
+        early_game_combat_reserve_margin: i("early_game_combat_reserve_margin"),
         closer_enemy_target_margin: i("closer_enemy_target_margin"),
         secondary_enemy_pressure_weight: f("secondary_enemy_pressure_weight"),
     }
@@ -279,6 +281,10 @@ pub fn early_game_score_horizon() -> i64 {
 pub fn early_game_max_child_fund() -> usize {
     agent().early_game_max_child_fund
 } // Per target, highest-production remaining neutrals considered for the min+child funding variant.
+#[inline]
+pub fn early_game_combat_reserve_margin() -> i64 {
+    agent().early_game_combat_reserve_margin
+} // A planet we own NOW is withheld from the opening's launch sources (reserved for the combat planner) when it can land a fleet on some enemy-owned planet within this many arrival turns (launch offset + travel, best case). Stops a combat-frontier planet from ferrying its ships backward to a safe neutral while an enemy attack goes unfunded; the ships it keeps fall through to greedy combat / reinforcement. Reuses `HellburnerModel::source_enemy_reach`. `<= 0` disables the gate (no source reserved — original behavior); larger reserves more frontier planets (risk: under-expansion if a reserved source was the only launcher for a good uncontested neutral). Tune by A/B.
 
 // Combat target selection (see strategy.rs) — TUNABLE (config.json / config_4p.json).
 #[inline]

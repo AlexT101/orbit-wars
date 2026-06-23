@@ -77,8 +77,9 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::apollo::constants::{
-    early_game_candidate_slack, early_game_end, early_game_max_child_fund, early_game_race_margin,
-    early_game_score_horizon, EARLY_GAME_NODE_BUDGET, SHIP_SPEED_SATURATION,
+    early_game_candidate_slack, early_game_combat_reserve_margin, early_game_end,
+    early_game_max_child_fund, early_game_race_margin, early_game_score_horizon,
+    EARLY_GAME_NODE_BUDGET, SHIP_SPEED_SATURATION,
 };
 use crate::apollo::engine::ArrivalEvent;
 use crate::apollo::helpers::dist;
@@ -286,6 +287,24 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
     // flight). Pending captures must not be re-targeted, but they can relay
     // chains once they land — their earliest launch is the turn after the
     // baseline first shows us owning them.
+    // Combat-reserve gate: a planet we own now is withheld from the opening's
+    // launch sources when it can reach an enemy within
+    // `early_game_combat_reserve_margin()` arrival turns, leaving those ships
+    // for the greedy combat planner rather than ferrying them backward to a
+    // safe neutral. Reads the plan-free `source_enemy_reach` built once per
+    // model. `<= 0` (or an absent reach map) reserves nothing — original
+    // behavior. Only owned-now sources are gated; pending/relay launch points
+    // (future captures) are about chaining, not present-turn combat contention.
+    let reserve_margin = early_game_combat_reserve_margin();
+    let combat_reserved = |id: i64| -> bool {
+        reserve_margin > 0
+            && model
+                .source_enemy_reach
+                .as_ref()
+                .and_then(|reach| reach.get(&id))
+                .is_some_and(|&arrival| arrival <= reserve_margin)
+    };
+
     let mut sources: Vec<(i64, i64)> = Vec::new(); // (id, earliest launch offset)
     let mut raw: Vec<RawCandidate> = Vec::new();
     for p in &world.planets {
@@ -293,7 +312,9 @@ fn run_search(world: &WorldState, model: &HellburnerModel) -> Option<Search> {
             continue;
         }
         if p.owner == player {
-            sources.push((p.id, 0));
+            if !combat_reserved(p.id) {
+                sources.push((p.id, 0));
+            }
             continue;
         }
         let pending_owned_at = world.timeline_cache.baseline(p.id).and_then(|b| {
