@@ -220,7 +220,6 @@ from pathlib import Path
 os.environ["CHAOS_IL_SKIP_TURNS"] = "12"
 os.environ["CHAOS_IL_MIN_PROB"] = "0"
 os.environ["CHAOS_IL_K"] = "4"
-os.environ["APHRODITE_JOINT_4P_ROOT_OPPONENTS"] = "1"
 os.environ["CHAOS_CANDIDATE_DECISIONS_PATH"] = "candidate_decisions.jsonl"
 Path(os.environ["CHAOS_CANDIDATE_DECISIONS_PATH"]).unlink(missing_ok=True)
 
@@ -229,7 +228,6 @@ t0 = time.perf_counter()
 import main
 print(f"[smoke] import+init: {(time.perf_counter()-t0)*1000:.0f}ms", file=sys.stderr)
 assert main._BUNDLE, "staged main.py did not detect the flat bundle layout"
-assert os.environ.get("APHRODITE_JOINT_4P_ROOT_OPPONENTS") == "1", "joint 4p root opponents disabled"
 from orbit_wars_engine import OrbitWarsEngine
 
 
