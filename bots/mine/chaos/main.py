@@ -112,6 +112,10 @@ _spec.loader.exec_module(_aph)
 
 warnings.filterwarnings("ignore", message="enable_nested_tensor is True.*")
 
+# Use Aphrodite's 4p root model that branches over a joint action list for all
+# live opponents instead of only the dominant enemy plus greedy minor replies.
+os.environ.setdefault("APHRODITE_JOINT_4P_ROOT_OPPONENTS", "1")
+
 # Set before importing torch. Environment overrides still win.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 _TORCH_THREADS = os.environ.get("CHAOS_TORCH_THREADS", "2")
