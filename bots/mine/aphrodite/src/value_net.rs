@@ -37,7 +37,7 @@ use crate::apollo::cache::EntityCache;
 use crate::apollo::world::ShotL1;
 use crate::pathing::predict_fleet_collision;
 use crate::{GameState, Planet};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::OnceLock;
 
 pub const MAX_OBJECTS: usize = 44;
@@ -106,7 +106,7 @@ fn pack_object(
 /// production on owned planets between arrival ticks, groups same-tick
 /// arrivals by owner before combat, and handles the tied-attacker rule.
 pub fn extrapolate_fleets(state: &GameState) -> HashMap<i64, (i32, i64)> {
-    let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::new();
+    let mut arrivals: HashMap<i64, Vec<(i64, i32, i64)>> = HashMap::default();
     for fleet in &state.fleets {
         if let Some((pid, dt)) = predict_fleet_collision(fleet, state) {
             arrivals
@@ -135,7 +135,7 @@ pub fn extrapolate_fleets(state: &GameState) -> HashMap<i64, (i32, i64)> {
             }
             // Aggregate same-tick arrivals by owner (matches engine
             // Combat step 1).
-            let mut by_owner: HashMap<i32, i64> = HashMap::new();
+            let mut by_owner: HashMap<i32, i64> = HashMap::default();
             while i < arrs.len() && arrs[i].0 == t {
                 *by_owner.entry(arrs[i].1).or_insert(0) += arrs[i].2;
                 i += 1;
@@ -452,7 +452,7 @@ pub mod summary_features_v2 {
             .collect();
 
         // In-flight fleet arrivals: dest planet id -> (owner, ships, eta).
-        let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::new();
+        let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::default();
         for f in &state.fleets {
             if let Some((pid, dt)) = predict_fleet_collision(f, state) {
                 arrivals
@@ -801,7 +801,7 @@ pub mod summary_features_v2 {
     fn extrap_player_block(
         state: &GameState,
         p: i32,
-        extrap: &std::collections::HashMap<i64, (i32, i64)>,
+        extrap: &HashMap<i64, (i32, i64)>,
         _cache: &EntityCache,
     ) -> [f32; 8] {
         let mut ships_on_planets = 0.0f32;
@@ -1307,7 +1307,7 @@ pub mod summary_features_v3 {
 
         // ── single-pass owner-bucketed pressure: pressure_from_owner[planet][owner]
         // (static pressure from each owner's planets + ETA-weighted inbound fleets).
-        let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::new();
+        let mut arrivals: HashMap<i64, Vec<(i32, i64, i64)>> = HashMap::default();
         for f in &state.fleets {
             if let Some((pid, dt)) = predict_fleet_collision(f, state) {
                 arrivals

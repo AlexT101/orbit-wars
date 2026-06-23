@@ -37,5 +37,13 @@ parking_lot = "0.12"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
+# The bot is a daemon with no `catch_unwind` and no worker threads (see
+# src/main.rs), so a panic already takes the whole process down; the Python
+# wrapper (main.py) recovers by returning a no-op move for that step and
+# respawning the daemon next step. Aborting instead of unwinding therefore does
+# not widen the failure (same per-step + restart blast radius); it just drops
+# the unwinding landing pads for a smaller/faster binary. Note: this forfeits
+# the option of ever catching a panic mid-process to keep serving turns.
+panic = "abort"

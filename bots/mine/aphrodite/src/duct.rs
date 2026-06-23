@@ -15,8 +15,8 @@
 
 use crate::sim::{alive_players, apply_launches, tick, Action};
 use crate::GameState;
+use rustc_hash::FxHashMap as HashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::sync::OnceLock;
@@ -857,7 +857,7 @@ fn remap_candidate_state(
         }
     }
 
-    let mut new_children = HashMap::new();
+    let mut new_children = HashMap::default();
     for ((old_my, old_opp), child) in old_children {
         let Some(Some(new_my)) = my_map.get(old_my) else {
             continue;
@@ -1121,8 +1121,14 @@ fn select_and_expand_forced_my(
     let opp_idx = select_opp(node);
     prof_add(&crate::profiling::SELECTION_NS, __sel_t0);
     prof_inc(&crate::profiling::SELECTION_CALLS);
-    let value: f64;
-    if !node.children.contains_key(&(my_idx, opp_idx)) {
+    // Single map probe: recurse into the existing joint child if present,
+    // otherwise expand a new one (the old code did `contains_key` followed by a
+    // separate `get_mut`/`insert` — two lookups on this hot path).
+    let key = (my_idx, opp_idx);
+    let value: f64 = if let Some(child) = node.children.get_mut(&key) {
+        // Recurse.
+        select_and_expand(child, me, false)
+    } else {
         let __tree_t0 = prof_start();
         let mut s = node.state.clone();
         prof_add(&crate::profiling::TREE_OPS_NS, __tree_t0);
@@ -1152,18 +1158,14 @@ fn select_and_expand_forced_my(
             opp_priors: Vec::new(),
             opp_stats: Vec::new(),
             other_launches: Vec::new(),
-            children: HashMap::new(),
+            children: HashMap::default(),
             candidates_initialized: false,
             candidates_root: false,
         };
-        node.children.insert((my_idx, opp_idx), Box::new(child));
+        node.children.insert(key, Box::new(child));
         prof_add(&crate::profiling::TREE_OPS_NS, __tree_t1);
-        value = rollout_value;
-    } else {
-        // Recurse.
-        let child = node.children.get_mut(&(my_idx, opp_idx)).unwrap();
-        value = select_and_expand(child, me, false);
-    }
+        rollout_value
+    };
     // Backprop: update both marginal stats + joint node.
     let __bp_t0 = prof_start();
     node.visits += 1;
@@ -1245,7 +1247,7 @@ fn state_hash(state: &GameState) -> u64 {
 /// this works for both 2p and 4p (it asks "does anyone dominate", not "is it
 /// 50/50"). Cheap O(planets+fleets) scan.
 fn max_player_ship_share(state: &GameState) -> f64 {
-    let mut by: HashMap<i32, i64> = HashMap::new();
+    let mut by: HashMap<i32, i64> = HashMap::default();
     let mut total = 0i64;
     for pl in &state.planets {
         if pl.owner >= 0 && pl.ships > 0 {
@@ -1415,14 +1417,21 @@ pub fn best_move(
     if !reuse_disabled {
         LAST_TREE.with(|cell| {
             let mut slot = cell.borrow_mut();
-            if let Some((expected_step, prev_root)) = slot.take() {
+            if let Some((expected_step, mut prev_root)) = slot.take() {
                 if expected_step == state.step {
-                    // Find joint child whose state matches.
-                    for (_key, child) in prev_root.children.iter() {
-                        if state_hash(&child.state) == target_hash {
-                            reused = Some(child.clone());
-                            break;
-                        }
+                    // Find the joint child whose state matches, then MOVE its
+                    // subtree out of the old tree rather than deep-cloning it:
+                    // `prev_root` is owned here and dropped at the end of this
+                    // block, so the matched child can be handed off directly. The
+                    // old code cloned the entire matched subtree (every Node, each
+                    // holding a full GameState) once per turn.
+                    let key = prev_root
+                        .children
+                        .iter()
+                        .find(|(_, child)| state_hash(&child.state) == target_hash)
+                        .map(|(k, _)| *k);
+                    if let Some(key) = key {
+                        reused = prev_root.children.remove(&key);
                     }
                 }
             }
@@ -1442,7 +1451,7 @@ pub fn best_move(
             opp_priors: Vec::new(),
             opp_stats: Vec::new(),
             other_launches: Vec::new(),
-            children: HashMap::new(),
+            children: HashMap::default(),
             candidates_initialized: false,
             candidates_root: false,
         },

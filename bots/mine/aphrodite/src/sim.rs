@@ -8,7 +8,7 @@
 
 use crate::pathing::{fleet_speed, point_to_segment_distance, swept_pair_hit};
 use crate::{Fleet, GameState, BOARD_SIZE, CENTER_X, CENTER_Y, SUN_RADIUS};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// (source_planet_id, angle, ships, owner).
 pub type Action = (i64, f64, i64, i32);
@@ -59,16 +59,21 @@ pub fn tick(state: &mut GameState) {
     }
 
     // 2. Pre-compute planet/comet motion segments for swept-pair collisions.
+    // `planet_paths[i]` is the (old, new) segment for `state.planets[i]`, or
+    // `None` for a planet that gets no entry (parity with the old id→segment map,
+    // where an absent key was skipped downstream). Indexed by position rather than
+    // id so steps 3/4 skip the per-planet hash lookup; `state.planets` is not
+    // resized until step 6, so these indices stay valid.
     let max_speed = state.max_speed;
-    let mut planet_paths: HashMap<i64, ((f64, f64), (f64, f64))> = HashMap::new();
+    let mut planet_paths: Vec<Option<((f64, f64), (f64, f64))>> = vec![None; state.planets.len()];
     // Static + orbiting planets (use planet_pos_at for dt=1, where dt=1 gives end-of-this-turn position)
-    for p in &state.planets {
+    for (i, p) in state.planets.iter().enumerate() {
         if p.is_comet {
             continue;
         }
         let old_pos = (p.x, p.y);
         let new_pos = state.planet_pos_at(p, 1).unwrap_or(old_pos);
-        planet_paths.insert(p.id, (old_pos, new_pos));
+        planet_paths[i] = Some((old_pos, new_pos));
     }
     // Comets: increment path_index and move
     let mut comet_expired: Vec<i64> = Vec::new();
@@ -76,23 +81,23 @@ pub fn tick(state: &mut GameState) {
         group.path_index += 1;
         let idx = group.path_index;
         for (i, pid) in group.planet_ids.iter().enumerate() {
-            let planet = match state.planets.iter().find(|p| p.id == *pid) {
-                Some(p) => p,
+            let p_idx = match state.planets.iter().position(|p| p.id == *pid) {
+                Some(j) => j,
                 None => continue,
             };
-            let old_pos = (planet.x, planet.y);
+            let old_pos = (state.planets[p_idx].x, state.planets[p_idx].y);
             if idx < 0 || idx as usize >= group.paths[i].len() {
                 comet_expired.push(*pid);
-                planet_paths.insert(*pid, (old_pos, old_pos));
+                planet_paths[p_idx] = Some((old_pos, old_pos));
             } else {
                 let np = group.paths[i][idx as usize];
-                planet_paths.insert(*pid, (old_pos, np));
+                planet_paths[p_idx] = Some((old_pos, np));
             }
         }
     }
 
     // 3. Fleet movement with swept-pair collision detection.
-    let mut combat: HashMap<i64, Vec<Fleet>> = HashMap::new();
+    let mut combat: HashMap<i64, Vec<Fleet>> = HashMap::default();
     let mut surviving_fleets: Vec<Fleet> = Vec::with_capacity(state.fleets.len());
     for fleet in state.fleets.drain(..) {
         let speed = fleet_speed(fleet.ships, max_speed);
@@ -103,8 +108,8 @@ pub fn tick(state: &mut GameState) {
         );
 
         let mut hit_pid: Option<i64> = None;
-        for planet in &state.planets {
-            if let Some(&(p_old, p_new)) = planet_paths.get(&planet.id) {
+        for (pi, planet) in state.planets.iter().enumerate() {
+            if let Some((p_old, p_new)) = planet_paths[pi] {
                 if p_old.0 < -50.0 && p_new.0 < -50.0 {
                     continue;
                 }
@@ -134,8 +139,8 @@ pub fn tick(state: &mut GameState) {
     state.fleets = surviving_fleets;
 
     // 4. Apply planet positions (move them to their new spots).
-    for p in state.planets.iter_mut() {
-        if let Some(&(_, new_pos)) = planet_paths.get(&p.id) {
+    for (pi, p) in state.planets.iter_mut().enumerate() {
+        if let Some((_, new_pos)) = planet_paths[pi] {
             p.x = new_pos.0;
             p.y = new_pos.1;
         }
@@ -147,7 +152,7 @@ pub fn tick(state: &mut GameState) {
             Some(p) => p,
             None => continue,
         };
-        let mut by_owner: HashMap<i32, i64> = HashMap::new();
+        let mut by_owner: HashMap<i32, i64> = HashMap::default();
         for f in &fleets {
             *by_owner.entry(f.owner).or_insert(0) += f.ships;
         }

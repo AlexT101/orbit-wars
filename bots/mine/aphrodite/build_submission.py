@@ -86,6 +86,13 @@ export CARGO_HOME=/io/.cargo-home
 export RUSTUP_HOME=/io/.rustup-home
 export CARGO_TARGET_DIR=/io/target-docker
 export PATH=$CARGO_HOME/bin:$PATH
+# Target the x86-64-v3 microarch level (AVX2/FMA/BMI2; Haswell 2013+ / Zen+),
+# which Kaggle's GCP workers support, to vectorize the float-heavy aim/pathing/
+# value-net math. Behavior-preserving (Rust keeps IEEE semantics; no implicit
+# FMA contraction). RISK: if a worker lacks AVX2 the binary dies with SIGILL on
+# the first such instruction — the bot then no-ops every turn and loses, visible
+# in the episode logs. Drop to "x86-64-v2" (SSE4.2; ~universal) if that happens.
+export RUSTFLAGS="-C target-cpu=x86-64-v3"
 if ! command -v cargo >/dev/null; then
     curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 fi
