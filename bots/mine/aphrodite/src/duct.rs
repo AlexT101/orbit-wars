@@ -38,7 +38,7 @@ const K_NON_ROOT_DEFAULT: usize = 4;
 /// search + leaf eval entirely and just play apollo's top-ranked plan
 /// (`my_candidates[0]`, what pure apollo would play). 0 disables this — normal
 /// search runs from step 0, i.e. previous behavior.
-const APOLLO_ONLY_FIRST_TURNS: i64 = 0;
+const APOLLO_ONLY_FIRST_TURNS: i64 = 10;
 /// Minimum root expansions to spend on each newly-added IL candidate, by IL
 /// rank. Change to e.g. `&[4, 2, 1]` to seed the third injected candidate too.
 const IL_FORCED_VISITS: &[u32] = &[4, 2, 2, 2, 2];

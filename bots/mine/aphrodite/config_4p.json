@@ -19,7 +19,7 @@
   "neutral_payback_penalty": 0.0,
   "lead_gate": 50.0,
   "neutral_capture_penalty": 0.0,
-  "early_game_end": 0,
+  "early_game_end": 12,
   "early_game_candidate_slack": 4,
   "early_game_race_margin": 3,
   "early_game_score_horizon": 26,

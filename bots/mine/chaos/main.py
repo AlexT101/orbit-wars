@@ -303,7 +303,7 @@ def _il_min_prob() -> float:
 
 
 def _il_skip_turns() -> int:
-    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "1")))
+    return max(0, int(os.environ.get("CHAOS_IL_SKIP_TURNS", "12")))
 
 
 def _il_lead_skip_step() -> int:

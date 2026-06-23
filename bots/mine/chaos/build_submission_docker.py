@@ -198,7 +198,7 @@ SMOKE_SCRIPT = r"""
 import json, os, sys, time
 from pathlib import Path
 
-os.environ["CHAOS_IL_SKIP_TURNS"] = "0"
+os.environ["CHAOS_IL_SKIP_TURNS"] = "12"
 os.environ["CHAOS_IL_MIN_PROB"] = "0"
 os.environ["CHAOS_IL_K"] = "4"
 os.environ["CHAOS_CANDIDATE_DECISIONS_PATH"] = "candidate_decisions.jsonl"
@@ -223,7 +223,7 @@ def _find_live_il_state():
     for seed in (123, 456, 789, 1, 2, 3, 4, 5, 10, 42):
         eng = OrbitWarsEngine(num_players=2)
         state = eng.reset(seed=seed)
-        for _ in range(10):
+        for _ in range(12):
             state = eng.step([[], []])
         for _ in range(20):
             obs = _obs0(state)
