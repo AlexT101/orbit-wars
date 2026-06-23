@@ -289,10 +289,21 @@ fn leaf_dump_cap() -> u64 {
     })
 }
 
+/// Whether the leaf dump is configured at all. Cached so the per-leaf
+/// [`maybe_dump_leaf`] hot path can early-out on a single predictable load
+/// instead of touching the `thread_local` `RefCell` on every leaf eval.
+fn leaf_dump_active() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("APHRODITE_DUMP_LEAVES_PATH").is_some())
+}
+
 /// Append one leaf's summary-v2 feature row to the leaf dump, if enabled. Called
-/// at every value-net leaf evaluation. Cheap no-op (one thread-local borrow) when
+/// at every value-net leaf evaluation. Cheap no-op (one cached bool load) when
 /// the dump is off.
 fn maybe_dump_leaf(state: &GameState, me: i32) {
+    if !leaf_dump_active() {
+        return;
+    }
     LEAF_DUMP.with(|cell| {
         let mut slot = cell.borrow_mut();
         let w = match slot.as_mut() {

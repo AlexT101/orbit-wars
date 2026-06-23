@@ -92,6 +92,9 @@ fn main() -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let debug = std::env::var("OW_DEBUG").is_ok();
+    // Process-lifetime flag (the env can't change between turns), so read it once
+    // here rather than re-querying the environment every turn inside the loop.
+    let prof_enabled = std::env::var("OW_PROFILE").is_ok();
     let budget_ms: u64 = std::env::var("APHRODITE_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -179,7 +182,6 @@ fn main() -> io::Result<()> {
                 let _ = f.write_all(v2_bytes);
             }
         }
-        let prof_enabled = std::env::var("OW_PROFILE").is_ok();
         if prof_enabled {
             profiling::reset();
         }
