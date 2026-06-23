@@ -423,7 +423,12 @@ pub mod summary_features_v2 {
     /// shot so faster large fleets are reflected.
     fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64) -> f32 {
         let mut best = 0.0f32;
-        for off in 0..=offset_lookahead() {
+        // Offsets past the decay horizon land with `rel_weight == 0` (an arriving
+        // fleet needs `off + travel` turns and `travel >= 0`, so `off > horizon`
+        // ⇒ weight 0), contributing nothing to the `max`. Capping the sweep there
+        // is bit-identical and skips the dead `resolve_shot` calls (a no-op when
+        // `offset_lookahead <= REL_HORIZON_DECAY`, as in 2p).
+        for off in 0..=offset_lookahead().min(REL_HORIZON_DECAY) {
             let ships = (src.ships + src.production * off).max(1);
             if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, None) {
                 let contrib = ships as f32 * rel_weight(off + r.1);
@@ -931,27 +936,33 @@ pub mod summary_features_v2 {
     /// layout, we just emit the per-player block for `me` and for
     /// `dominant_enemy(me)`.
     fn dominant_enemy(state: &GameState, me: i32) -> i32 {
+        // Per-owner ship totals (planets + in-flight) in a single pass, instead of
+        // re-summing one owner's whole fleet for every planet it owns. Behavior is
+        // identical: same totals, same first-seen-in-planet-order tie-break.
+        let mut totals: HashMap<i32, i64> = HashMap::default();
+        for q in &state.planets {
+            if q.owner >= 0 {
+                *totals.entry(q.owner).or_insert(0) += q.ships;
+            }
+        }
+        for f in &state.fleets {
+            if f.owner >= 0 {
+                *totals.entry(f.owner).or_insert(0) += f.ships;
+            }
+        }
         let mut best: Option<(i32, i64)> = None;
         for p in &state.planets {
             if p.owner == -1 || p.owner == me {
                 continue;
             }
-            let entry = best.get_or_insert((p.owner, 0));
-            // recount ships for this owner
-            let total: i64 = state
-                .planets
-                .iter()
-                .filter(|q| q.owner == p.owner)
-                .map(|q| q.ships)
-                .sum::<i64>()
-                + state
-                    .fleets
-                    .iter()
-                    .filter(|f| f.owner == p.owner)
-                    .map(|f| f.ships)
-                    .sum::<i64>();
-            if total > entry.1 || best.map(|b| b.0 == p.owner).unwrap_or(false) {
-                best = Some((p.owner, total));
+            let total = totals.get(&p.owner).copied().unwrap_or(0);
+            match best {
+                None => best = Some((p.owner, total)),
+                Some((bo, bt)) => {
+                    if total > bt || bo == p.owner {
+                        best = Some((p.owner, total));
+                    }
+                }
             }
         }
         best.map(|b| b.0).unwrap_or(if me == 0 { 1 } else { 0 })
@@ -1060,7 +1071,11 @@ pub mod summary_features_v3 {
     /// planet-pairs across many leaves at a turn); `None` falls back to L2/L3.
     fn pressure_from(cache: &EntityCache, src: &Planet, dst_id: i64, l1: Option<&ShotL1>) -> f32 {
         let mut best = 0.0f32;
-        for off in 0..=offset_lookahead() {
+        // Offsets past the decay horizon land with `rel_weight == 0` and cannot
+        // raise the `max`, so cap the sweep there — bit-identical, fewer
+        // `resolve_shot` calls. In 4p `offset_lookahead (23) > REL_HORIZON_DECAY
+        // (16)`, so this prunes the dead tail; harmless when it doesn't bind.
+        for off in 0..=offset_lookahead().min(REL_HORIZON_DECAY) {
             let ships = (src.ships + src.production * off).max(1);
             if let Some(r) = resolve_shot(cache, src.id, dst_id, ships, off, l1) {
                 let contrib = ships as f32 * rel_weight(off + r.1);

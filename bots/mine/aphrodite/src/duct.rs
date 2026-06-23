@@ -1030,25 +1030,25 @@ fn prof_reset() {
     PROF_EVAL_N.with(|c| c.set(0));
 }
 
-pub(crate) fn evaluate(state: &GameState, me: i32) -> f64 {
+pub(crate) fn evaluate(state: &GameState, me: i32, alive: usize) -> f64 {
     if prof_enabled() {
         let t = Instant::now();
-        let v = evaluate_inner(state, me);
+        let v = evaluate_inner(state, me, alive);
         let ns = t.elapsed().as_nanos() as u64;
         PROF_EVAL_NS.with(|c| c.set(c.get() + ns));
         PROF_EVAL_N.with(|c| c.set(c.get() + 1));
         return v;
     }
-    evaluate_inner(state, me)
+    evaluate_inner(state, me, alive)
 }
 
-fn evaluate_inner(state: &GameState, me: i32) -> f64 {
+fn evaluate_inner(state: &GameState, me: i32, alive: usize) -> f64 {
     // Score this leaf under the mode tuned for ITS alive count (not the root's),
     // matching how the value net's training rows were featurized — extract_v2/v3
     // call set_mode_for_alive per state. A 4p game collapsed to two survivors is
     // thus scored with the 2p config/features it was trained under. The same
-    // count selects the 2p value net below, so compute it once here.
-    let alive = alive_players(state);
+    // count selects the 2p value net below. `alive` is computed once by the caller
+    // (it also gates terminal_value), so it is threaded in rather than recomputed.
     crate::apollo::constants::set_mode_for_alive(alive);
     maybe_dump_leaf(state, me);
     let __vn_t0 = prof_start();
@@ -1066,6 +1066,10 @@ fn evaluate_inner(state: &GameState, me: i32) -> f64 {
 }
 
 fn terminal_value(state: &GameState, me: i32) -> Option<f64> {
+    terminal_value_with_alive(state, me, alive_players(state))
+}
+
+fn terminal_value_with_alive(state: &GameState, me: i32, alive: usize) -> Option<f64> {
     // Terminal conditions mirror the engine (rust_engine `step_with_actions`):
     // a position is terminal once one or zero players remain OR the step horizon
     // is reached. Players are scored by total ship count (planets + in-flight
@@ -1078,7 +1082,7 @@ fn terminal_value(state: &GameState, me: i32) -> Option<f64> {
     // below a clean win in the competition standings, so treating a guaranteed
     // tie as neutral keeps the search pressing for a sole lead rather than
     // settling. A board with no ships anywhere is a loss for all (best <= 0).
-    if alive_players(state) > 1 && state.step < TERMINAL_STEP {
+    if alive > 1 && state.step < TERMINAL_STEP {
         return None;
     }
 
@@ -1155,7 +1159,11 @@ fn select_and_expand_forced_my(
         tick(&mut s);
         prof_add(&crate::profiling::TICK_NS, __tick_t0);
         prof_inc(&crate::profiling::TICK_CALLS);
-        let rollout_value = terminal_value(&s, me).unwrap_or_else(|| evaluate(&s, me));
+        // `alive` gates both the terminal check and the leaf eval's 2p/4p mode;
+        // compute it once for this fresh leaf instead of in each.
+        let alive_s = alive_players(&s);
+        let rollout_value = terminal_value_with_alive(&s, me, alive_s)
+            .unwrap_or_else(|| evaluate(&s, me, alive_s));
         let __tree_t1 = prof_start();
         let child = Node {
             state: s,
