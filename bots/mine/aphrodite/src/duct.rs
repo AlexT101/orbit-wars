@@ -34,6 +34,17 @@ const EXPLORATION: f64 = 0.3;
 const TERMINAL_STEP: i64 = 499;
 const K_ROOT_DEFAULT: usize = 5;
 const K_NON_ROOT_DEFAULT: usize = 4;
+// ── 4p joint opponent model (see `joint_opponent_candidates`) ────────────────
+// An opponent holding this share or less of total ship strength is assumed to
+// reply greedily (folded into `other_launches`) rather than branched.
+const MINOR_OPP_SHIP_SHARE: f64 = 0.10;
+// Per-branched-opponent candidate counts: a lone significant opponent gets the
+// full set; two branched opponents get the top-3 each (3×3 = 9 joint combos).
+const JOINT_SOLO_CANDS: usize = 5;
+const JOINT_PAIR_CANDS: usize = 3;
+// Non-root nodes cap the joint opponent combination count (the 9 or 5 above are
+// truncated to this, keeping the most-likely combos by combined candidate rank).
+const JOINT_NONROOT_COMBO_CAP: usize = 4;
 /// Apollo-only opening: for the first `APOLLO_ONLY_FIRST_TURNS` steps, skip DUCT
 /// search + leaf eval entirely and just play apollo's top-ranked plan
 /// (`my_candidates[0]`, what pure apollo would play). 0 disables this — normal
@@ -106,18 +117,6 @@ fn fixed_iters_limit() -> Option<u32> {
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .filter(|&n| n > 0)
-    })
-}
-
-fn joint_4p_root_opponents_enabled() -> bool {
-    static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("APHRODITE_JOINT_4P_ROOT_OPPONENTS")
-            .map(|v| {
-                let v = v.trim();
-                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false)
     })
 }
 
@@ -633,133 +632,213 @@ fn opponent_players(state: &GameState, me: i32) -> Vec<i32> {
     (0..32).filter(|i| seen & (1 << i) != 0).collect()
 }
 
-fn minor_players(state: &GameState, me: i32, opp: i32) -> Vec<i32> {
-    opponent_players(state, me)
-        .into_iter()
-        .filter(|&p| p != opp)
-        .collect()
+/// Per-player total ship strength (garrisons + in-flight), and the grand total.
+fn ship_totals(state: &GameState) -> (HashMap<i32, i64>, i64) {
+    let mut by: HashMap<i32, i64> = HashMap::default();
+    let mut total = 0i64;
+    for p in &state.planets {
+        if p.owner >= 0 && p.ships > 0 {
+            *by.entry(p.owner).or_insert(0) += p.ships;
+            total += p.ships;
+        }
+    }
+    for f in &state.fleets {
+        if f.owner >= 0 && f.ships > 0 {
+            *by.entry(f.owner).or_insert(0) += f.ships;
+            total += f.ships;
+        }
+    }
+    (by, total)
 }
 
-fn subset_rank_count(label: &str) -> Option<usize> {
-    let rest = label.strip_prefix("apollo:subset:ranks=")?;
-    let ranks = rest.split(":ids=").next().unwrap_or(rest);
-    if ranks == "none" {
-        Some(0)
-    } else {
-        Some(ranks.split('+').filter(|s| !s.is_empty()).count())
+/// Ship-mass centroid angle (radians, about the board center) of a player's
+/// force. `None` when the player has no ships. Used to find the opponent that
+/// sits opposite us when three significant opponents remain.
+fn ship_centroid_angle(state: &GameState, player: i32) -> Option<f64> {
+    let mut sx = 0.0;
+    let mut sy = 0.0;
+    let mut w = 0i64;
+    for p in &state.planets {
+        if p.owner == player && p.ships > 0 {
+            sx += (p.x - crate::CENTER_X) * p.ships as f64;
+            sy += (p.y - crate::CENTER_Y) * p.ships as f64;
+            w += p.ships;
+        }
     }
+    for f in &state.fleets {
+        if f.owner == player && f.ships > 0 {
+            sx += (f.x - crate::CENTER_X) * f.ships as f64;
+            sy += (f.y - crate::CENTER_Y) * f.ships as f64;
+            w += f.ships;
+        }
+    }
+    if w <= 0 || (sx == 0.0 && sy == 0.0) {
+        return None;
+    }
+    Some(sy.atan2(sx))
 }
 
-fn push_unique_candidate(
-    out: &mut Vec<(String, Vec<Action>)>,
-    label: String,
-    actions: Vec<Action>,
-) {
-    if !out.iter().any(|(_, prev)| actions_equal(prev, &actions)) {
-        out.push((label, actions));
-    }
-}
-
-fn deterministic_idx(state: &GameState, player: i32, len: usize) -> usize {
-    if len <= 1 {
-        return 0;
-    }
-    let h = state_hash(state)
-        .wrapping_mul(0x9e3779b97f4a7c15)
-        .wrapping_add((player as u64).wrapping_mul(0xbf58476d1ce4e5b9))
-        .wrapping_add((state.step as u64).wrapping_mul(0x94d049bb133111eb));
-    (h as usize) % len
-}
-
-fn opponent_branch_choices(
-    state: &GameState,
-    player: i32,
-    rollout_internal: bool,
-    include_fallback_alongside_preferred: bool,
-) -> Vec<(String, Vec<Action>)> {
-    let mut labeled = with_cache_at(state.step, |cache| {
-        crate::apollo_bridge::apollo_candidates_labeled(state, player, cache, rollout_internal)
-    });
-    if labeled.is_empty() {
-        labeled.push(("apollo:fallback_noop".to_string(), Vec::new()));
-    }
-    let greedy = labeled[0].clone();
-
-    let mut preferred: Vec<(String, Vec<Action>)> = Vec::new();
-    let mut fallback: Vec<(String, Vec<Action>)> = Vec::new();
-    for (label, actions) in labeled.into_iter().skip(1) {
-        if actions_equal(&greedy.1, &actions) {
+/// Of `candidates`, the opponent whose ship-mass centroid sits most nearly
+/// opposite ours (≈180° around the board center), or `None` if angles are
+/// unavailable. In rotationally-symmetric 4p this is the player who spawned
+/// across the map from us; we drop them to a greedy reply and branch the two
+/// adjacent opponents instead.
+fn opposite_opponent(state: &GameState, me: i32, candidates: &[i32]) -> Option<i32> {
+    let my_angle = ship_centroid_angle(state, me)?;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let target = my_angle + std::f64::consts::PI;
+    let mut best: Option<(f64, i32)> = None;
+    for &p in candidates {
+        let Some(a) = ship_centroid_angle(state, p) else {
             continue;
-        }
-        match subset_rank_count(&label) {
-            Some(1 | 2) => push_unique_candidate(&mut preferred, label, actions),
-            Some(0) => push_unique_candidate(&mut fallback, label, actions),
-            _ => {}
-        }
-    }
-
-    let preferred_alt = if !preferred.is_empty() {
-        let idx = deterministic_idx(state, player, preferred.len());
-        Some(preferred.swap_remove(idx))
-    } else {
-        None
-    };
-    let fallback_alt = if !fallback.is_empty() {
-        let idx = deterministic_idx(state, player, fallback.len());
-        Some(fallback.swap_remove(idx))
-    } else {
-        None
-    };
-
-    let mut out = vec![(format!("p{}:{}", player, greedy.0), greedy.1)];
-    if let Some((label, actions)) = preferred_alt {
-        push_unique_candidate(&mut out, format!("p{}:{}", player, label), actions);
-    }
-    if include_fallback_alongside_preferred || out.len() == 1 {
-        if let Some((label, actions)) = fallback_alt {
-            push_unique_candidate(&mut out, format!("p{}:{}", player, label), actions);
+        };
+        let d = (a - target).rem_euclid(two_pi);
+        let d = d.min(two_pi - d);
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, p));
         }
     }
-    out
+    best.map(|(_, p)| p)
 }
 
+/// 4p joint opponent candidate set under the ship-share branching policy.
+///
+/// Opponents with `MINOR_OPP_SHIP_SHARE` or less of total ship strength are
+/// assumed to reply greedily, their launches folded into the returned
+/// `other_launches` (applied to every child). Among the remaining (significant)
+/// opponents:
+///   * 1  → that opponent contributes its top `JOINT_SOLO_CANDS` candidates.
+///   * 2  → top `JOINT_PAIR_CANDS` each, cartesian-producted (3×3 = 9).
+///   * ≥3 → branch the two whose ship-mass centroid is *not* opposite us; the
+///          opposite one is dropped to a greedy reply (3×3 = 9).
+///
+/// Each branched opponent's candidates are the top-N of its
+/// `apollo_candidates_labeled` list (greedy plan first, then the score-ranked
+/// disjoint subsets). The joint product is ordered by ascending combined
+/// candidate rank (most-likely combos first) and truncated to `max_combos`.
 fn joint_opponent_candidates(
     state: &GameState,
     me: i32,
     rollout_internal: bool,
-) -> (Vec<Vec<Action>>, Vec<String>) {
+    max_combos: usize,
+) -> (Vec<Vec<Action>>, Vec<String>, Vec<Action>) {
     let opponents = opponent_players(state, me);
     if opponents.is_empty() {
-        return (vec![Vec::new()], vec!["opp:noop".to_string()]);
+        return (vec![Vec::new()], vec!["opp:noop".to_string()], Vec::new());
     }
 
-    let mut joint: Vec<(String, Vec<Action>)> = vec![("".to_string(), Vec::new())];
-    let include_rank0_as_third_choice = opponents.len() == 2;
-    for player in opponents {
-        let choices = opponent_branch_choices(
-            state,
-            player,
-            rollout_internal,
-            include_rank0_as_third_choice,
+    let (by, total) = ship_totals(state);
+    let share = |p: i32| -> f64 {
+        if total > 0 {
+            by.get(&p).copied().unwrap_or(0) as f64 / total as f64
+        } else {
+            0.0
+        }
+    };
+
+    let significant: Vec<i32> = opponents
+        .iter()
+        .copied()
+        .filter(|&p| share(p) > MINOR_OPP_SHIP_SHARE)
+        .collect();
+    // Everyone not branched replies greedily.
+    let mut greedy_players: Vec<i32> = opponents
+        .iter()
+        .copied()
+        .filter(|&p| !significant.contains(&p))
+        .collect();
+
+    let (branched, per_opp_n): (Vec<i32>, usize) = match significant.len() {
+        0 => (Vec::new(), 0),
+        1 => (significant.clone(), JOINT_SOLO_CANDS),
+        2 => (significant.clone(), JOINT_PAIR_CANDS),
+        _ => {
+            let opposite = opposite_opponent(state, me, &significant);
+            let two: Vec<i32> = significant
+                .iter()
+                .copied()
+                .filter(|&p| Some(p) != opposite)
+                .take(2)
+                .collect();
+            for &p in &significant {
+                if !two.contains(&p) {
+                    greedy_players.push(p);
+                }
+            }
+            (two, JOINT_PAIR_CANDS)
+        }
+    };
+
+    // One cache pass for every generation below: greedy replies for the
+    // non-branched players, then the top-N candidate list per branched opponent.
+    let (other_launches, per_opp) = with_cache_at(state.step, |cache| {
+        let mut other: Vec<Action> = Vec::new();
+        for &p in &greedy_players {
+            other.extend(crate::apollo_bridge::apollo_greedy(state, p, cache));
+        }
+        let mut per: Vec<Vec<Vec<Action>>> = Vec::new();
+        for &p in &branched {
+            let mut labeled = crate::apollo_bridge::apollo_candidates_labeled(
+                state,
+                p,
+                cache,
+                rollout_internal,
+            );
+            if labeled.is_empty() {
+                labeled.push(("apollo:fallback_noop".to_string(), Vec::new()));
+            }
+            labeled.truncate(per_opp_n.max(1));
+            per.push(labeled.into_iter().map(|(_, a)| a).collect());
+        }
+        (other, per)
+    });
+
+    if branched.is_empty() {
+        return (
+            vec![Vec::new()],
+            vec!["opp:all_greedy".to_string()],
+            other_launches,
         );
-        let mut next: Vec<(String, Vec<Action>)> = Vec::new();
-        for (prefix, base_actions) in &joint {
-            for (label, actions) in &choices {
-                let mut combined = base_actions.clone();
+    }
+
+    // Cartesian product, tracking each combo's summed candidate rank (lower =
+    // more likely) and a descriptive label.
+    let mut combos: Vec<(usize, String, Vec<Action>)> = vec![(0, String::new(), Vec::new())];
+    for (oi, list) in per_opp.iter().enumerate() {
+        let pid = branched[oi];
+        let mut next: Vec<(usize, String, Vec<Action>)> =
+            Vec::with_capacity(combos.len() * list.len().max(1));
+        for (rank_sum, label, base) in &combos {
+            for (cand_rank, actions) in list.iter().enumerate() {
+                let mut combined = base.clone();
                 combined.extend(actions.iter().copied());
-                let combined_label = if prefix.is_empty() {
-                    label.clone()
+                let lbl = if label.is_empty() {
+                    format!("p{}#{}", pid, cand_rank)
                 } else {
-                    format!("{}|{}", prefix, label)
+                    format!("{}|p{}#{}", label, pid, cand_rank)
                 };
-                push_unique_candidate(&mut next, combined_label, combined);
+                next.push((rank_sum + cand_rank, lbl, combined));
             }
         }
-        joint = next;
+        combos = next;
     }
 
-    let (labels, actions): (Vec<_>, Vec<_>) = joint.into_iter().unzip();
-    (actions, labels)
+    // Most-likely combos first (stable on insertion order for equal ranks),
+    // deduped by action set, then capped to `max_combos`.
+    combos.sort_by_key(|(r, _, _)| *r);
+    let mut opp_candidates: Vec<Vec<Action>> = Vec::new();
+    let mut opp_labels: Vec<String> = Vec::new();
+    for (_, label, actions) in combos {
+        if opp_candidates.iter().any(|prev| actions_equal(prev, &actions)) {
+            continue;
+        }
+        opp_candidates.push(actions);
+        opp_labels.push(format!("opp:{}", label));
+        if opp_candidates.len() >= max_combos {
+            break;
+        }
+    }
+    (opp_candidates, opp_labels, other_launches)
 }
 
 pub(crate) fn dominant_enemy(state: &GameState, me: i32) -> Option<i32> {
@@ -915,40 +994,39 @@ fn ensure_candidates(node: &mut Node, me: i32, root: bool) {
     // Only the genuine root expansion runs apollo's early-game opening DFS;
     // every non-root node suppresses it (rollout_internal), mirroring apollo's
     // in-rollout reply policy.
-    let joint_4p_root = alive >= 3 && root && joint_4p_root_opponents_enabled();
-    let (my_alts, my_labels, opp_alts, opp_labels) = if joint_4p_root {
-        let (my_alts, my_labels) = enumerate_player_labeled(&node.state, me, k, false);
-        let (opp_alts, opp_labels) = joint_opponent_candidates(&node.state, me, true);
-        (my_alts, my_labels, opp_alts, opp_labels)
+    //
+    // 4p (alive ≥ 3): joint opponent model under the ship-share branching policy
+    // at *every* node — significant opponents are branched (their joint action
+    // sets become `opp_candidates`), minor/opposite opponents fold into
+    // `other_launches`. Non-root 4p caps the joint combination count. 2p keeps
+    // the cheap dominant-enemy pair model.
+    let joint_4p = alive >= 3;
+    let (my_alts, my_labels, opp_alts, opp_labels, other_launches) = if joint_4p {
+        // My side runs the opening DFS only at the genuine root (rollout_internal
+        // = !root); the branched opponents always suppress it (true).
+        let (my_alts, my_labels) = enumerate_player_labeled(&node.state, me, k, !root);
+        let max_combos = if root {
+            usize::MAX
+        } else {
+            JOINT_NONROOT_COMBO_CAP
+        };
+        let (opp_alts, opp_labels, other) =
+            joint_opponent_candidates(&node.state, me, true, max_combos);
+        (my_alts, my_labels, opp_alts, opp_labels, other)
     } else if root {
-        enumerate_pair_labeled(&node.state, me, opp, k, !root)
+        let (m, ml, o, ol) = enumerate_pair_labeled(&node.state, me, opp, k, !root);
+        (m, ml, o, ol, Vec::new())
     } else {
-        let (my_alts, opp_alts) = enumerate_pair(&node.state, me, opp, k, !root);
-        let my_labels = (0..my_alts.len())
+        let (m, o) = enumerate_pair(&node.state, me, opp, k, !root);
+        let ml = (0..m.len())
             .map(|i| format!("apollo:nonroot:{}", i))
             .collect();
-        let opp_labels = (0..opp_alts.len())
+        let ol = (0..o.len())
             .map(|i| format!("apollo:nonroot:{}", i))
             .collect();
-        (my_alts, my_labels, opp_alts, opp_labels)
+        (m, ml, o, ol, Vec::new())
     };
-    // When enabled, the real 4p root uses a joint action list over all opponents.
-    // Default/off keeps the old cheaper model everywhere: branch the dominant
-    // enemy and fix minor players to greedy replies.
-    node.other_launches = if joint_4p_root {
-        Vec::new()
-    } else {
-        let others = minor_players(&node.state, me, opp);
-        let mut launches: Vec<Action> = Vec::new();
-        if !others.is_empty() {
-            with_cache_at(node.state.step, |cache| {
-                for p in others {
-                    launches.extend(crate::apollo_bridge::apollo_greedy(&node.state, p, cache));
-                }
-            });
-        }
-        launches
-    };
+    node.other_launches = other_launches;
     let my_n = my_alts.len();
     let opp_n = opp_alts.len();
     node.my_priors = (0..my_n).map(|i| rank_prior(i, my_n)).collect();

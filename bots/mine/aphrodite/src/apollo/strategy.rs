@@ -2343,9 +2343,9 @@ pub fn search_candidates_subsets_labeled(world: &WorldState) -> Vec<(String, Vec
             continue;
         }
 
-        // Label keeps the `ranks=`/`:ids=` shape the 4p opponent-branch splitter
-        // (`duct::subset_rank_count`) parses: rank count 1|2 ⇒ preferred alt,
-        // 0 (the empty subset) ⇒ rank-0 fallback.
+        // Descriptive label: `ranks=` are the 1-based pool positions of the
+        // subset's targets (`none` for the reinforcement-only empty subset),
+        // `ids=` their planet ids. Used for telemetry/debugging only.
         let members: Vec<usize> = (0..n).filter(|&i| mask & (1u32 << i) != 0).collect();
         let ranks = if members.is_empty() {
             "none".to_string()
