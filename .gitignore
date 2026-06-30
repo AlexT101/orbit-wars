@@ -208,6 +208,14 @@ wandb/
 *.pt
 !bots/mine/triplepoint1/osteo_il_latest.pt
 !experimental_arch/imitation_learning/checkpoints/isaiah_tufa_labs_4p_launches/best.pt
+# Final IL checkpoints needed to run/reproduce chaos & 4p IL bots (osteo_il_4p_latest
+# is loaded by chaos at runtime). Intermediate step_/epoch_ snapshots stay ignored.
+!experimental_arch/imitation_learning/checkpoints/osteo_il_4p_latest.pt
+!experimental_arch/imitation_learning/checkpoints/isaiah_tufa_labs_4p_launches/latest.pt
+!experimental_arch/imitation_learning/checkpoints/osteo_daily_top20_4p_last_third_20260618/best.pt
+!experimental_arch/imitation_learning/checkpoints/osteo_daily_top20_4p_last_third_20260618/latest.pt
+!experimental_arch/imitation_learning/checkpoints/osteo_daily_top20_4p_last_third_factored_20260618/best.pt
+!experimental_arch/imitation_learning/checkpoints/osteo_daily_top20_4p_last_third_factored_20260618/latest.pt
 
 # Training NPZ datasets — too big to track in git, rebuildable via
 # bots/mine/alphaow/train/build_from_zip.py + extras_v{3,4}_build.py.
