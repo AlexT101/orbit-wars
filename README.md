@@ -1,6 +1,8 @@
 # Overview
 
-Our codebase for the [Orbit Wars Kaggle competition](https://www.kaggle.com/competitions/orbit-wars).
+Competed in [Kaggle's Orbit Wars competition](https://www.kaggle.com/competitions/orbit-wars), placing 74th out of 4,729 teams (10,196 entrants) and earning a competition silver medal.
+
+Our final submission can be found at `bots/mine/chaos`.
 
 ## Development
 
@@ -31,7 +33,7 @@ You can run a single match using:
 python run_match.py starter starter
 ```
 
-Add the `--kaggle` flag to use the Kaggle engine instead of the ported Rust engine. Seed is random by default unless you add a flag like `--seed 42`.
+Add the `--kaggle` flag to use the Kaggle engine instead of the ported Rust engine. Seed is random by default unless you add a flag like `--seed 42`. You can also use the `run_batched.py` or `run_batched_4p.py` scripts to run many matches in parallel.
 
 You can run the local visualizer using:
 
