@@ -1,6 +1,6 @@
 # Overview
 
-Competed in [Kaggle's Orbit Wars competition](https://www.kaggle.com/competitions/orbit-wars), placing 74th out of 4,729 teams (10,196 entrants) and earning a competition silver medal.
+Competed in [Kaggle's Orbit Wars competition](https://www.kaggle.com/competitions/orbit-wars) as team "pantheon of ducks", placing 74th out of 4,729 teams (10,196 entrants) and earning a competition silver medal.
 
 Our final submission can be found at `bots/mine/chaos`.
 
